@@ -8,7 +8,6 @@
   :version "0.1.0"
   :depends-on ("alexandria"
                "bordeaux-threads"
-               "cl-ppcre"
                "log4cl"
                "hunchentoot"
                "dexador"

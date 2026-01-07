@@ -4,7 +4,6 @@
 
 (defpackage #:mcp-lisp/src/primitives/resources/registry
   (:use #:cl)
-  (:import-from #:cl-ppcre)
   (:export #:resource-entry
            #:resource-entry-uri
            #:resource-entry-name
@@ -101,40 +100,50 @@
   "Get a static resource entry by URI."
   (gethash uri (resource-registry-resources registry)))
 
-(defun uri-template-to-regex (template)
-  "Convert a URI template like 'file:///{path}' to a regex pattern.
-Returns (values regex-string param-names)."
-  (let ((params nil)
-        (regex-parts nil)
+(defun parse-uri-template (template)
+  "Parse a URI template into literal segments and parameter names.
+Returns (values literals params) where literals has one more element than params."
+  (let ((literals nil)
+        (params nil)
+        (current-start 0)
         (i 0)
         (len (length template)))
     (loop while (< i len) do
-      (let ((char (char template i)))
-        (cond
-          ((char= char #\{)
-           (let ((end (position #\} template :start i)))
-             (when end
-               (push (subseq template (1+ i) end) params)
-               (push "([^/]+)" regex-parts)
-               (setf i (1+ end)))))
-          ((find char ".*+?^$[]()\\|")
-           (push (format nil "\\~c" char) regex-parts)
-           (incf i))
-          (t
-           (push (string char) regex-parts)
-           (incf i)))))
-    (values (format nil "^~{~a~}$" (nreverse regex-parts))
-            (nreverse params))))
+      (if (char= (char template i) #\{)
+          (let ((end (position #\} template :start i)))
+            (when end
+              (push (subseq template current-start i) literals)
+              (push (subseq template (1+ i) end) params)
+              (setf current-start (1+ end))
+              (setf i (1+ end))))
+          (incf i)))
+    (push (subseq template current-start) literals)
+    (values (nreverse literals) (nreverse params))))
 
 (defun match-uri-template (template uri)
   "Match URI against a template. Returns alist of (param . value) or NIL."
-  (multiple-value-bind (regex params) (uri-template-to-regex template)
-    (let ((scanner (ppcre:create-scanner regex)))
-      (multiple-value-bind (match groups) (ppcre:scan-to-strings scanner uri)
-        (when match
-          (loop for param in params
-                for value across groups
-                collect (cons param value)))))))
+  (multiple-value-bind (literals params) (parse-uri-template template)
+    (let ((pos 0)
+          (values nil))
+      (loop for i from 0 below (length params)
+            for literal = (nth i literals)
+            for next-literal = (nth (1+ i) literals)
+            do (unless (and (>= (length uri) (+ pos (length literal)))
+                            (string= literal (subseq uri pos (+ pos (length literal)))))
+                 (return-from match-uri-template nil))
+               (incf pos (length literal))
+               (let ((end-pos (if (string= next-literal "")
+                                  (length uri)
+                                  (search next-literal uri :start2 pos))))
+                 (unless end-pos
+                   (return-from match-uri-template nil))
+                 (push (cons (nth i params) (subseq uri pos end-pos)) values)
+                 (setf pos end-pos)))
+      (let ((final-literal (car (last literals))))
+        (unless (and (= pos (- (length uri) (length final-literal)))
+                     (string= final-literal (subseq uri pos)))
+          (return-from match-uri-template nil)))
+      (nreverse values))))
 
 (defun find-matching-template (uri &optional (registry *global-resource-registry*))
   "Find a template that matches the given URI.
