@@ -1,0 +1,14 @@
+*.fasl
+*.lx64fsl
+*.dx64fsl
+*.x86f
+*.dfsl
+*.pfsl
+*.d64fsl
+*.p64fsl
+*.lisp~
+*.lisp#
+*~
+\#*\#
+.DS_Store
+.claude/
