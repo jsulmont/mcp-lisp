@@ -4,7 +4,6 @@
 
 (defpackage #:mcp-lisp/src/server/sampling
   (:use #:cl)
-  (:import-from #:jsonrpc)
   (:import-from #:mcp-lisp/src/json
                 #:make-ht)
   (:import-from #:mcp-lisp/src/content
@@ -39,11 +38,11 @@ COST-PRIORITY, SPEED-PRIORITY, INTELLIGENCE-PRIORITY are 0-1 floats."
       (setf (gethash "intelligencePriority" prefs) intelligence-priority))
     prefs))
 
-(defun create-message (jsonrpc-server messages &key system-prompt max-tokens
-                                                    model-preferences include-context
-                                                    stop-sequences temperature)
+(defun create-message (call-fn messages &key system-prompt max-tokens
+                                              model-preferences include-context
+                                              stop-sequences temperature)
   "Request an LLM completion from the client.
-JSONRPC-SERVER is the jsonrpc server instance.
+CALL-FN is a function that accepts (method params) and returns the result.
 MESSAGES is a list of message hash-tables (use make-sampling-message).
 Returns the completion result or signals an error.
 
@@ -54,8 +53,8 @@ Optional parameters:
   INCLUDE-CONTEXT - Context inclusion setting (\"none\", \"thisServer\", \"allServers\")
   STOP-SEQUENCES - List of stop sequences
   TEMPERATURE - Sampling temperature (0-1)"
-  (unless jsonrpc-server
-    (error "No jsonrpc server available for sampling"))
+  (unless call-fn
+    (error "No call function available for sampling"))
   (let ((params (make-ht "messages" (coerce messages 'vector))))
     (when system-prompt
       (setf (gethash "systemPrompt" params) system-prompt))
@@ -69,4 +68,4 @@ Optional parameters:
       (setf (gethash "stopSequences" params) (coerce stop-sequences 'vector)))
     (when temperature
       (setf (gethash "temperature" params) temperature))
-    (jsonrpc:call jsonrpc-server "sampling/createMessage" params)))
+    (funcall call-fn "sampling/createMessage" params)))

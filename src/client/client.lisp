@@ -1,16 +1,23 @@
 ;;;; src/client/client.lisp
 ;;;;
-;;;; MCP Client class using jsonrpc library.
+;;;; MCP Client class using newline-delimited JSON transport.
 
 (defpackage #:mcp-lisp/src/client/client
   (:use #:cl)
-  (:import-from #:jsonrpc)
   (:import-from #:mcp-lisp/src/core
                 #:+protocol-version+)
   (:import-from #:mcp-lisp/src/json
                 #:make-ht)
   (:import-from #:mcp-lisp/src/conditions
                 #:mcp-error)
+  (:import-from #:mcp-lisp/src/transport/mcp-client
+                #:mcp-transport
+                #:make-transport
+                #:transport-start
+                #:transport-stop
+                #:transport-call
+                #:transport-notify
+                #:transport-running-p)
   (:export #:mcp-client
            #:make-client
            #:client-name
@@ -42,9 +49,9 @@
    (process :initform nil
             :accessor client-process
             :documentation "The subprocess.")
-   (jsonrpc-client :initform nil
-                   :accessor client-jsonrpc
-                   :documentation "The jsonrpc client instance.")
+   (transport :initform nil
+              :accessor client-transport
+              :documentation "The MCP transport instance.")
    (server-info :initform nil
                 :accessor client-server-info)
    (server-capabilities :initform nil
@@ -81,28 +88,30 @@
 (defun client-connected-p (client)
   "Return T if client is connected."
   (and (client-process client)
-       (uiop:process-alive-p (client-process client))))
+       (uiop:process-alive-p (client-process client))
+       (client-transport client)
+       (transport-running-p (client-transport client))))
 
 (defmethod client-connect ((client mcp-client))
-  "Spawn subprocess and connect jsonrpc client."
+  "Spawn subprocess and connect via MCP transport."
   (let* ((command (client-command client))
          (process (uiop:launch-program command
                                        :input :stream
                                        :output :stream
                                        :error-output :stream)))
     (setf (client-process client) process)
-    (setf (client-jsonrpc client) (jsonrpc:make-client))
-    (jsonrpc:client-connect (client-jsonrpc client)
-                            :mode :stdio
-                            :input (uiop:process-info-output process)
-                            :output (uiop:process-info-input process)))
+    (let ((transport (make-transport
+                      (uiop:process-info-output process)
+                      (uiop:process-info-input process))))
+      (setf (client-transport client) transport)
+      (transport-start transport)))
   client)
 
 (defmethod client-disconnect ((client mcp-client))
   "Disconnect and terminate subprocess."
-  (when (client-jsonrpc client)
-    (ignore-errors (jsonrpc:client-disconnect (client-jsonrpc client)))
-    (setf (client-jsonrpc client) nil))
+  (when (client-transport client)
+    (ignore-errors (transport-stop (client-transport client)))
+    (setf (client-transport client) nil))
   (when (client-process client)
     (ignore-errors (uiop:terminate-process (client-process client)))
     (ignore-errors (uiop:wait-process (client-process client)))
@@ -110,18 +119,17 @@
   (setf (client-initialized-p client) nil)
   client)
 
-(defmethod client-call ((client mcp-client) method params &key timeout)
+(defmethod client-call ((client mcp-client) method params &key (timeout 30))
   "Make a JSON-RPC call."
   (unless (client-connected-p client)
     (error 'mcp-error :message "Client not connected"))
-  (apply #'jsonrpc:call (client-jsonrpc client) method params
-         (when timeout (list :timeout timeout))))
+  (transport-call (client-transport client) method params :timeout timeout))
 
 (defmethod client-notify ((client mcp-client) method &optional params)
   "Send a notification."
   (unless (client-connected-p client)
     (error 'mcp-error :message "Client not connected"))
-  (jsonrpc:notify (client-jsonrpc client) method params))
+  (transport-notify (client-transport client) method params))
 
 (defmethod client-initialize ((client mcp-client))
   "Perform MCP initialize handshake."

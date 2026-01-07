@@ -7,7 +7,6 @@
   :license "MIT"
   :version "0.1.0"
   :depends-on ("alexandria"
-               "jsonrpc"
                "bordeaux-threads"
                "cl-ppcre"
                "log4cl"

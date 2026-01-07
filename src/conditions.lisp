@@ -8,6 +8,9 @@
            #:mcp-error-message
            #:protocol-error
            #:protocol-error-code
+           #:invalid-params-error
+           #:method-not-found-error
+           #:internal-error
            #:tool-error
            #:tool-error-tool-name
            #:transport-error
@@ -33,6 +36,18 @@
                      (protocol-error-code c)
                      (mcp-error-message c))))
   (:documentation "JSON-RPC protocol level error."))
+
+(define-condition invalid-params-error (protocol-error)
+  ((code :initform -32602))
+  (:documentation "Invalid method parameters."))
+
+(define-condition method-not-found-error (protocol-error)
+  ((code :initform -32601))
+  (:documentation "Method not found."))
+
+(define-condition internal-error (protocol-error)
+  ((code :initform -32603))
+  (:documentation "Internal JSON-RPC error."))
 
 (define-condition tool-error (mcp-error)
   ((tool-name :initarg :tool-name

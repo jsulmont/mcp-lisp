@@ -8,6 +8,10 @@
                 #:encode-json
                 #:decode-json
                 #:make-ht)
+  (:import-from #:mcp-lisp/src/conditions
+                #:protocol-error
+                #:protocol-error-code
+                #:mcp-error-message)
   (:export #:run-mcp-server
            #:mcp-server-loop
            #:setup-file-logging))
@@ -70,6 +74,12 @@ Each handler receives (params) and should return the result or signal an error."
                (let ((result (funcall handler params)))
                  (log:debug "Response: id=~a success" id)
                  (write-json-line (make-response id result) output))
+             (protocol-error (e)
+               (log:error "Protocol error: ~a" e)
+               (write-json-line (make-error-response id
+                                                     (protocol-error-code e)
+                                                     (mcp-error-message e))
+                                output))
              (error (e)
                (log:error "Handler error: ~a" e)
                (write-json-line (make-error-response id -32603 (princ-to-string e)) output))))

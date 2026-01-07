@@ -95,21 +95,11 @@
                 #:notify-tools-list-changed
                 #:notify-prompts-list-changed
                 #:notify-resources-list-changed
-                #:notify-resource-updated
-                #:send-notification)
+                #:notify-resource-updated)
   ;; Re-export from logging
   (:import-from #:mcp-lisp/src/server/logging
                 #:*log-level*
-                #:set-log-level
-                #:log-message
-                #:log-debug
-                #:log-info
-                #:log-notice
-                #:log-warning
-                #:log-error
-                #:log-critical
-                #:log-alert
-                #:log-emergency)
+                #:set-log-level)
   ;; Re-export from progress
   (:import-from #:mcp-lisp/src/server/progress
                 #:send-progress
@@ -233,19 +223,9 @@
            #:notify-prompts-list-changed
            #:notify-resources-list-changed
            #:notify-resource-updated
-           #:send-notification
            ;; Logging
            #:*log-level*
            #:set-log-level
-           #:log-message
-           #:log-debug
-           #:log-info
-           #:log-notice
-           #:log-warning
-           #:log-error
-           #:log-critical
-           #:log-alert
-           #:log-emergency
            ;; Progress
            #:send-progress
            #:with-progress
