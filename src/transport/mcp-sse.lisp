@@ -54,8 +54,10 @@
           (loop for client in *sse-clients*
                 when (open-stream-p client)
                 collect client
-                and do (ignore-errors
-                         (send-sse-event client data event-type))))))
+                and do (handler-case
+                           (send-sse-event client data event-type)
+                         (error (e)
+                           (log:warn "SSE broadcast error: ~a" e)))))))
 
 (defun handle-json-rpc-request (request-json)
   "Process a JSON-RPC request and return response JSON."
@@ -71,7 +73,9 @@
           ((null id)
            (log:debug "Notification: ~a" method)
            (when handler
-             (ignore-errors (funcall handler params)))
+             (handler-case (funcall handler params)
+               (error (e)
+                 (log:error "Notification handler error (~a): ~a" method e))))
            nil)
           ;; Request with handler
           (handler
@@ -116,9 +120,13 @@
         (return))
       (sleep 30)
       ;; Send keepalive comment
-      (ignore-errors
-        (write-utf8 (format nil ": keepalive~%~%") stream)
-        (force-output stream)))))
+      (handler-case
+          (progn
+            (write-utf8 (format nil ": keepalive~%~%") stream)
+            (force-output stream))
+        (error (e)
+          (log:debug "Keepalive error: ~a" e)
+          (return))))))
 
 (defun message-handler ()
   "Handle POST /message - receive JSON-RPC requests."

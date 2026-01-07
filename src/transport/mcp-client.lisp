@@ -83,7 +83,7 @@
                          (resolve-pending transport id error-obj t)
                          (resolve-pending transport id result nil)))))
              (error (e)
-               (declare (ignore e))
+               (log:debug "Reader loop error: ~a" e)
                (setf (transport-running-p transport) nil)
                (return)))))
 
@@ -105,8 +105,8 @@
   "Stop the transport and clean up."
   (setf (transport-running-p transport) nil)
   (when (transport-reader-thread transport)
-    (ignore-errors
-      (bt:destroy-thread (transport-reader-thread transport)))
+    (handler-case (bt:destroy-thread (transport-reader-thread transport))
+      (error (e) (log:debug "Thread destroy error: ~a" e)))
     (setf (transport-reader-thread transport) nil))
   (bt:with-lock-held ((transport-pending-lock transport))
     (clrhash (transport-pending transport)))

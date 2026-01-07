@@ -110,11 +110,14 @@
 (defmethod client-disconnect ((client mcp-client))
   "Disconnect and terminate subprocess."
   (when (client-transport client)
-    (ignore-errors (transport-stop (client-transport client)))
+    (handler-case (transport-stop (client-transport client))
+      (error (e) (log:debug "Transport stop error: ~a" e)))
     (setf (client-transport client) nil))
   (when (client-process client)
-    (ignore-errors (uiop:terminate-process (client-process client)))
-    (ignore-errors (uiop:wait-process (client-process client)))
+    (handler-case (uiop:terminate-process (client-process client))
+      (error (e) (log:debug "Process terminate error: ~a" e)))
+    (handler-case (uiop:wait-process (client-process client))
+      (error (e) (log:debug "Process wait error: ~a" e)))
     (setf (client-process client) nil))
   (setf (client-initialized-p client) nil)
   client)
@@ -148,7 +151,8 @@
 (defmethod client-shutdown ((client mcp-client))
   "Gracefully shutdown."
   (when (client-initialized-p client)
-    (ignore-errors (client-notify client "notifications/cancelled")))
+    (handler-case (client-notify client "notifications/cancelled")
+      (error (e) (log:debug "Shutdown notify error: ~a" e))))
   (client-disconnect client))
 
 (defmacro with-client ((var command &rest args) &body body)

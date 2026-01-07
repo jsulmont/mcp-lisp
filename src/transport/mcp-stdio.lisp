@@ -67,7 +67,9 @@ Each handler receives (params) and should return the result or signal an error."
           ((null id)
            (log:debug "Notification: ~a" method)
            (when handler
-             (ignore-errors (funcall handler params))))
+             (handler-case (funcall handler params)
+               (error (e)
+                 (log:error "Notification handler error (~a): ~a" method e)))))
           ;; Request with handler
           (handler
            (handler-case
