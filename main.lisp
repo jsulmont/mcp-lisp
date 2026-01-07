@@ -4,6 +4,7 @@
 
 (defpackage #:mcp-lisp/main
   (:use #:cl)
+  (:nicknames #:mcp-lisp)
   ;; Re-export from core
   (:import-from #:mcp-lisp/src/core
                 #:+protocol-version+

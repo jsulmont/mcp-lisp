@@ -16,14 +16,15 @@
   "Convert a Lisp type specifier to JSON Schema type string."
   (etypecase type
     (symbol
-     (case type
-       (string "string")
-       (integer "integer")
-       (number "number")
-       (boolean "boolean")
-       ((array list) "array")
-       ((object hash-table) "object")
-       (t "string")))))
+     (let ((name (symbol-name type)))
+       (cond
+         ((string-equal name "STRING") "string")
+         ((string-equal name "INTEGER") "integer")
+         ((string-equal name "NUMBER") "number")
+         ((string-equal name "BOOLEAN") "boolean")
+         ((or (string-equal name "ARRAY") (string-equal name "LIST")) "array")
+         ((or (string-equal name "OBJECT") (string-equal name "HASH-TABLE")) "object")
+         (t "string"))))))
 
 (defun make-property-schema (type &key description enum)
   "Create a JSON Schema property definition."

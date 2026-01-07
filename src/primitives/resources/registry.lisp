@@ -4,7 +4,8 @@
 
 (defpackage #:mcp-lisp/src/primitives/resources/registry
   (:use #:cl)
-  (:export #:resource-entry
+  (:export #:make-resource-registry
+           #:resource-entry
            #:resource-entry-uri
            #:resource-entry-name
            #:resource-entry-description

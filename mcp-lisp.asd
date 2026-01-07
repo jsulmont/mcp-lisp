@@ -14,3 +14,21 @@
                "com.inuoe.jzon"
                "mcp-lisp/main")
   :in-order-to ((test-op (test-op "mcp-lisp/tests"))))
+
+(asdf:defsystem "mcp-lisp/tests"
+  :description "Tests for mcp-lisp"
+  :depends-on ("mcp-lisp" "fiveam")
+  :pathname "tests/"
+  :serial t
+  :components ((:file "package")
+               (:file "json-tests")
+               (:file "content-tests")
+               (:file "conditions-tests")
+               (:file "registry-tests")
+               (:file "uri-template-tests")
+               (:file "schema-tests")
+               (:file "dispatcher-tests"))
+  :perform (test-op (o c)
+                    (symbol-call :fiveam :run!
+                                 (find-symbol "MCP-LISP-TESTS"
+                                              :mcp-lisp/tests))))
