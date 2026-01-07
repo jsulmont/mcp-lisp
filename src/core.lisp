@@ -6,7 +6,8 @@
   (:use #:cl)
   (:export #:+protocol-version+
            #:+supported-protocol-versions+
-           #:+sdk-version+))
+           #:+sdk-version+
+           #:protocol-version>=))
 
 (in-package #:mcp-lisp/src/core)
 
@@ -17,3 +18,8 @@
 (defparameter +supported-protocol-versions+
   '("2025-11-25" "2025-06-18" "2025-03-26" "2024-11-05")
   "Supported MCP protocol versions in order of preference.")
+
+(defun protocol-version>= (version min-version)
+  "Return T if VERSION is greater than or equal to MIN-VERSION.
+MCP protocol versions use ISO date format (YYYY-MM-DD), which is lexicographically sortable."
+  (and version min-version (string>= version min-version)))

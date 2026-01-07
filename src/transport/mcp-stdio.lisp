@@ -6,7 +6,8 @@
   (:use #:cl #:log4cl)
   (:import-from #:mcp-lisp/src/json
                 #:encode-json
-                #:decode-json)
+                #:decode-json
+                #:make-ht)
   (:export #:run-mcp-server
            #:mcp-server-loop
            #:setup-file-logging))
@@ -34,24 +35,14 @@ LEVEL can be :debug, :info, :warn, :error (default :debug)."
 
 (defun make-response (id result)
   "Create a JSON-RPC success response."
-  (let ((ht (make-hash-table :test #'equal)))
-    (setf (gethash "jsonrpc" ht) "2.0")
-    (setf (gethash "id" ht) id)
-    (setf (gethash "result" ht) result)
-    ht))
+  (make-ht "jsonrpc" "2.0" "id" id "result" result))
 
 (defun make-error-response (id code message &optional data)
   "Create a JSON-RPC error response."
-  (let ((ht (make-hash-table :test #'equal))
-        (err (make-hash-table :test #'equal)))
-    (setf (gethash "code" err) code)
-    (setf (gethash "message" err) message)
+  (let ((err (make-ht "code" code "message" message)))
     (when data
       (setf (gethash "data" err) data))
-    (setf (gethash "jsonrpc" ht) "2.0")
-    (setf (gethash "id" ht) id)
-    (setf (gethash "error" ht) err)
-    ht))
+    (make-ht "jsonrpc" "2.0" "id" id "error" err)))
 
 (defun mcp-server-loop (handlers &key (input *standard-input*) (output *standard-output*))
   "Run MCP server loop with HANDLERS hash-table mapping method names to functions.

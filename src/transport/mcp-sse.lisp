@@ -8,7 +8,8 @@
   (:import-from #:flexi-streams)
   (:import-from #:mcp-lisp/src/json
                 #:encode-json
-                #:decode-json)
+                #:decode-json
+                #:make-ht)
   (:export #:start-sse-server
            #:stop-sse-server
            #:*sse-server*))
@@ -22,24 +23,14 @@
 
 (defun make-json-rpc-response (id result)
   "Create a JSON-RPC success response."
-  (let ((ht (make-hash-table :test #'equal)))
-    (setf (gethash "jsonrpc" ht) "2.0")
-    (setf (gethash "id" ht) id)
-    (setf (gethash "result" ht) result)
-    ht))
+  (make-ht "jsonrpc" "2.0" "id" id "result" result))
 
 (defun make-json-rpc-error (id code message &optional data)
   "Create a JSON-RPC error response."
-  (let ((ht (make-hash-table :test #'equal))
-        (err (make-hash-table :test #'equal)))
-    (setf (gethash "code" err) code)
-    (setf (gethash "message" err) message)
+  (let ((err (make-ht "code" code "message" message)))
     (when data
       (setf (gethash "data" err) data))
-    (setf (gethash "jsonrpc" ht) "2.0")
-    (setf (gethash "id" ht) id)
-    (setf (gethash "error" ht) err)
-    ht))
+    (make-ht "jsonrpc" "2.0" "id" id "error" err)))
 
 (defun write-utf8 (string stream)
   "Write STRING to binary STREAM as UTF-8 bytes."

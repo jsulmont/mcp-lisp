@@ -5,6 +5,8 @@
 (defpackage #:mcp-lisp/src/server/dispatcher
   (:use #:cl)
   (:import-from #:jsonrpc)
+  (:import-from #:mcp-lisp/src/core
+                #:protocol-version>=)
   (:import-from #:mcp-lisp/src/json
                 #:make-ht)
   (:import-from #:mcp-lisp/src/content
@@ -47,7 +49,7 @@
 For protocol >= 2025-11-25, uses isError flag.
 For older protocols, uses JSON-RPC error."
   (let ((version (and session (session-protocol-version session))))
-    (if (and version (string>= version "2025-11-25"))
+    (if (protocol-version>= version "2025-11-25")
         (make-result id (make-ht "content" (vector (text-content message))
                                  "isError" t))
         (make-error-response id -32602 message))))
@@ -81,9 +83,8 @@ For older protocols, uses JSON-RPC error."
            (let ((content (funcall handler server session (or args (make-hash-table)))))
              (make-ht "content" content))
          (error (e)
-           ;; For MCP 2025-11-25+, tool errors return isError flag
            (let ((version (session-protocol-version session)))
-             (if (and version (string>= version "2025-11-25"))
+             (if (protocol-version>= version "2025-11-25")
                  (make-ht "content" (vector (text-content (format nil "Tool error: ~a" e)))
                           "isError" t)
                  (error 'jsonrpc:jsonrpc-internal-error

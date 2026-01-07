@@ -55,6 +55,24 @@
                   :accessor client-initialized-p))
   (:documentation "MCP client for connecting to MCP servers."))
 
+(defgeneric client-connect (client)
+  (:documentation "Spawn subprocess and connect to the MCP server."))
+
+(defgeneric client-disconnect (client)
+  (:documentation "Disconnect and terminate the subprocess."))
+
+(defgeneric client-call (client method params &key timeout)
+  (:documentation "Make a JSON-RPC call to the server."))
+
+(defgeneric client-notify (client method &optional params)
+  (:documentation "Send a notification to the server."))
+
+(defgeneric client-initialize (client)
+  (:documentation "Perform the MCP initialize handshake."))
+
+(defgeneric client-shutdown (client)
+  (:documentation "Gracefully shutdown the client connection."))
+
 (defun make-client (command &rest args)
   "Create an MCP client that will spawn COMMAND with ARGS."
   (make-instance 'mcp-client

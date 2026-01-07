@@ -15,7 +15,7 @@
 
 (defun uri-has-template-params-p (uri)
   "Check if URI contains template parameters like {name}."
-  (and (position #\{ uri) t))
+  (position #\{ uri))
 
 (defmacro define-resource (uri (&key name (mime-type nil)) &body body)
   "Define a static MCP resource.

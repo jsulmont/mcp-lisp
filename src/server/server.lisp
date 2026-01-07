@@ -76,6 +76,12 @@
                  :accessor server-capabilities))
   (:documentation "MCP server instance."))
 
+(defgeneric server-start (server &key transport)
+  (:documentation "Start the MCP server with the specified transport."))
+
+(defgeneric server-stop (server)
+  (:documentation "Stop the MCP server."))
+
 (defun make-server (&key (name "mcp-lisp-server") (version "1.0.0") tool-registry prompt-registry resource-registry)
   "Create a new MCP server instance."
   (make-instance 'mcp-server

@@ -17,12 +17,12 @@
   (etypecase type
     (symbol
      (case type
-       ((string :string) "string")
-       ((integer :integer) "integer")
-       ((number :number) "number")
-       ((boolean :boolean) "boolean")
-       ((array :array list) "array")
-       ((object :object hash-table) "object")
+       (string "string")
+       (integer "integer")
+       (number "number")
+       (boolean "boolean")
+       ((array list) "array")
+       ((object hash-table) "object")
        (t "string")))))
 
 (defun make-property-schema (type &key description enum)
