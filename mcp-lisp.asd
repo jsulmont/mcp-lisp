@@ -2,8 +2,8 @@
 
 (asdf:defsystem "mcp-lisp"
   :class :package-inferred-system
-  :description "Common Lisp SDK for Model Context Protocol"
-  :author "Jan Dudek"
+  :description "Common Lisp SDK for Model Context Protocol and A2A"
+  :author "Jan VL"
   :license "MIT"
   :version "0.1.0"
   :depends-on ("alexandria"
