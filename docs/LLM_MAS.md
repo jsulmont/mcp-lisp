@@ -97,16 +97,18 @@ An A2A agent may internally use MCP to access tools, but presents itself as an *
 │  │          LLM (reasoning)              │  │
 │  └───────────────────────────────────────┘  │
 │              │                 │            │
-│         A2A (up/down)     MCP (tools)       │
+│         A2A (↑↓)          MCP (→)          │
 │              │                 │            │
 └──────────────┼─────────────────┼────────────┘
                │                 │
-        Parent / Children    Tool Servers
+        Parent/Children     Tool Servers
 ```
 
 - **A2A** faces outward: receives tasks from parent, delegates to children
 - **MCP** faces inward: accesses tools, resources, data sources
 - **LLM** decides what to do, when to delegate, which tools to call
+
+This structure is **recursive** — the same shape at every level of the hierarchy. Whether Top Supervisor, Team Lead, or Leaf Agent, each node can receive tasks (A2A up), delegate (A2A down), and call tools (MCP). Like Erlang/OTP supervision trees.
 
 ---
 
@@ -188,35 +190,6 @@ Supervisor of supervisors.
 ```
 
 This is the **primary target architecture**.
-
----
-
-### Recursive Structure
-
-The architecture is **fractal** — every node has the same shape:
-
-```
-┌─────────────────────────────────────────────┐
-│              Agent Node                     │
-│  ┌───────────────────────────────────────┐  │
-│  │          LLM (reasoning)              │  │
-│  └───────────────────────────────────────┘  │
-│              │                 │            │
-│         A2A (↑↓)          MCP (→)          │
-│              │                 │            │
-└──────────────┼─────────────────┼────────────┘
-               │                 │
-        Parent/Children     Tool Servers
-```
-
-Whether Top Supervisor, Team Lead, or Leaf Agent — same structure:
-
-- Receives tasks from parent (A2A up)
-- Delegates to children (A2A down)
-- Calls tools (MCP)
-- Reasons about what to do (LLM)
-
-Like Erlang/OTP supervision trees: the pattern repeats at every level.
 
 ---
 
