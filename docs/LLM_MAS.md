@@ -191,6 +191,35 @@ This is the **primary target architecture**.
 
 ---
 
+### Recursive Structure
+
+The architecture is **fractal** — every node has the same shape:
+
+```
+┌─────────────────────────────────────────────┐
+│              Agent Node                     │
+│  ┌───────────────────────────────────────┐  │
+│  │          LLM (reasoning)              │  │
+│  └───────────────────────────────────────┘  │
+│              │                 │            │
+│         A2A (↑↓)          MCP (→)          │
+│              │                 │            │
+└──────────────┼─────────────────┼────────────┘
+               │                 │
+        Parent/Children     Tool Servers
+```
+
+Whether Top Supervisor, Team Lead, or Leaf Agent — same structure:
+
+- Receives tasks from parent (A2A up)
+- Delegates to children (A2A down)
+- Calls tools (MCP)
+- Reasons about what to do (LLM)
+
+Like Erlang/OTP supervision trees: the pattern repeats at every level.
+
+---
+
 ### Tool-Calling Supervisor
 
 Specialists are exposed as tools to a single LLM.
