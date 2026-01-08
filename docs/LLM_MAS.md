@@ -97,7 +97,7 @@ An A2A agent may internally use MCP to access tools, but presents itself as an *
 │  │          LLM (reasoning)              │  │
 │  └───────────────────────────────────────┘  │
 │              │                 │            │
-│         A2A (↑↓)          MCP (→)          │
+│         A2A (↑↓)          MCP (→)           │
 │              │                 │            │
 └──────────────┼─────────────────┼────────────┘
                │                 │
