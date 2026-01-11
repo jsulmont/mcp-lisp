@@ -44,7 +44,7 @@
          (dot (position #\. s :from-end t))
          (slash (position #\/ s :from-end t))
          (idx (max (or dot -1) (or slash -1))))
-    (substitute #\- #\_ (subseq s (1+ idx)))))
+    (substitute #\_ #\- (subseq s (1+ idx)))))
 
 (defun handle-tools-list-result (registry)
   "Return tools/list result payload."
@@ -55,7 +55,8 @@
   (let* ((name (and params (gethash "name" params)))
          (args (and params (gethash "arguments" params)))
          (normalized (and name (normalize-tool-name name)))
-         (handler (and normalized (get-tool-handler normalized registry))))
+         (handler (or (and name (get-tool-handler name registry))
+                      (and normalized (get-tool-handler normalized registry)))))
     (cond
       ((null name)
        (error 'invalid-params-error :message "Missing tool name"))

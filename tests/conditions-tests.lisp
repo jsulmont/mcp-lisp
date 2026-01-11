@@ -28,6 +28,14 @@
     (mcp-lisp:protocol-error (e)
       (is (= -32600 (mcp-lisp/src/conditions:protocol-error-code e))))))
 
+(test protocol-error-data
+  "protocol-error exposes data when provided"
+  (handler-case
+      (error 'mcp-lisp:protocol-error :code -32602 :message "Invalid params"
+             :data (mcp-lisp:make-ht "detail" "bad"))
+    (mcp-lisp:protocol-error (e)
+      (is (hash-table-p (mcp-lisp/src/conditions:protocol-error-data e))))))
+
 (test protocol-error-inheritance
   "protocol-error is a subtype of mcp-error"
   (signals mcp-lisp:mcp-error

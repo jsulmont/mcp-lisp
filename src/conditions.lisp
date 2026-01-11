@@ -8,6 +8,7 @@
            #:mcp-error-message
            #:protocol-error
            #:protocol-error-code
+           #:protocol-error-data
            #:invalid-params-error
            #:method-not-found-error
            #:internal-error
@@ -30,7 +31,10 @@
 (define-condition protocol-error (mcp-error)
   ((code :initarg :code
          :initform -32600
-         :reader protocol-error-code))
+         :reader protocol-error-code)
+   (data :initarg :data
+         :initform nil
+         :reader protocol-error-data))
   (:report (lambda (c s)
              (format s "MCP Protocol Error ~a: ~a"
                      (protocol-error-code c)

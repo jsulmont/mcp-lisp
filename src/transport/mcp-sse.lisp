@@ -13,6 +13,7 @@
   (:import-from #:mcp-lisp/src/conditions
                 #:protocol-error
                 #:protocol-error-code
+                #:protocol-error-data
                 #:mcp-error-message)
   (:export #:start-sse-server
            #:stop-sse-server
@@ -83,11 +84,12 @@
                (let ((result (funcall handler params)))
                  (log:debug "Response: id=~a success" id)
                  (encode-json (make-json-rpc-response id result)))
-             (protocol-error (e)
-               (log:error "Protocol error: ~a" e)
-               (encode-json (make-json-rpc-error id
-                                                 (protocol-error-code e)
-                                                 (mcp-error-message e))))
+            (protocol-error (e)
+              (log:error "Protocol error: ~a" e)
+              (encode-json (make-json-rpc-error id
+                                                (protocol-error-code e)
+                                                (mcp-error-message e)
+                                                (protocol-error-data e))))
              (error (e)
                (log:error "Handler error: ~a" e)
                (encode-json (make-json-rpc-error id -32603 (princ-to-string e))))))

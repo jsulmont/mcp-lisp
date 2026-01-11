@@ -11,6 +11,7 @@
   (:import-from #:mcp-lisp/src/conditions
                 #:protocol-error
                 #:protocol-error-code
+                #:protocol-error-data
                 #:mcp-error-message)
   (:export #:run-mcp-server
            #:mcp-server-loop
@@ -27,9 +28,12 @@ LEVEL can be :debug, :info, :warn, :error (default :debug)."
 
 (defun read-json-line (stream)
   "Read a line and parse as JSON. Returns NIL on EOF."
-  (let ((line (read-line stream nil nil)))
-    (when (and line (> (length line) 0))
-      (decode-json line))))
+  (loop for line = (read-line stream nil nil)
+        do (cond
+             ((null line) (return nil))
+             ((string= "" (string-trim '(#\Space #\Tab #\Return) line))
+              nil)
+             (t (return (decode-json line))))))
 
 (defun write-json-line (object stream)
   "Write object as JSON followed by newline."
@@ -76,11 +80,12 @@ Each handler receives (params) and should return the result or signal an error."
                (let ((result (funcall handler params)))
                  (log:debug "Response: id=~a success" id)
                  (write-json-line (make-response id result) output))
-             (protocol-error (e)
-               (log:error "Protocol error: ~a" e)
-               (write-json-line (make-error-response id
-                                                     (protocol-error-code e)
-                                                     (mcp-error-message e))
+            (protocol-error (e)
+              (log:error "Protocol error: ~a" e)
+              (write-json-line (make-error-response id
+                                                    (protocol-error-code e)
+                                                    (mcp-error-message e)
+                                                    (protocol-error-data e))
                                 output))
              (error (e)
                (log:error "Handler error: ~a" e)

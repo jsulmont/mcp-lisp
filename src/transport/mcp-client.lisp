@@ -48,9 +48,12 @@
 
 (defun read-json-line (stream)
   "Read a line and parse as JSON. Returns NIL on EOF."
-  (let ((line (read-line stream nil nil)))
-    (when (and line (> (length line) 0))
-      (decode-json line))))
+  (loop for line = (read-line stream nil nil)
+        do (cond
+             ((null line) (return nil))
+             ((string= "" (string-trim '(#\Space #\Tab #\Return) line))
+              nil)
+             (t (return (decode-json line))))))
 
 (defun write-json-line (object stream)
   "Write OBJECT as JSON followed by newline."

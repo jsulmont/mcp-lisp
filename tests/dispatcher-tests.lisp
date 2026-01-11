@@ -81,6 +81,24 @@
       (is (hash-table-p result))
       (is (vectorp (gethash "content" result))))))
 
+(test handle-tools-call-snake-case
+  "handle-tools-call-result accepts snake_case tool names"
+  (let ((registry (make-hash-table :test #'equal))
+        (session (mcp-lisp/src/server/state:make-session)))
+    (mcp-lisp/src/primitives/tools/registry:register-tool
+     "snake_case" "Snake case tool"
+     (mcp-lisp:make-ht)
+     (lambda (server session args)
+       (declare (ignore server session args))
+       (mcp-lisp:content-vector "ok"))
+     registry)
+    (let* ((params (mcp-lisp:make-ht "name" "snake_case"
+                                     "arguments" (mcp-lisp:make-ht)))
+           (result (mcp-lisp/src/server/dispatcher:handle-tools-call-result
+                    params nil session registry)))
+      (is (hash-table-p result))
+      (is (vectorp (gethash "content" result))))))
+
 (test handle-prompts-get-missing-name
   "handle-prompts-get-result signals error for missing name"
   (let ((registry (make-hash-table :test #'equal))

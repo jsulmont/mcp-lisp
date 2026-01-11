@@ -29,6 +29,8 @@
                 #:*global-resource-registry*)
   (:import-from #:mcp-lisp/src/server/logging
                 #:handle-logging-set-level)
+  (:import-from #:mcp-lisp/src/conditions
+                #:protocol-error)
   (:import-from #:mcp-lisp/src/transport/mcp-stdio
                 #:mcp-server-loop)
   (:import-from #:mcp-lisp/src/transport/mcp-sse
@@ -120,7 +122,10 @@
                                    caps
                                    params)
               (or result
-                  (error (gethash "message" error-data))))))
+                  (error 'protocol-error
+                         :code (gethash "code" error-data)
+                         :message (gethash "message" error-data)
+                         :data (gethash "data" error-data))))))
 
     (setf (gethash "ping" handlers)
           (lambda (params)
