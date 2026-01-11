@@ -44,7 +44,7 @@
          (dot (position #\. s :from-end t))
          (slash (position #\/ s :from-end t))
          (idx (max (or dot -1) (or slash -1))))
-    (substitute #\_ #\- (subseq s (1+ idx)))))
+    (substitute #\- #\_ (subseq s (1+ idx)))))
 
 (defun handle-tools-list-result (registry)
   "Return tools/list result payload."

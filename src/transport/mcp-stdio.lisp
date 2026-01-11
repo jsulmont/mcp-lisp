@@ -6,8 +6,9 @@
   (:use #:cl #:log4cl)
   (:import-from #:mcp-lisp/src/json
                 #:encode-json
-                #:decode-json
-                #:make-ht)
+                #:make-ht
+                #:read-json-line
+                #:write-json-line)
   (:import-from #:mcp-lisp/src/conditions
                 #:protocol-error
                 #:protocol-error-code
@@ -25,21 +26,6 @@ LEVEL can be :debug, :info, :warn, :error (default :debug)."
   (log:config :daily path :backup nil)
   (log:config :sane2)
   (log:config level))
-
-(defun read-json-line (stream)
-  "Read a line and parse as JSON. Returns NIL on EOF."
-  (loop for line = (read-line stream nil nil)
-        do (cond
-             ((null line) (return nil))
-             ((string= "" (string-trim '(#\Space #\Tab #\Return) line))
-              nil)
-             (t (return (decode-json line))))))
-
-(defun write-json-line (object stream)
-  "Write object as JSON followed by newline."
-  (write-string (encode-json object) stream)
-  (terpri stream)
-  (force-output stream))
 
 (defun make-response (id result)
   "Create a JSON-RPC success response."
@@ -80,12 +66,12 @@ Each handler receives (params) and should return the result or signal an error."
                (let ((result (funcall handler params)))
                  (log:debug "Response: id=~a success" id)
                  (write-json-line (make-response id result) output))
-            (protocol-error (e)
-              (log:error "Protocol error: ~a" e)
-              (write-json-line (make-error-response id
-                                                    (protocol-error-code e)
-                                                    (mcp-error-message e)
-                                                    (protocol-error-data e))
+             (protocol-error (e)
+               (log:error "Protocol error: ~a" e)
+               (write-json-line (make-error-response id
+                                                     (protocol-error-code e)
+                                                     (mcp-error-message e)
+                                                     (protocol-error-data e))
                                 output))
              (error (e)
                (log:error "Handler error: ~a" e)

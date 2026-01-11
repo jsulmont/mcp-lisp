@@ -7,8 +7,9 @@
   (:import-from #:bordeaux-threads)
   (:import-from #:mcp-lisp/src/json
                 #:encode-json
-                #:decode-json
-                #:make-ht)
+                #:make-ht
+                #:read-json-line
+                #:write-json-line)
   (:import-from #:mcp-lisp/src/conditions
                 #:mcp-error
                 #:protocol-error)
@@ -45,21 +46,6 @@
 (defun make-transport (input output)
   "Create a new MCP transport with INPUT and OUTPUT streams."
   (make-instance 'mcp-transport :input input :output output))
-
-(defun read-json-line (stream)
-  "Read a line and parse as JSON. Returns NIL on EOF."
-  (loop for line = (read-line stream nil nil)
-        do (cond
-             ((null line) (return nil))
-             ((string= "" (string-trim '(#\Space #\Tab #\Return) line))
-              nil)
-             (t (return (decode-json line))))))
-
-(defun write-json-line (object stream)
-  "Write OBJECT as JSON followed by newline."
-  (write-string (encode-json object) stream)
-  (terpri stream)
-  (force-output stream))
 
 (defun resolve-pending (transport id result error-p)
   "Resolve a pending request with RESULT."

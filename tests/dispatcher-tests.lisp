@@ -81,18 +81,20 @@
       (is (hash-table-p result))
       (is (vectorp (gethash "content" result))))))
 
-(test handle-tools-call-snake-case
-  "handle-tools-call-result accepts snake_case tool names"
+(test handle-tools-call-underscore-normalization
+  "handle-tools-call-result normalizes underscore to hyphen"
   (let ((registry (make-hash-table :test #'equal))
         (session (mcp-lisp/src/server/state:make-session)))
+    ;; Register with hyphen (Lisp convention)
     (mcp-lisp/src/primitives/tools/registry:register-tool
-     "snake_case" "Snake case tool"
+     "my-tool" "Tool with hyphen"
      (mcp-lisp:make-ht)
      (lambda (server session args)
        (declare (ignore server session args))
        (mcp-lisp:content-vector "ok"))
      registry)
-    (let* ((params (mcp-lisp:make-ht "name" "snake_case"
+    ;; Call with underscore (JSON convention) - should normalize and find
+    (let* ((params (mcp-lisp:make-ht "name" "my_tool"
                                      "arguments" (mcp-lisp:make-ht)))
            (result (mcp-lisp/src/server/dispatcher:handle-tools-call-result
                     params nil session registry)))
