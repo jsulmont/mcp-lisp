@@ -17,7 +17,8 @@
                 #:transport-stop
                 #:transport-call
                 #:transport-notify
-                #:transport-running-p)
+                #:transport-running-p
+                #:transport-notification-handler)
   (:export #:mcp-client
            #:make-client
            #:client-name
@@ -32,6 +33,7 @@
            #:client-shutdown
            #:client-call
            #:client-notify
+           #:client-notification-handler
            #:with-client))
 
 (in-package #:mcp-lisp/src/client/client)
@@ -136,6 +138,18 @@
   (unless (client-connected-p client)
     (error 'mcp-error :message "Client not connected"))
   (transport-notify (client-transport client) method params))
+
+(defun client-notification-handler (client)
+  "Get the notification handler for CLIENT."
+  (when (client-transport client)
+    (transport-notification-handler (client-transport client))))
+
+(defun (setf client-notification-handler) (handler client)
+  "Set the notification handler for CLIENT.
+HANDLER should be a function (method params) called for server notifications."
+  (unless (client-transport client)
+    (error 'mcp-error :message "Client not connected"))
+  (setf (transport-notification-handler (client-transport client)) handler))
 
 (defmethod client-initialize ((client mcp-client))
   "Perform MCP initialize handshake."

@@ -30,7 +30,8 @@
                (:file "dispatcher-tests")
                (:file "a2a-tests")
                (:file "sse-tests")
-               (:file "define-tool-tests"))
+               (:file "define-tool-tests")
+               (:file "client-transport-tests"))
   :perform (test-op (o c)
                     (symbol-call :fiveam :run!
                                  (find-symbol "MCP-LISP-TESTS"

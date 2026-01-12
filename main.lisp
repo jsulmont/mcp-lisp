@@ -44,6 +44,7 @@
                 #:client-shutdown
                 #:client-call
                 #:client-notify
+                #:client-notification-handler
                 #:with-client)
   (:import-from #:mcp-lisp/src/client/operations
                 #:list-tools
@@ -179,6 +180,7 @@
            #:client-shutdown
            #:client-call
            #:client-notify
+           #:client-notification-handler
            #:with-client
            ;; Client operations
            #:list-tools

@@ -19,7 +19,8 @@
            #:transport-stop
            #:transport-call
            #:transport-notify
-           #:transport-running-p))
+           #:transport-running-p
+           #:transport-notification-handler))
 
 (in-package #:mcp-lisp/src/transport/mcp-client)
 
@@ -40,7 +41,10 @@
    (reader-thread :initform nil
                   :accessor transport-reader-thread)
    (running :initform nil
-            :accessor transport-running-p))
+            :accessor transport-running-p)
+   (notification-handler :initform nil
+                         :accessor transport-notification-handler
+                         :documentation "Function (method params) called for server notifications."))
   (:documentation "Transport for MCP client using newline-delimited JSON."))
 
 (defun make-transport (input output)
@@ -57,7 +61,7 @@
         (remhash id (transport-pending transport))))))
 
 (defun reader-loop (transport)
-  "Read responses from server and dispatch to pending requests."
+  "Read responses from server and dispatch to pending requests or notification handler."
   (loop while (transport-running-p transport)
         do (handler-case
                (let ((response (read-json-line (transport-input transport))))
@@ -65,12 +69,22 @@
                    (setf (transport-running-p transport) nil)
                    (return))
                  (let ((id (gethash "id" response))
+                       (method (gethash "method" response))
+                       (params (gethash "params" response))
                        (error-obj (gethash "error" response))
                        (result (gethash "result" response)))
-                   (when id
-                     (if error-obj
-                         (resolve-pending transport id error-obj t)
-                         (resolve-pending transport id result nil)))))
+                   (if id
+                       ;; Response to a request
+                       (if error-obj
+                           (resolve-pending transport id error-obj t)
+                           (resolve-pending transport id result nil))
+                       ;; Server-initiated notification (no id)
+                       (when (and method (transport-notification-handler transport))
+                         (handler-case
+                             (funcall (transport-notification-handler transport)
+                                      method params)
+                           (error (e)
+                             (log:warn "Notification handler error (~a): ~a" method e)))))))
              (error (e)
                (log:debug "Reader loop error: ~a" e)
                (setf (transport-running-p transport) nil)
