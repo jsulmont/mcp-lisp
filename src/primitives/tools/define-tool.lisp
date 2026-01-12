@@ -50,17 +50,19 @@ Format: (name type description &key required default)"
            (make-property-schema ',type :description ,description))))
 
 (defun generate-extraction-form (parsed-spec args-var)
-  "Generate code to extract an argument from the args hash-table."
+  "Generate code to extract an argument from the args hash-table.
+Properly distinguishes between missing keys and explicit null values."
   (let ((name (getf parsed-spec :name))
         (json-name (getf parsed-spec :json-name))
         (required (getf parsed-spec :required))
         (default (getf parsed-spec :default)))
-    `(,name (let ((val (gethash ,json-name ,args-var)))
-              (if (null val)
+    `(,name (multiple-value-bind (val presentp)
+                (gethash ,json-name ,args-var)
+              (if presentp
+                  val  ; Return value even if null
                   ,(if required
                        `(error "Missing required argument: ~a" ,json-name)
-                       default)
-                  val)))))
+                       default))))))
 
 (defun collect-required-args (parsed-specs)
   "Return a list of JSON names for required arguments."
