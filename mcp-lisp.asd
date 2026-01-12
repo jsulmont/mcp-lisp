@@ -28,7 +28,8 @@
                (:file "uri-template-tests")
                (:file "schema-tests")
                (:file "dispatcher-tests")
-               (:file "a2a-tests"))
+               (:file "a2a-tests")
+               (:file "sse-tests"))
   :perform (test-op (o c)
                     (symbol-call :fiveam :run!
                                  (find-symbol "MCP-LISP-TESTS"

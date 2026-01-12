@@ -17,14 +17,21 @@
                 #:mcp-error-message)
   (:export #:start-sse-server
            #:stop-sse-server
-           #:*sse-server*))
+           #:*sse-server*
+           ;; For testing session management
+           #:generate-session-id
+           #:send-to-session
+           #:*sse-clients*
+           #:*sse-clients-lock*))
 
 (in-package #:mcp-lisp/src/transport/mcp-sse)
 
 (defvar *sse-server* nil "Current Hunchentoot acceptor.")
 (defvar *handlers* nil "Hash-table of method handlers.")
-(defvar *sse-clients* nil "List of active SSE client streams.")
+(defvar *sse-clients* nil "Hash-table of session-id -> SSE client stream.")
 (defvar *sse-clients-lock* (bt:make-lock "sse-clients"))
+(defvar *next-session-id* 0 "Counter for generating unique session IDs.")
+(defvar *session-id-lock* (bt:make-lock "session-id"))
 
 (defun make-json-rpc-response (id result)
   "Create a JSON-RPC success response."
@@ -41,6 +48,11 @@
   "Write STRING to binary STREAM as UTF-8 bytes."
   (write-sequence (flexi-streams:string-to-octets string :external-format :utf-8) stream))
 
+(defun generate-session-id ()
+  "Generate a unique session ID."
+  (bt:with-lock-held (*session-id-lock*)
+    (format nil "~a-~a" (get-universal-time) (incf *next-session-id*))))
+
 (defun send-sse-event (stream data &optional event-type)
   "Send an SSE event to a stream."
   (when event-type
@@ -48,17 +60,19 @@
   (write-utf8 (format nil "data: ~a~%~%" data) stream)
   (force-output stream))
 
-(defun broadcast-sse (data &optional event-type)
-  "Send SSE event to all connected clients."
+(defun send-to-session (session-id data &optional event-type)
+  "Send SSE event to a specific session. Returns T if sent, NIL if session not found."
   (bt:with-lock-held (*sse-clients-lock*)
-    (setf *sse-clients*
-          (loop for client in *sse-clients*
-                when (open-stream-p client)
-                collect client
-                and do (handler-case
-                           (send-sse-event client data event-type)
-                         (error (e)
-                           (log:warn "SSE broadcast error: ~a" e)))))))
+    (let ((stream (gethash session-id *sse-clients*)))
+      (when (and stream (open-stream-p stream))
+        (handler-case
+            (progn
+              (send-sse-event stream data event-type)
+              t)
+          (error (e)
+            (log:warn "SSE send error for session ~a: ~a" session-id e)
+            (remhash session-id *sse-clients*)
+            nil))))))
 
 (defun handle-json-rpc-request (request-json)
   "Process a JSON-RPC request and return response JSON."
@@ -104,42 +118,51 @@
 
 (defun sse-handler ()
   "Handle GET /sse - establish SSE connection."
-  (log:info "SSE client connected")
-  (setf (hunchentoot:content-type*) "text/event-stream")
-  (setf (hunchentoot:header-out "Cache-Control") "no-cache")
-  (setf (hunchentoot:header-out "Connection") "keep-alive")
-  (setf (hunchentoot:header-out "Access-Control-Allow-Origin") "*")
+  (let ((session-id (generate-session-id)))
+    (log:info "SSE client connected: session=~a" session-id)
+    (setf (hunchentoot:content-type*) "text/event-stream")
+    (setf (hunchentoot:header-out "Cache-Control") "no-cache")
+    (setf (hunchentoot:header-out "Connection") "keep-alive")
+    (setf (hunchentoot:header-out "Access-Control-Allow-Origin") "*")
 
-  (let ((stream (hunchentoot:send-headers)))
-    (bt:with-lock-held (*sse-clients-lock*)
-      (push stream *sse-clients*))
-    ;; Send initial endpoint event (MCP protocol requirement)
-    (send-sse-event stream "/message" "endpoint")
-    ;; Keep connection alive
-    (loop
-      (unless (open-stream-p stream)
-        (log:info "SSE client disconnected")
-        (return))
-      (sleep 30)
-      ;; Send keepalive comment
-      (handler-case
-          (progn
-            (write-utf8 (format nil ": keepalive~%~%") stream)
-            (force-output stream))
-        (error (e)
-          (log:debug "Keepalive error: ~a" e)
-          (return))))))
+    (let ((stream (hunchentoot:send-headers)))
+      (bt:with-lock-held (*sse-clients-lock*)
+        (setf (gethash session-id *sse-clients*) stream))
+      ;; Send initial endpoint event with session-scoped URL (MCP protocol requirement)
+      (send-sse-event stream (format nil "/message?session_id=~a" session-id) "endpoint")
+      ;; Keep connection alive
+      (unwind-protect
+           (loop
+             (unless (open-stream-p stream)
+               (log:info "SSE client disconnected: session=~a" session-id)
+               (return))
+             (sleep 30)
+             ;; Send keepalive comment
+             (handler-case
+                 (progn
+                   (write-utf8 (format nil ": keepalive~%~%") stream)
+                   (force-output stream))
+               (error (e)
+                 (log:debug "Keepalive error: ~a" e)
+                 (return))))
+        ;; Cleanup on disconnect
+        (bt:with-lock-held (*sse-clients-lock*)
+          (remhash session-id *sse-clients*))))))
 
 (defun message-handler ()
   "Handle POST /message - receive JSON-RPC requests."
   (setf (hunchentoot:content-type*) "application/json")
   (setf (hunchentoot:header-out "Access-Control-Allow-Origin") "*")
 
-  (let* ((body (hunchentoot:raw-post-data :force-text t))
+  (let* ((session-id (hunchentoot:get-parameter "session_id"))
+         (body (hunchentoot:raw-post-data :force-text t))
          (response (handle-json-rpc-request body)))
     (when response
-      ;; Also broadcast via SSE
-      (broadcast-sse response "message"))
+      ;; Send response only to the requesting client's SSE stream
+      (if session-id
+          (unless (send-to-session session-id response "message")
+            (log:warn "SSE session not found: ~a" session-id))
+          (log:warn "POST /message without session_id")))
     (or response "")))
 
 (defun options-handler ()
@@ -173,7 +196,7 @@
   (when *sse-server*
     (stop-sse-server))
   (setf *handlers* handlers)
-  (setf *sse-clients* nil)
+  (setf *sse-clients* (make-hash-table :test #'equal))
   (setf *sse-server* (make-instance 'mcp-acceptor :port port))
   (hunchentoot:start *sse-server*)
   (log:info "MCP SSE server started on port ~a" port)
@@ -185,5 +208,6 @@
   (when *sse-server*
     (hunchentoot:stop *sse-server*)
     (setf *sse-server* nil)
-    (setf *sse-clients* nil)
+    (when *sse-clients*
+      (clrhash *sse-clients*))
     (log:info "MCP SSE server stopped")))
