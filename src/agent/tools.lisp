@@ -5,36 +5,84 @@
 (defpackage #:mcp-lisp/src/agent/tools
   (:use #:cl)
   (:import-from #:mcp-lisp/src/primitives/tools/define-tool
-                #:define-tool))
+                #:define-tool)
+  (:export #:reset-sandbox))
 
 (in-package #:mcp-lisp/src/agent/tools)
+
+;;; Sandbox package for isolated evaluation
+
+(defun ensure-sandbox ()
+  "Ensure the sandbox package exists, creating it if needed."
+  (or (find-package :agent-sandbox)
+      (make-package :agent-sandbox :use '(:cl))))
+
+(defun reset-sandbox ()
+  "Delete and recreate the sandbox package for a clean slate."
+  (let ((pkg (find-package :agent-sandbox)))
+    (when pkg
+      (do-symbols (sym pkg)
+        (unintern sym pkg))
+      (delete-package pkg)))
+  (make-package :agent-sandbox :use '(:cl))
+  t)
+
+;; Initialize sandbox on load
+(ensure-sandbox)
 
 ;;; eval_lisp - Evaluate Lisp forms with warning/error capture
 
 (define-tool eval-lisp ((code string "The Lisp code to evaluate" :required t))
-  "Evaluate a Lisp form and return the result. Captures and returns any
-compilation warnings or errors along with the result, so you can debug issues."
+  "Evaluate Lisp code in the sandbox. Supports multiple forms - each form is
+evaluated in sequence, so definitions are available to subsequent forms.
+Captures printed output, warnings, and errors."
+  (ensure-sandbox)
   (let ((warnings nil)
-        (result nil)
-        (error-msg nil))
-    ;; Capture compiler warnings
+        (results nil)
+        (error-msg nil)
+        (printed-output nil))
+    ;; Capture compiler warnings and printed output
     (handler-bind
         ((warning (lambda (w)
                     (push (princ-to-string w) warnings)
                     (muffle-warning w))))
       (handler-case
-          (setf result (eval (read-from-string code)))
+          (let ((*package* (find-package :agent-sandbox)))
+            ;; Capture any printed output
+            (setf printed-output
+                  (with-output-to-string (*standard-output*)
+                    ;; Read and evaluate all forms
+                    (loop with pos = 0
+                          with len = (length code)
+                          while (< pos len)
+                          do (multiple-value-bind (form new-pos)
+                                 (read-from-string code nil :eof :start pos)
+                               (when (eq form :eof)
+                                 (return))
+                               (setf pos new-pos)
+                               (push (eval form) results))))))
         (error (e)
           (setf error-msg (princ-to-string e)))))
     ;; Return structured feedback
     (with-output-to-string (out)
+      (when (and printed-output (plusp (length printed-output)))
+        (format out "Output:~%~a~%" printed-output))
       (when warnings
         (format out "Warnings:~%")
         (dolist (w (nreverse warnings))
           (format out "  ~a~%" w)))
       (when error-msg
         (format out "Error: ~a~%" error-msg))
-      (format out "Result: ~s" result))))
+      (format out "Results: ~{~s~^, ~}" (nreverse results)))))
+
+;;; clear_repl - Reset the sandbox
+
+(define-tool clear-repl ()
+  "Clear all definitions from the REPL sandbox. Use this to start fresh
+with a clean environment. All previously defined functions and variables
+will be removed."
+  (reset-sandbox)
+  "Sandbox cleared. All definitions have been removed.")
 
 ;;; shell - Execute shell commands
 

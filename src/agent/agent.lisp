@@ -50,7 +50,7 @@
 
 (defun default-model (provider)
   (ecase provider
-    (:groq "llama-3.3-70b-versatile")
+    (:groq "meta-llama/llama-4-maverick-17b-128e-instruct")
     (:anthropic "claude-sonnet-4-20250514")
     (:openai "gpt-4o")))
 
@@ -105,13 +105,20 @@
                            (make-ht "type" "function"
                                     "function" tool))
                  tools)))
-    (multiple-value-bind (response-body status)
-        (dex:post endpoint
-                  :headers headers
-                  :content (encode-json body))
-      (unless (= status 200)
-        (error "API error (~a): ~a" status response-body))
-      (decode-json response-body))))
+    (let ((json-body (encode-json body)))
+      (multiple-value-bind (response-body status)
+          (dex:post endpoint
+                    :headers headers
+                    :content json-body)
+        (unless (= status 200)
+          (format *error-output* "~%=== DEBUG: Request that failed ===~%")
+          (format *error-output* "Endpoint: ~a~%" endpoint)
+          (format *error-output* "Status: ~a~%" status)
+          (format *error-output* "Body sent:~%~a~%" json-body)
+          (format *error-output* "Response:~%~a~%" response-body)
+          (format *error-output* "=================================~%")
+          (error "API error (~a): ~a" status response-body))
+        (decode-json response-body)))))
 
 (defun call-anthropic (messages &key tools system)
   "Call Anthropic Claude API."
