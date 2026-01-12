@@ -145,6 +145,17 @@
                 ;; Server
                 #:start-a2a-server
                 #:stop-a2a-server)
+  ;; Agent
+  (:import-from #:mcp-lisp/src/agent/agent
+                #:*provider*
+                #:*api-key*
+                #:*model*
+                #:*max-tokens*
+                #:*verbose*
+                #:run-agent
+                #:chat)
+  ;; Agent tools (loading this registers the tools)
+  (:import-from #:mcp-lisp/src/agent/tools)
   ;; Export everything
   (:export ;; Core
            #:+protocol-version+
@@ -266,6 +277,14 @@
            #:request-task-cancel
            ;; A2A - Server
            #:start-a2a-server
-           #:stop-a2a-server))
+           #:stop-a2a-server
+           ;; Agent
+           #:*provider*
+           #:*api-key*
+           #:*model*
+           #:*max-tokens*
+           #:*verbose*
+           #:run-agent
+           #:chat))
 
 (in-package #:mcp-lisp/main)
