@@ -95,10 +95,13 @@
 (defmethod client-connect ((client mcp-client))
   "Spawn subprocess and connect via MCP transport."
   (let* ((command (client-command client))
+         ;; Use :interactive for stderr to inherit parent's stderr directly.
+         ;; This avoids deadlock from an undrained stderr pipe buffer
+         ;; while still allowing server stderr to be visible for debugging.
          (process (uiop:launch-program command
                                        :input :stream
                                        :output :stream
-                                       :error-output :stream)))
+                                       :error-output :interactive)))
     (setf (client-process client) process)
     (let ((transport (make-transport
                       (uiop:process-info-output process)
