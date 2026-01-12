@@ -113,5 +113,5 @@
   "Convert task to hash-table for JSON serialization."
   (make-ht "id" (task-id task)
            "status" (status-to-string (task-status task))
-           "artifacts" (or (task-artifacts task) #())
-           "messages" (or (reverse (task-messages task)) #())))
+           "artifacts" (coerce (reverse (task-artifacts task)) 'vector)
+           "messages" (coerce (reverse (task-messages task)) 'vector)))

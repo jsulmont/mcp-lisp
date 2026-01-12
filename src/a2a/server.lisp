@@ -23,6 +23,7 @@
                 #:update-task-status
                 #:add-task-message
                 #:add-task-artifact
+                #:cancel-task
                 #:task-to-ht)
   (:import-from #:mcp-lisp/src/a2a/messages
                 #:make-message
@@ -89,14 +90,36 @@
       (setf (hunchentoot:return-code*) 400)
       (json-response (make-ht "error" (princ-to-string e))))))
 
+(defun extract-task-id-from-path (path prefix)
+  "Extract task ID from PATH, stripping PREFIX and any trailing segments."
+  (let* ((after-prefix (subseq path (length prefix)))
+         (slash-pos (position #\/ after-prefix)))
+    (if slash-pos
+        (subseq after-prefix 0 slash-pos)
+        after-prefix)))
+
 (defun get-task-handler ()
   "Handle GET /a2a/task/:id - get task status."
   (let* ((path (hunchentoot:script-name hunchentoot:*request*))
-         (task-id (subseq path (length "/a2a/task/"))))
+         (task-id (extract-task-id-from-path path "/a2a/task/")))
     (log:debug "Task status requested: ~a" task-id)
     (let ((task (get-task task-id)))
       (if task
           (json-response (task-to-ht task))
+          (progn
+            (setf (hunchentoot:return-code*) 404)
+            (json-response (make-ht "error" "Task not found")))))))
+
+(defun cancel-task-handler ()
+  "Handle POST /a2a/task/:id/cancel - cancel a task."
+  (let* ((path (hunchentoot:script-name hunchentoot:*request*))
+         (task-id (extract-task-id-from-path path "/a2a/task/")))
+    (log:debug "Task cancel requested: ~a" task-id)
+    (let ((task (get-task task-id)))
+      (if task
+          (progn
+            (cancel-task task)
+            (json-response (task-to-ht task)))
           (progn
             (setf (hunchentoot:return-code*) 404)
             (json-response (make-ht "error" "Task not found")))))))
@@ -123,6 +146,10 @@
        (agent-card-handler))
       ((and (eq method :post) (string= path "/a2a/message"))
        (send-message-handler))
+      ((and (eq method :post)
+            (alexandria:starts-with-subseq "/a2a/task/" path)
+            (alexandria:ends-with-subseq "/cancel" path))
+       (cancel-task-handler))
       ((and (eq method :get) (alexandria:starts-with-subseq "/a2a/task/" path))
        (get-task-handler))
       (t

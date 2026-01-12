@@ -134,3 +134,56 @@
     (signals mcp-lisp:protocol-error
       (mcp-lisp/src/server/dispatcher:handle-resources-read-result
        params nil session registry))))
+
+(test handle-resources-read-includes-mime-type
+  "handle-resources-read-result includes mimeType when registered"
+  (let ((registry (mcp-lisp/src/primitives/resources/registry:make-resource-registry))
+        (session (mcp-lisp/src/server/state:make-session)))
+    (mcp-lisp/src/primitives/resources/registry:register-resource
+     "test://data" "Test Resource" "A test resource"
+     (lambda (server session) "test content")
+     :mime-type "application/json"
+     :registry registry)
+    (let* ((params (mcp-lisp:make-ht "uri" "test://data"))
+           (result (mcp-lisp/src/server/dispatcher:handle-resources-read-result
+                    params nil session registry))
+           (contents (gethash "contents" result))
+           (first-content (aref contents 0)))
+      (is (string= "application/json" (gethash "mimeType" first-content)))
+      (is (string= "test://data" (gethash "uri" first-content)))
+      (is (string= "test content" (gethash "text" first-content))))))
+
+(test handle-resources-read-template-with-mime-type
+  "handle-resources-read-result includes mimeType for template resources"
+  (let ((registry (mcp-lisp/src/primitives/resources/registry:make-resource-registry))
+        (session (mcp-lisp/src/server/state:make-session)))
+    (mcp-lisp/src/primitives/resources/registry:register-resource-template
+     "data://{id}" "Data Resource" "A data resource"
+     (lambda (server session params)
+       (format nil "data for ~a" (cdr (assoc "id" params :test #'string=))))
+     :mime-type "text/plain"
+     :registry registry)
+    (let* ((params (mcp-lisp:make-ht "uri" "data://123"))
+           (result (mcp-lisp/src/server/dispatcher:handle-resources-read-result
+                    params nil session registry))
+           (contents (gethash "contents" result))
+           (first-content (aref contents 0)))
+      (is (string= "text/plain" (gethash "mimeType" first-content)))
+      (is (string= "data://123" (gethash "uri" first-content)))
+      (is (string= "data for 123" (gethash "text" first-content))))))
+
+(test handle-resources-read-without-mime-type
+  "handle-resources-read-result omits mimeType when not registered"
+  (let ((registry (mcp-lisp/src/primitives/resources/registry:make-resource-registry))
+        (session (mcp-lisp/src/server/state:make-session)))
+    (mcp-lisp/src/primitives/resources/registry:register-resource
+     "test://plain" "Plain Resource" "A plain resource"
+     (lambda (server session) "plain content")
+     :registry registry)  ; No :mime-type
+    (let* ((params (mcp-lisp:make-ht "uri" "test://plain"))
+           (result (mcp-lisp/src/server/dispatcher:handle-resources-read-result
+                    params nil session registry))
+           (contents (gethash "contents" result))
+           (first-content (aref contents 0)))
+      (is (null (gethash "mimeType" first-content)))
+      (is (string= "plain content" (gethash "text" first-content))))))

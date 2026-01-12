@@ -112,11 +112,14 @@ Returns (values literals params) where literals has one more element than params
     (loop while (< i len) do
       (if (char= (char template i) #\{)
           (let ((end (position #\} template :start i)))
-            (when end
-              (push (subseq template current-start i) literals)
-              (push (subseq template (1+ i) end) params)
-              (setf current-start (1+ end))
-              (setf i (1+ end))))
+            (if end
+                (progn
+                  (push (subseq template current-start i) literals)
+                  (push (subseq template (1+ i) end) params)
+                  (setf current-start (1+ end))
+                  (setf i (1+ end)))
+                ;; No matching } - treat { as literal and advance
+                (incf i)))
           (incf i)))
     (push (subseq template current-start) literals)
     (values (nreverse literals) (nreverse params))))

@@ -25,7 +25,12 @@
                 #:get-prompt-handler
                 #:get-all-prompt-descriptors)
   (:import-from #:mcp-lisp/src/primitives/resources/registry
-                #:get-resource-handler
+                #:get-resource
+                #:find-matching-template
+                #:resource-entry-handler
+                #:resource-entry-mime-type
+                #:resource-template-entry-handler
+                #:resource-template-entry-mime-type
                 #:get-all-resource-descriptors
                 #:get-all-template-descriptors)
   (:export #:handle-tools-list-result
@@ -117,23 +122,44 @@
       ((null uri)
        (error 'invalid-params-error :message "Missing resource URI"))
       (t
-       (multiple-value-bind (handler template-params)
-           (get-resource-handler uri registry)
-         (cond
-           ((null handler)
-            (error 'protocol-error
-                   :code -32002
-                   :message (format nil "Resource not found: ~a" uri)))
-           (t
-            (handler-case
-                (let ((content (if template-params
-                                   (funcall handler server session template-params)
-                                   (funcall handler server session))))
-                  (let ((text (if (stringp content)
-                                  content
-                                  (encode-json content))))
-                    (make-ht "contents"
-                             (vector (make-ht "uri" uri "text" text)))))
-              (error (e)
-                (error 'internal-error
-                       :message (format nil "Resource error: ~a" e)))))))))))
+       ;; Try static resource first, then template
+       (let ((static-entry (get-resource uri registry)))
+         (if static-entry
+             ;; Static resource
+             (let ((handler (resource-entry-handler static-entry))
+                   (mime-type (resource-entry-mime-type static-entry)))
+               (handler-case
+                   (let* ((content (funcall handler server session))
+                          (text (if (stringp content)
+                                    content
+                                    (encode-json content)))
+                          (result (make-ht "uri" uri "text" text)))
+                     (when mime-type
+                       (setf (gethash "mimeType" result) mime-type))
+                     (make-ht "contents" (vector result)))
+                 (error (e)
+                   (error 'internal-error
+                          :message (format nil "Resource error: ~a" e)))))
+             ;; Try template match
+             (multiple-value-bind (template-entry template-params)
+                 (find-matching-template uri registry)
+               (cond
+                 ((null template-entry)
+                  (error 'protocol-error
+                         :code -32002
+                         :message (format nil "Resource not found: ~a" uri)))
+                 (t
+                  (let ((handler (resource-template-entry-handler template-entry))
+                        (mime-type (resource-template-entry-mime-type template-entry)))
+                    (handler-case
+                        (let* ((content (funcall handler server session template-params))
+                               (text (if (stringp content)
+                                         content
+                                         (encode-json content)))
+                               (result (make-ht "uri" uri "text" text)))
+                          (when mime-type
+                            (setf (gethash "mimeType" result) mime-type))
+                          (make-ht "contents" (vector result)))
+                      (error (e)
+                        (error 'internal-error
+                               :message (format nil "Resource error: ~a" e))))))))))))))

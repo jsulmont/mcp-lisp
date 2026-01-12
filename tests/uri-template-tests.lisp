@@ -83,3 +83,18 @@
   (let ((result (mcp-lisp/src/primitives/resources/registry::match-uri-template
                  "http://example.com/{path}/info" "http://example.com/users/info")))
     (is (equal '(("path" . "users")) result))))
+
+(test parse-uri-template-unmatched-brace
+  "parse-uri-template handles unmatched { without infinite loop"
+  (multiple-value-bind (literals params)
+      (mcp-lisp/src/primitives/resources/registry::parse-uri-template "file://{path")
+    ;; Unmatched { is treated as literal
+    (is (equal '("file://{path") literals))
+    (is (null params))))
+
+(test parse-uri-template-multiple-unmatched
+  "parse-uri-template handles multiple unmatched braces"
+  (multiple-value-bind (literals params)
+      (mcp-lisp/src/primitives/resources/registry::parse-uri-template "a{b{c")
+    (is (equal '("a{b{c") literals))
+    (is (null params))))
