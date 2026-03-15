@@ -491,6 +491,13 @@ Returns 202 for notifications and responses."
       ((and (eq method :post) (string= path *mcp-path*)) (post-handler))
       ((and (eq method :get) (string= path *mcp-path*)) (get-handler))
       ((and (eq method :delete) (string= path *mcp-path*)) (delete-handler))
+      ((and (eq method :get) (string= path "/health"))
+       (sb-ext:gc :full t)
+       (setf (hunchentoot:content-type*) "application/json")
+       (encode-json (make-ht "heap_mb" (round (/ (sb-kernel:dynamic-usage) 1048576))
+                             "threads" (length (bt:all-threads))
+                             "pending_responses" (hash-table-count *pending-responses*)
+                             "sse_clients" (if *sse-clients* (hash-table-count *sse-clients*) 0))))
       (t (setf (hunchentoot:return-code*) 404) "Not Found"))))
 
 ;;; --- Public API ---

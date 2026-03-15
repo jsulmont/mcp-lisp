@@ -123,6 +123,17 @@ npx @modelcontextprotocol/conformance client \
   --command "sbcl --non-interactive --load conformance-client.lisp"
 ```
 
+## Soak Testing
+
+Continuous stress test with live health monitoring:
+
+```bash
+sbcl --load conformance-server.lisp   # terminal 1
+uv run soak-test.py --concurrency 50  # terminal 2, Ctrl-C to stop
+```
+
+Reports req/s, latency percentiles, heap usage, and leak detection every 5 seconds.
+
 ## Testing
 
 ```bash
