@@ -30,6 +30,24 @@
 ;; Initialize sandbox on load
 (ensure-sandbox)
 
+(defun json-serializable-p (value)
+  "Return T if VALUE can be directly serialized to JSON."
+  (typecase value
+    ((or hash-table vector string number) t)
+    (null t)  ; encodes as JSON null/false
+    (t nil)))
+
+(defun result-to-string (value)
+  "Render a single eval result as a string.
+JSON-serializable structures are encoded as JSON to avoid unreadable
+print forms like #<HASH-TABLE ...> and to prevent escape accumulation
+in nested eval scenarios."
+  (if (and (json-serializable-p value)
+           (not (stringp value))  ; strings print fine with ~s
+           (not (numberp value))) ; numbers print fine with ~s
+      (mcp-lisp/src/json:encode-json value)
+      (prin1-to-string value)))
+
 ;;; eval_lisp - Evaluate Lisp forms with warning/error capture
 
 (define-tool eval-lisp ((code string "The Lisp code to evaluate" :required t))
@@ -65,16 +83,18 @@ Captures printed output, warnings, and errors."
         (error (e)
           (setf error-msg (princ-to-string e)))))
     ;; Return structured feedback
-    (with-output-to-string (out)
-      (when (and printed-output (plusp (length printed-output)))
-        (format out "Output:~%~a~%" printed-output))
-      (when warnings
-        (format out "Warnings:~%")
-        (dolist (w (nreverse warnings))
-          (format out "  ~a~%" w)))
-      (when error-msg
-        (format out "Error: ~a~%" error-msg))
-      (format out "Results: ~{~s~^, ~}" (nreverse results)))))
+    (let ((final-results (nreverse results)))
+      (with-output-to-string (out)
+        (when (and printed-output (plusp (length printed-output)))
+          (format out "Output:~%~a~%" printed-output))
+        (when warnings
+          (format out "Warnings:~%")
+          (dolist (w (nreverse warnings))
+            (format out "  ~a~%" w)))
+        (when error-msg
+          (format out "Error: ~a~%" error-msg))
+        (format out "Results: ~{~a~^, ~}"
+                (mapcar #'result-to-string final-results))))))
 
 ;;; clear_repl - Reset the sandbox
 
