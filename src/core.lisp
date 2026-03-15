@@ -11,9 +11,9 @@
 
 (in-package #:mcp-lisp/src/core)
 
-(defvar +sdk-version+ "0.1.0")
+(defparameter +sdk-version+ "0.1.0")
 
-(defvar +protocol-version+ "2025-11-25")
+(defparameter +protocol-version+ "2025-11-25")
 
 (defparameter +supported-protocol-versions+
   '("2025-11-25" "2025-06-18" "2025-03-26" "2024-11-05")

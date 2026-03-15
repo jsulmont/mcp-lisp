@@ -350,51 +350,45 @@ The client will POST the response back, which gets routed via deliver-pending-re
 
 ;;; --- HTTP handlers ---
 
-(defun is-initialize-request-p (json-string)
-  (handler-case
-      (let ((req (decode-json json-string)))
-        (and (hash-table-p req) (equal "initialize" (gethash "method" req))))
-    (error () nil)))
-
 (defun post-handler ()
   "Handle POST to MCP endpoint.
 Uses SSE streaming for JSON-RPC requests (to support mid-execution messaging).
 Returns 202 for notifications and responses."
   (let* ((body (hunchentoot:raw-post-data :force-text t))
-         (is-init (is-initialize-request-p body)))
-    ;; Quick check: is this a response to a pending server→client request?
-    (handler-case
-        (let ((parsed (decode-json body)))
-          (when (is-json-rpc-response-p parsed)
-            (deliver-pending-response parsed)
-            (setf (hunchentoot:return-code*) 202)
-            (return-from post-handler "")))
-      (error () nil))
-    ;; Check if this is a notification (no id)
-    (handler-case
-        (let ((parsed (decode-json body)))
-          (when (and (hash-table-p parsed) (null (gethash "id" parsed)))
-            ;; Notification — handle synchronously
-            (let ((method (gethash "method" parsed))
-                  (params (gethash "params" parsed)))
-              (let ((handler (gethash method *handlers*)))
-                (when handler
-                  (handler-case (funcall handler params)
-                    (error (e) (log:error "Notification handler error (~a): ~a" method e))))))
-            (setf (hunchentoot:return-code*) 202)
-            (return-from post-handler "")))
-      (error () nil))
-    ;; JSON-RPC request — use SSE streaming
-    (setf (hunchentoot:content-type*) "text/event-stream")
-    (setf (hunchentoot:header-out "Cache-Control") "no-cache")
-    ;; Assign session ID on initialize
-    (when is-init
-      (let ((session-id (generate-session-id)))
-        (setf *mcp-session-id* session-id)
-        (setf (hunchentoot:header-out "MCP-Session-Id") session-id)
-        (log:debug "Session created: ~a" session-id)))
-    (let ((stream (hunchentoot:send-headers)))
-      (handle-request-streaming body stream))))
+         (parsed (handler-case (decode-json body)
+                   (error () nil))))
+    (unless parsed
+      (setf (hunchentoot:return-code*) 400)
+      (return-from post-handler "Bad Request: invalid JSON"))
+    (cond
+      ;; Response to a pending server->client request
+      ((is-json-rpc-response-p parsed)
+       (deliver-pending-response parsed)
+       (setf (hunchentoot:return-code*) 202)
+       "")
+      ;; Notification (no id)
+      ((null (gethash "id" parsed))
+       (let ((method (gethash "method" parsed))
+             (params (gethash "params" parsed)))
+         (let ((handler (and method (gethash method *handlers*))))
+           (when handler
+             (handler-case
+                 (call-with-access-log method nil params (lambda () (funcall handler params)))
+               (error (e) (log:error "Notification handler error (~a): ~a" method e))))))
+       (setf (hunchentoot:return-code*) 202)
+       "")
+      ;; JSON-RPC request — use SSE streaming
+      (t
+       (setf (hunchentoot:content-type*) "text/event-stream")
+       (setf (hunchentoot:header-out "Cache-Control") "no-cache")
+       ;; Assign session ID on initialize
+       (when (equal "initialize" (gethash "method" parsed))
+         (let ((session-id (generate-session-id)))
+           (setf *mcp-session-id* session-id)
+           (setf (hunchentoot:header-out "MCP-Session-Id") session-id)
+           (log:debug "Session created: ~a" session-id)))
+       (let ((stream (hunchentoot:send-headers)))
+         (handle-request-streaming body stream))))))
 
 (defun get-handler ()
   "Handle GET to MCP endpoint — SSE stream for server-initiated messages."

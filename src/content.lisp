@@ -33,9 +33,8 @@ Example: (make-content :text :text \"hello\")"
 (defun content-vector (&rest contents)
   "Create a vector of content blocks from CONTENTS.
 Each element can be a hash-table or a string (converted to text content)."
-  (coerce (mapcar (lambda (c)
-                    (if (stringp c)
-                        (text-content c)
-                        c))
-                  contents)
-          'vector))
+  (map 'vector (lambda (c)
+                 (if (stringp c)
+                     (text-content c)
+                     c))
+       contents))

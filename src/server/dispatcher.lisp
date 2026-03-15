@@ -159,59 +159,48 @@ Contains progressToken and other request metadata.")
   "Return resources/templates/list result payload."
   (make-ht "resourceTemplates" (get-all-template-descriptors registry)))
 
+(defun format-resource-result (uri content mime-type)
+  "Build a resources/read response from URI, raw CONTENT, and optional MIME-TYPE."
+  (let ((entry (make-ht "uri" uri)))
+    (cond
+      ((stringp content)
+       (setf (gethash "text" entry) content))
+      ((and (hash-table-p content) (gethash "blob" content))
+       (setf (gethash "blob" entry) (gethash "blob" content)))
+      (t
+       (setf (gethash "text" entry) (encode-json content))))
+    (when mime-type
+      (setf (gethash "mimeType" entry) mime-type))
+    (make-ht "contents" (vector entry))))
+
 (defun handle-resources-read-result (params server session registry)
   "Return resources/read result payload. Signals error on failure."
   (let ((uri (and params (gethash "uri" params))))
-    (cond
-      ((null uri)
-       (error 'invalid-params-error :message "Missing resource URI"))
-      (t
-       ;; Try static resource first, then template
-       (let ((static-entry (get-resource uri registry)))
-         (if static-entry
-             ;; Static resource
-             (let ((handler (resource-entry-handler static-entry))
-                   (mime-type (resource-entry-mime-type static-entry)))
-               (handler-case
-                   (let* ((content (funcall handler server session))
-                          (result (make-ht "uri" uri)))
-                     (cond
-                       ((stringp content)
-                        (setf (gethash "text" result) content))
-                       ((and (hash-table-p content) (gethash "blob" content))
-                        (setf (gethash "blob" result) (gethash "blob" content)))
-                       (t
-                        (setf (gethash "text" result) (encode-json content))))
-                     (when mime-type
-                       (setf (gethash "mimeType" result) mime-type))
-                     (make-ht "contents" (vector result)))
-                 (error (e)
-                   (error 'internal-error
-                          :message (format nil "Resource error: ~a" e)))))
-             ;; Try template match
-             (multiple-value-bind (template-entry template-params)
-                 (find-matching-template uri registry)
-               (cond
-                 ((null template-entry)
-                  (error 'protocol-error
-                         :code -32002
-                         :message (format nil "Resource not found: ~a" uri)))
-                 (t
-                  (let ((handler (resource-template-entry-handler template-entry))
-                        (mime-type (resource-template-entry-mime-type template-entry)))
-                    (handler-case
-                        (let* ((content (funcall handler server session template-params))
-                               (result (make-ht "uri" uri)))
-                          (cond
-                            ((stringp content)
-                             (setf (gethash "text" result) content))
-                            ((and (hash-table-p content) (gethash "blob" content))
-                             (setf (gethash "blob" result) (gethash "blob" content)))
-                            (t
-                             (setf (gethash "text" result) (encode-json content))))
-                          (when mime-type
-                            (setf (gethash "mimeType" result) mime-type))
-                          (make-ht "contents" (vector result)))
-                      (error (e)
-                        (error 'internal-error
-                               :message (format nil "Resource error: ~a" e))))))))))))))
+    (unless uri
+      (error 'invalid-params-error :message "Missing resource URI"))
+    (let ((static-entry (get-resource uri registry)))
+      (if static-entry
+          (handler-case
+              (format-resource-result
+               uri
+               (funcall (resource-entry-handler static-entry) server session)
+               (resource-entry-mime-type static-entry))
+            (error (e)
+              (error 'internal-error
+                     :message (format nil "Resource error: ~a" e))))
+          ;; Try template match
+          (multiple-value-bind (template-entry template-params)
+              (find-matching-template uri registry)
+            (unless template-entry
+              (error 'protocol-error
+                     :code -32002
+                     :message (format nil "Resource not found: ~a" uri)))
+            (handler-case
+                (format-resource-result
+                 uri
+                 (funcall (resource-template-entry-handler template-entry)
+                          server session template-params)
+                 (resource-template-entry-mime-type template-entry))
+              (error (e)
+                (error 'internal-error
+                       :message (format nil "Resource error: ~a" e)))))))))

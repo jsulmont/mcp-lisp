@@ -32,6 +32,14 @@
 
 (in-package #:mcp-lisp/src/transport/mcp-client)
 
+;;; A pending-request bundles a lock, condition variable, and result cell.
+;;; The reader thread signals the CV; the calling thread waits on it.
+(defstruct pending-request
+  (lock   (bt:make-lock "pending-req") :read-only t)
+  (cv     (bt:make-condition-variable :name "pending-req-cv") :read-only t)
+  (status nil :type (member nil :ok :error))
+  (value  nil))
+
 (defclass stdio-transport ()
   ((command :initarg :command
             :reader transport-command
@@ -49,7 +57,7 @@
             :accessor transport-next-id)
    (pending :initform (make-hash-table :test #'eql)
             :accessor transport-pending
-            :documentation "Hash-table of pending request ID -> result cons cell.")
+            :documentation "Hash-table of request ID -> pending-request.")
    (pending-lock :initform (bt:make-lock "pending-requests")
                  :accessor transport-pending-lock)
    (reader-thread :initform nil
@@ -68,13 +76,17 @@
 ;;; --- Reader loop ---
 
 (defun resolve-pending (transport id result error-p)
-  "Resolve a pending request with RESULT."
-  (bt:with-lock-held ((transport-pending-lock transport))
-    (let ((cell (gethash id (transport-pending transport))))
-      (when cell
-        (setf (car cell) (if error-p :error :ok))
-        (setf (cdr cell) result)
-        (remhash id (transport-pending transport))))))
+  "Resolve a pending request — set result and signal the waiting thread."
+  (let ((req nil))
+    (bt:with-lock-held ((transport-pending-lock transport))
+      (setf req (gethash id (transport-pending transport)))
+      (when req
+        (remhash id (transport-pending transport))))
+    (when req
+      (bt:with-lock-held ((pending-request-lock req))
+        (setf (pending-request-status req) (if error-p :error :ok)
+              (pending-request-value req) result)
+        (bt:condition-notify (pending-request-cv req))))))
 
 (defun reader-loop (transport)
   "Read responses from server and dispatch to pending requests or notification handler."
@@ -87,9 +99,7 @@
                  (let ((id (gethash "id" response))
                        (method (gethash "method" response))
                        (params (gethash "params" response))
-                       (error-obj (gethash "error" response))
-                       (result (gethash "result" response)))
-                   (declare (ignore result))
+                       (error-obj (gethash "error" response)))
                    (if id
                        ;; Response to a request
                        (if error-obj
@@ -151,29 +161,37 @@
     (error 'mcp-error :message "Transport not running"))
   (let* ((id (bt:with-lock-held ((transport-pending-lock transport))
                (incf (transport-next-id transport))))
-         (cell (cons nil nil))
+         (req (make-pending-request))
          (request (make-ht "jsonrpc" "2.0"
                            "id" id
                            "method" method
                            "params" params)))
+    ;; Register pending request
     (bt:with-lock-held ((transport-pending-lock transport))
-      (setf (gethash id (transport-pending transport)) cell))
+      (setf (gethash id (transport-pending transport)) req))
+    ;; Send request
     (write-json-line request (transport-output transport))
-    (let ((deadline (+ (get-internal-real-time)
-                       (* timeout internal-time-units-per-second))))
-      (loop
-        (when (car cell)
-          (if (eq (car cell) :error)
-              (let ((err (cdr cell)))
-                (error 'protocol-error
-                       :code (gethash "code" err)
-                       :message (gethash "message" err)))
-              (return (cdr cell))))
-        (when (> (get-internal-real-time) deadline)
-          (bt:with-lock-held ((transport-pending-lock transport))
-            (remhash id (transport-pending transport)))
-          (error 'mcp-error :message "Request timed out"))
-        (sleep 0.01)))))
+    ;; Wait for response via condition variable
+    (bt:with-lock-held ((pending-request-lock req))
+      (let ((deadline (+ (get-internal-real-time)
+                         (* timeout internal-time-units-per-second))))
+        (loop until (pending-request-status req)
+              do (let ((remaining (/ (- deadline (get-internal-real-time))
+                                     internal-time-units-per-second)))
+                   (when (<= remaining 0)
+                     (bt:with-lock-held ((transport-pending-lock transport))
+                       (remhash id (transport-pending transport)))
+                     (error 'mcp-error :message "Request timed out"))
+                   (bt:condition-wait (pending-request-cv req)
+                                      (pending-request-lock req)
+                                      :timeout (min remaining 1.0))))))
+    ;; Return result or signal error
+    (if (eq (pending-request-status req) :error)
+        (let ((err (pending-request-value req)))
+          (error 'protocol-error
+                 :code (gethash "code" err)
+                 :message (gethash "message" err)))
+        (pending-request-value req))))
 
 (defmethod transport-notify ((transport stdio-transport) method &optional params)
   "Send a notification (no response expected)."
