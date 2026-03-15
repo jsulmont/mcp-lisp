@@ -34,6 +34,7 @@
   (:import-from #:mcp-lisp/src/client/client
                 #:mcp-client
                 #:make-client
+                #:make-http-client
                 #:client-name
                 #:client-version
                 #:client-server-info
@@ -187,6 +188,7 @@
            ;; Client
            #:mcp-client
            #:make-client
+           #:make-http-client
            #:client-name
            #:client-version
            #:client-server-info

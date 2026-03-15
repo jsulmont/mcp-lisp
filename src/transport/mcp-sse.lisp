@@ -433,7 +433,7 @@ Returns 202 for notifications and responses."
         (when *sse-clients*
           (let ((stream (gethash session-id *sse-clients*)))
             (when stream (remhash session-id *sse-clients*)))))
-      (log:info "Session terminated: ~a" session-id)))
+      (log:debug "Session terminated: ~a" session-id)))
   (setf (hunchentoot:return-code*) 202)
   "")
 
