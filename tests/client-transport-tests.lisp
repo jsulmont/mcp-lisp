@@ -12,21 +12,21 @@
 
 (test transport-notification-handler-default-nil
   "Transport notification handler defaults to NIL"
-  (let ((transport (mcp-lisp/src/transport/mcp-client:make-transport
-                    *standard-input* *standard-output*)))
-    (is (null (mcp-lisp/src/transport/mcp-client:transport-notification-handler
+  (let ((transport (mcp-lisp/src/transport/mcp-client:make-stdio-transport
+                    '("echo"))))
+    (is (null (mcp-lisp/src/transport/protocol:transport-notification-handler
                transport)))))
 
 (test transport-notification-handler-settable
   "Transport notification handler can be set"
-  (let ((transport (mcp-lisp/src/transport/mcp-client:make-transport
-                    *standard-input* *standard-output*))
+  (let ((transport (mcp-lisp/src/transport/mcp-client:make-stdio-transport
+                    '("echo")))
         (handler (lambda (method params)
                    (declare (ignore method params)))))
-    (setf (mcp-lisp/src/transport/mcp-client:transport-notification-handler transport)
+    (setf (mcp-lisp/src/transport/protocol:transport-notification-handler transport)
           handler)
     (is (eq handler
-            (mcp-lisp/src/transport/mcp-client:transport-notification-handler
+            (mcp-lisp/src/transport/protocol:transport-notification-handler
              transport)))))
 
 ;;; Test notification dispatch in reader loop

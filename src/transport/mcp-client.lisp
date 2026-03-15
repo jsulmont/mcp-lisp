@@ -1,6 +1,6 @@
 ;;;; src/transport/mcp-client.lisp
 ;;;;
-;;;; MCP client transport using newline-delimited JSON over stdio.
+;;;; MCP stdio transport — newline-delimited JSON over a subprocess.
 
 (defpackage #:mcp-lisp/src/transport/mcp-client
   (:use #:cl)
@@ -13,8 +13,16 @@
   (:import-from #:mcp-lisp/src/conditions
                 #:mcp-error
                 #:protocol-error)
-  (:export #:mcp-transport
-           #:make-transport
+  (:import-from #:mcp-lisp/src/transport/protocol
+                #:transport-start
+                #:transport-stop
+                #:transport-call
+                #:transport-notify
+                #:transport-running-p
+                #:transport-notification-handler)
+  (:export #:stdio-transport
+           #:make-stdio-transport
+           ;; Re-export protocol GFs so downstream can import from here
            #:transport-start
            #:transport-stop
            #:transport-call
@@ -24,11 +32,17 @@
 
 (in-package #:mcp-lisp/src/transport/mcp-client)
 
-(defclass mcp-transport ()
-  ((input :initarg :input
+(defclass stdio-transport ()
+  ((command :initarg :command
+            :reader transport-command
+            :documentation "Command list to spawn the server subprocess.")
+   (process :initform nil
+            :accessor transport-process
+            :documentation "The subprocess (uiop process-info).")
+   (input :initform nil
           :accessor transport-input
           :documentation "Input stream (read responses from server).")
-   (output :initarg :output
+   (output :initform nil
            :accessor transport-output
            :documentation "Output stream (write requests to server).")
    (next-id :initform 0
@@ -45,11 +59,13 @@
    (notification-handler :initform nil
                          :accessor transport-notification-handler
                          :documentation "Function (method params) called for server notifications."))
-  (:documentation "Transport for MCP client using newline-delimited JSON."))
+  (:documentation "MCP client transport over stdio with a subprocess."))
 
-(defun make-transport (input output)
-  "Create a new MCP transport with INPUT and OUTPUT streams."
-  (make-instance 'mcp-transport :input input :output output))
+(defun make-stdio-transport (command)
+  "Create a stdio transport. COMMAND is a list of (program &rest args)."
+  (make-instance 'stdio-transport :command command))
+
+;;; --- Reader loop ---
 
 (defun resolve-pending (transport id result error-p)
   "Resolve a pending request with RESULT."
@@ -73,11 +89,12 @@
                        (params (gethash "params" response))
                        (error-obj (gethash "error" response))
                        (result (gethash "result" response)))
+                   (declare (ignore result))
                    (if id
                        ;; Response to a request
                        (if error-obj
                            (resolve-pending transport id error-obj t)
-                           (resolve-pending transport id result nil))
+                           (resolve-pending transport id (gethash "result" response) nil))
                        ;; Server-initiated notification (no id)
                        (when (and method (transport-notification-handler transport))
                          (handler-case
@@ -90,37 +107,46 @@
                (setf (transport-running-p transport) nil)
                (return)))))
 
-(defgeneric transport-start (transport)
-  (:documentation "Start the transport reader thread."))
+;;; --- Protocol implementation ---
 
-(defmethod transport-start ((transport mcp-transport))
-  "Start the transport reader thread."
-  (setf (transport-running-p transport) t)
-  (setf (transport-reader-thread transport)
-        (bt:make-thread (lambda () (reader-loop transport))
-                        :name "mcp-client-reader"))
+(defmethod transport-start ((transport stdio-transport))
+  "Launch the subprocess and start the reader thread."
+  (let* ((command (transport-command transport))
+         (process (uiop:launch-program command
+                                       :input :stream
+                                       :output :stream
+                                       :error-output :interactive)))
+    (setf (transport-process transport) process
+          (transport-input transport) (uiop:process-info-output process)
+          (transport-output transport) (uiop:process-info-input process)
+          (transport-running-p transport) t
+          (transport-reader-thread transport)
+          (bt:make-thread (lambda () (reader-loop transport))
+                          :name "mcp-client-reader")))
   transport)
 
-(defgeneric transport-stop (transport)
-  (:documentation "Stop the transport."))
-
-(defmethod transport-stop ((transport mcp-transport))
-  "Stop the transport and clean up."
+(defmethod transport-stop ((transport stdio-transport))
+  "Stop reader thread, terminate subprocess, clean up."
   (setf (transport-running-p transport) nil)
+  ;; Close input to unblock the reader thread
+  (when (transport-input transport)
+    (ignore-errors (close (transport-input transport))))
   (when (transport-reader-thread transport)
-    (handler-case (bt:destroy-thread (transport-reader-thread transport))
-      (error (e) (log:debug "Thread destroy error: ~a" e)))
+    (ignore-errors (bt:join-thread (transport-reader-thread transport)))
     (setf (transport-reader-thread transport) nil))
+  ;; Terminate subprocess
+  (when (transport-process transport)
+    (handler-case (uiop:terminate-process (transport-process transport))
+      (error (e) (log:debug "Process terminate error: ~a" e)))
+    (handler-case (uiop:wait-process (transport-process transport))
+      (error (e) (log:debug "Process wait error: ~a" e)))
+    (setf (transport-process transport) nil))
   (bt:with-lock-held ((transport-pending-lock transport))
     (clrhash (transport-pending transport)))
   transport)
 
-(defgeneric transport-call (transport method params &key timeout)
-  (:documentation "Make a JSON-RPC call and wait for response."))
-
-(defmethod transport-call ((transport mcp-transport) method params &key (timeout 30))
-  "Make a JSON-RPC call and wait for response.
-Returns the result or signals an error."
+(defmethod transport-call ((transport stdio-transport) method params &key (timeout 30))
+  "Make a JSON-RPC call and wait for response."
   (unless (transport-running-p transport)
     (error 'mcp-error :message "Transport not running"))
   (let* ((id (bt:with-lock-held ((transport-pending-lock transport))
@@ -149,10 +175,7 @@ Returns the result or signals an error."
           (error 'mcp-error :message "Request timed out"))
         (sleep 0.01)))))
 
-(defgeneric transport-notify (transport method &optional params)
-  (:documentation "Send a notification (no response expected)."))
-
-(defmethod transport-notify ((transport mcp-transport) method &optional params)
+(defmethod transport-notify ((transport stdio-transport) method &optional params)
   "Send a notification (no response expected)."
   (unless (transport-running-p transport)
     (error 'mcp-error :message "Transport not running"))
