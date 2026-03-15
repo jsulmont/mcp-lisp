@@ -140,28 +140,73 @@ Returns whatever THUNK returns."
 
 ;;; --- JSON-RPC helpers ---
 
+;;; --- Reusable JSON-RPC envelopes ---
+;;; Per-thread hash-tables avoid allocating on every request.
+;;; We store them in a global table keyed by thread, lazily initialized.
+
+(defvar *thread-envelopes* (make-hash-table :test #'eq :synchronized t)
+  "Thread -> (response error error-inner request notification) mapping.")
+
+(defun thread-envelopes ()
+  "Get or create the reusable envelope hash-tables for the current thread."
+  (let ((thread (bt:current-thread)))
+    (or (gethash thread *thread-envelopes*)
+        (setf (gethash thread *thread-envelopes*)
+              (list (make-hash-table :test #'equal :size 4)   ; response
+                    (make-hash-table :test #'equal :size 4)   ; error
+                    (make-hash-table :test #'equal :size 4)   ; error-inner
+                    (make-hash-table :test #'equal :size 5)   ; request
+                    (make-hash-table :test #'equal :size 4)))))) ; notification
+
 (defun make-json-rpc-response (id result)
-  (make-ht "jsonrpc" "2.0" "id" id "result" result))
+  (let ((ht (first (thread-envelopes))))
+    (setf (gethash "jsonrpc" ht) "2.0"
+          (gethash "id" ht) id
+          (gethash "result" ht) result)
+    (remhash "error" ht)
+    ht))
 
 (defun make-json-rpc-error (id code message &optional data)
-  (let ((err (make-ht "code" code "message" message)))
-    (when data
-      (setf (gethash "data" err) data))
-    (make-ht "jsonrpc" "2.0" "id" id "error" err)))
+  (destructuring-bind (resp err-ht err-inner &rest _) (thread-envelopes)
+    (declare (ignore resp _))
+    (setf (gethash "code" err-inner) code
+          (gethash "message" err-inner) message)
+    (if data
+        (setf (gethash "data" err-inner) data)
+        (remhash "data" err-inner))
+    (setf (gethash "jsonrpc" err-ht) "2.0"
+          (gethash "id" err-ht) id
+          (gethash "error" err-ht) err-inner)
+    (remhash "result" err-ht)
+    err-ht))
 
 (defun make-json-rpc-request (id method params)
-  (let ((req (make-ht "jsonrpc" "2.0" "id" id "method" method)))
-    (when params
-      (setf (gethash "params" req) params))
-    req))
+  (let ((ht (fourth (thread-envelopes))))
+    (setf (gethash "jsonrpc" ht) "2.0"
+          (gethash "id" ht) id
+          (gethash "method" ht) method)
+    (if params
+        (setf (gethash "params" ht) params)
+        (remhash "params" ht))
+    ht))
 
 (defun make-json-rpc-notification (method params)
-  (let ((n (make-ht "jsonrpc" "2.0" "method" method)))
-    (when params
-      (setf (gethash "params" n) params))
-    n))
+  (let ((ht (fifth (thread-envelopes))))
+    (setf (gethash "jsonrpc" ht) "2.0"
+          (gethash "method" ht) method)
+    (if params
+        (setf (gethash "params" ht) params)
+        (remhash "params" ht))
+    (remhash "id" ht)
+    ht))
 
 ;;; --- SSE helpers ---
+;;; Write SSE framing directly as bytes to avoid string allocation.
+
+(defvar *sse-event-prefix* (flexi-streams:string-to-octets "event: " :external-format :utf-8))
+(defvar *sse-data-prefix* (flexi-streams:string-to-octets "data: " :external-format :utf-8))
+(defvar *sse-newline* (flexi-streams:string-to-octets (format nil "~%") :external-format :utf-8))
+(defvar *sse-double-newline* (flexi-streams:string-to-octets (format nil "~%~%") :external-format :utf-8))
 
 (defun write-utf8 (string stream)
   (write-sequence (flexi-streams:string-to-octets string :external-format :utf-8) stream))
@@ -171,9 +216,14 @@ Returns whatever THUNK returns."
     (format nil "~a-~a" (get-universal-time) (incf *next-session-id*))))
 
 (defun send-sse-event (stream data &optional event-type)
+  "Send an SSE event, minimizing allocation."
   (when event-type
-    (write-utf8 (format nil "event: ~a~%" event-type) stream))
-  (write-utf8 (format nil "data: ~a~%~%" data) stream)
+    (write-sequence *sse-event-prefix* stream)
+    (write-utf8 event-type stream)
+    (write-sequence *sse-newline* stream))
+  (write-sequence *sse-data-prefix* stream)
+  (write-utf8 data stream)
+  (write-sequence *sse-double-newline* stream)
   (force-output stream))
 
 (defun send-to-session (session-id data &optional event-type)
@@ -509,6 +559,7 @@ Returns 202 for notifications and responses."
         *mcp-session-id* nil
         *sse-clients* (make-hash-table :test #'equal)
         *pending-responses* (make-hash-table :test #'equal)
+        *thread-envelopes* (make-hash-table :test #'eq :synchronized t)
         *sse-server* (make-instance 'mcp-acceptor :port port
                                     :access-log-destination nil
                                     :taskmaster (make-instance 'hunchentoot:one-thread-per-connection-taskmaster)))

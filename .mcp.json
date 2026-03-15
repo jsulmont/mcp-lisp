@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "lisp-tools": {
+      "type": "http",
+      "url": "http://localhost:8080/mcp"
+    }
+  }
+}
