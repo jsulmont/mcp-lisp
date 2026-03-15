@@ -16,7 +16,7 @@
     (mcp-lisp/src/primitives/tools/registry:register-tool
      "test-tool" "A test tool"
      (mcp-lisp:make-ht) (lambda (s sess args) "result")
-     registry)
+     :registry registry)
     (is (mcp-lisp/src/primitives/tools/registry:get-tool "test-tool" registry))))
 
 (test tool-registry-unregister
@@ -25,7 +25,7 @@
     (mcp-lisp/src/primitives/tools/registry:register-tool
      "temp-tool" "Temporary tool"
      (mcp-lisp:make-ht) (lambda (s sess args) nil)
-     registry)
+     :registry registry)
     (is (mcp-lisp/src/primitives/tools/registry:get-tool "temp-tool" registry))
     (mcp-lisp/src/primitives/tools/registry:unregister-tool "temp-tool" registry)
     (is (null (mcp-lisp/src/primitives/tools/registry:get-tool "temp-tool" registry)))))
@@ -37,7 +37,7 @@
     (mcp-lisp/src/primitives/tools/registry:register-tool
      "handler-tool" "Test handler tool"
      (mcp-lisp:make-ht) handler
-     registry)
+     :registry registry)
     (is (eq handler
             (mcp-lisp/src/primitives/tools/registry:get-tool-handler
              "handler-tool" registry)))))
@@ -48,11 +48,11 @@
     (mcp-lisp/src/primitives/tools/registry:register-tool
      "tool1" "First tool"
      (mcp-lisp:make-ht) (lambda (s sess args) nil)
-     registry)
+     :registry registry)
     (mcp-lisp/src/primitives/tools/registry:register-tool
      "tool2" "Second tool"
      (mcp-lisp:make-ht) (lambda (s sess args) nil)
-     registry)
+     :registry registry)
     (let ((descriptors (mcp-lisp/src/primitives/tools/registry:get-all-tool-descriptors registry)))
       (is (vectorp descriptors))
       (is (= 2 (length descriptors))))))

@@ -174,14 +174,17 @@
 ;;; Agent loop - Response processing
 
 (defun process-openai-response (response messages)
-  "Process OpenAI/Groq response. Returns (values done-p result updated-messages)."
+  "Process OpenAI/Groq response. Returns (values done-p result updated-messages).
+Uses finish_reason as the canonical loop control signal:
+  - \"tool_calls\": execute requested tools and continue
+  - \"stop\": return final response to user"
   (let* ((choice (aref (gethash "choices" response) 0))
          (message (gethash "message" choice))
          (finish-reason (gethash "finish_reason" choice))
          (content (gethash "content" message))
          (tool-calls (gethash "tool_calls" message)))
-    ;; If no tool calls or stopped, we're done
-    (when (or (null tool-calls) (string= finish-reason "stop"))
+    ;; finish_reason is the canonical signal
+    (when (string/= finish-reason "tool_calls")
       (return-from process-openai-response
         (values t (or content "") messages)))
     ;; Print thinking if verbose
@@ -217,7 +220,10 @@
           (values nil nil new-messages))))))
 
 (defun process-anthropic-response (response messages)
-  "Process Anthropic response. Returns (values done-p result updated-messages)."
+  "Process Anthropic response. Returns (values done-p result updated-messages).
+Uses stop_reason as the canonical loop control signal:
+  - \"tool_use\": execute requested tools and continue
+  - \"end_turn\": return final response to user"
   (let* ((content (gethash "content" response))
          (stop-reason (gethash "stop_reason" response))
          (tool-uses nil)
@@ -230,8 +236,8 @@
                 (push (gethash "text" block) text-parts))
                ((string= block-type "tool_use")
                 (push block tool-uses))))
-    ;; If no tool use, we're done
-    (when (or (null tool-uses) (string= stop-reason "end_turn"))
+    ;; stop_reason is the canonical signal — not presence/absence of tool_use blocks
+    (when (string/= stop-reason "tool_use")
       (let ((final-text (format nil "~{~a~^~%~}" (nreverse text-parts))))
         (return-from process-anthropic-response
           (values t final-text messages))))

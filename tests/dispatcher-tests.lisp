@@ -21,7 +21,7 @@
     (mcp-lisp/src/primitives/tools/registry:register-tool
      "test-tool" "Test tool description"
      (mcp-lisp:make-ht) (lambda (s sess args) "result")
-     registry)
+     :registry registry)
     (let* ((result (mcp-lisp/src/server/dispatcher:handle-tools-list-result registry))
            (tools (gethash "tools" result)))
       (is (= 1 (length tools))))))
@@ -73,7 +73,7 @@
      (mcp-lisp:make-ht)
      (lambda (server session args)
        (mcp-lisp:content-vector (format nil "Echo: ~a" (gethash "message" args))))
-     registry)
+     :registry registry)
     (let* ((params (mcp-lisp:make-ht "name" "echo"
                                      "arguments" (mcp-lisp:make-ht "message" "hello")))
            (result (mcp-lisp/src/server/dispatcher:handle-tools-call-result
@@ -92,7 +92,7 @@
      (lambda (server session args)
        (declare (ignore server session args))
        (mcp-lisp:content-vector "ok"))
-     registry)
+     :registry registry)
     ;; Call with underscore (JSON convention) - should normalize and find
     (let* ((params (mcp-lisp:make-ht "name" "my_tool"
                                      "arguments" (mcp-lisp:make-ht)))

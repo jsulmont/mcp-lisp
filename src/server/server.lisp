@@ -9,7 +9,9 @@
   (:import-from #:mcp-lisp/src/server/state
                 #:server-session
                 #:make-session
-                #:session-initialized-p)
+                #:session-initialized-p
+                #:session-subscribe
+                #:session-unsubscribe)
   (:import-from #:mcp-lisp/src/server/lifecycle
                 #:handle-initialize
                 #:handle-initialized)
@@ -101,9 +103,12 @@
   (or (server-resource-registry server) *global-resource-registry*))
 
 (defun default-capabilities ()
-  (make-ht "tools" (make-ht)
-           "prompts" (make-ht)
-           "resources" (make-ht)))
+  (make-ht "tools" (make-ht "listChanged" t)
+           "prompts" (make-ht "listChanged" t)
+           "resources" (make-ht "listChanged" t
+                                "subscribe" t)
+           "completions" (make-ht)
+           "logging" (make-ht)))
 
 (defun setup-handlers (server handlers)
   "Set up MCP handlers hash-table for the server."
@@ -164,6 +169,26 @@
             (declare (ignore params))
             (handle-resources-templates-list-result resource-registry)))
 
+    (setf (gethash "completion/complete" handlers)
+          (lambda (params)
+            ;; Default: return empty completions. Servers can override via capabilities.
+            (declare (ignore params))
+            (make-ht "completion" (make-ht "values" #()))))
+
+    (setf (gethash "resources/subscribe" handlers)
+          (lambda (params)
+            (let ((uri (and params (gethash "uri" params))))
+              (when uri
+                (session-subscribe session uri))
+              (make-ht))))
+
+    (setf (gethash "resources/unsubscribe" handlers)
+          (lambda (params)
+            (let ((uri (and params (gethash "uri" params))))
+              (when uri
+                (session-unsubscribe session uri))
+              (make-ht))))
+
     (setf (gethash "logging/setLevel" handlers)
           (lambda (params)
             (handle-logging-set-level params)))
@@ -178,7 +203,7 @@
   "Start the server with the specified transport.
 TRANSPORT options:
   :stdio - MCP protocol over stdio (newline-delimited JSON) - default
-  :sse   - MCP protocol over HTTP/SSE on PORT"
+  :sse   - Streamable HTTP on PORT (MCP 2025-03-26+)"
   (setf (server-session server) (make-session))
   (let ((handlers (make-hash-table :test #'equal)))
     (setup-handlers server handlers)
@@ -198,6 +223,6 @@ TRANSPORT options:
   "Create and start an MCP server in one call.
 TRANSPORT options:
   :stdio - MCP protocol over stdio (newline-delimited JSON) - for Claude Code
-  :sse   - MCP protocol over HTTP/SSE on PORT - for persistent servers"
+  :sse   - Streamable HTTP on PORT - for persistent servers"
   (let ((server (make-server :name name :version version)))
     (server-start server :transport transport :port port)))

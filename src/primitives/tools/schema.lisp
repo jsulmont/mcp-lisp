@@ -40,7 +40,8 @@
 PROPERTIES is a hash-table of property-name -> property-schema.
 REQUIRED-LIST is a list of required property names."
   (let ((ht (make-ht "type" "object"
-                     "properties" properties)))
+                     "properties" properties
+                     "additionalProperties" nil)))
     (when required-list
       (setf (gethash "required" ht)
             (coerce required-list 'vector)))

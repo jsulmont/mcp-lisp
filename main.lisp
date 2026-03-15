@@ -26,6 +26,8 @@
                 #:mcp-error
                 #:protocol-error
                 #:tool-error
+                #:tool-error-category
+                #:tool-error-retryable-p
                 #:transport-error
                 #:validation-error)
   ;; Re-export from client
@@ -114,6 +116,10 @@
                 #:create-message
                 #:make-sampling-message
                 #:make-model-preferences)
+  ;; Re-export from elicitation
+  (:import-from #:mcp-lisp/src/server/elicitation
+                #:elicit-form
+                #:elicit-url)
   ;; Re-export from A2A
   (:import-from #:mcp-lisp/src/a2a/main
                 ;; Agent Card
@@ -174,6 +180,8 @@
            #:mcp-error
            #:protocol-error
            #:tool-error
+           #:tool-error-category
+           #:tool-error-retryable-p
            #:transport-error
            #:validation-error
            ;; Client
@@ -247,6 +255,9 @@
            #:create-message
            #:make-sampling-message
            #:make-model-preferences
+           ;; Elicitation
+           #:elicit-form
+           #:elicit-url
            ;; Transport utilities
            #:setup-file-logging
            ;; A2A - Agent Card

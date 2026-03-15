@@ -36,6 +36,7 @@
   "Evaluate Lisp code in the sandbox. Supports multiple forms - each form is
 evaluated in sequence, so definitions are available to subsequent forms.
 Captures printed output, warnings, and errors."
+  (:annotations :destructive t :idempotent nil)
   (ensure-sandbox)
   (let ((warnings nil)
         (results nil)
@@ -81,6 +82,7 @@ Captures printed output, warnings, and errors."
   "Clear all definitions from the REPL sandbox. Use this to start fresh
 with a clean environment. All previously defined functions and variables
 will be removed."
+  (:annotations :destructive t :idempotent t)
   (reset-sandbox)
   "Sandbox cleared. All definitions have been removed.")
 
@@ -89,6 +91,7 @@ will be removed."
 (define-tool shell ((command string "The shell command to execute" :required t))
   "Execute a shell command and return stdout/stderr. Use for file operations,
 system commands, git, etc."
+  (:annotations :destructive t :open-world t)
   (multiple-value-bind (output error-output exit-code)
       (uiop:run-program command
                         :output :string
@@ -106,6 +109,7 @@ system commands, git, etc."
 
 (define-tool read-file ((path string "Path to the file to read" :required t))
   "Read and return the contents of a file."
+  (:annotations :read-only t)
   (handler-case
       (uiop:read-file-string path)
     (error (e)
@@ -115,6 +119,7 @@ system commands, git, etc."
 
 (define-tool list-tools ()
   "List all available tools and their descriptions."
+  (:annotations :read-only t)
   (with-output-to-string (out)
     (format out "Available tools:~%")
     (dolist (tool (mcp-lisp/src/primitives/tools/registry:get-all-tools))

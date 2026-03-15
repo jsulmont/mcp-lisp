@@ -15,12 +15,17 @@
                 #:invalid-params-error
                 #:method-not-found-error
                 #:internal-error
-                #:protocol-error)
+                #:protocol-error
+                #:tool-error
+                #:tool-error-category
+                #:tool-error-retryable-p)
   (:import-from #:mcp-lisp/src/server/state
                 #:session-protocol-version)
   (:import-from #:mcp-lisp/src/primitives/tools/registry
+                #:get-tool
                 #:get-tool-handler
-                #:get-all-tool-descriptors)
+                #:get-all-tool-descriptors
+                #:tool-entry-output-schema)
   (:import-from #:mcp-lisp/src/primitives/prompts/registry
                 #:get-prompt-handler
                 #:get-all-prompt-descriptors)
@@ -33,7 +38,8 @@
                 #:resource-template-entry-mime-type
                 #:get-all-resource-descriptors
                 #:get-all-template-descriptors)
-  (:export #:handle-tools-list-result
+  (:export #:*request-meta*
+           #:handle-tools-list-result
            #:handle-tools-call-result
            #:handle-prompts-list-result
            #:handle-prompts-get-result
@@ -42,6 +48,10 @@
            #:handle-resources-templates-list-result))
 
 (in-package #:mcp-lisp/src/server/dispatcher)
+
+(defvar *request-meta* nil
+  "Bound to the _meta object from the current tools/call request params.
+Contains progressToken and other request metadata.")
 
 (defun normalize-tool-name (name)
   "Normalize a tool name (handle namespacing, case)."
@@ -55,13 +65,26 @@
   "Return tools/list result payload."
   (make-ht "tools" (get-all-tool-descriptors registry)))
 
+(defun format-tool-error (e)
+  "Format a tool-error into an actionable error string with category/retryable metadata."
+  (let ((category (tool-error-category e))
+        (retryable (tool-error-retryable-p e))
+        (msg (mcp-lisp/src/conditions:mcp-error-message e)))
+    (if category
+        (format nil "~a~%errorCategory: ~a~%isRetryable: ~a"
+                msg
+                (string-downcase (symbol-name category))
+                (if retryable "true" "false"))
+        msg)))
+
 (defun handle-tools-call-result (params server session registry)
   "Return tools/call result payload. Signals error on failure."
   (let* ((name (and params (gethash "name" params)))
          (args (and params (gethash "arguments" params)))
          (normalized (and name (normalize-tool-name name)))
-         (handler (or (and name (get-tool-handler name registry))
-                      (and normalized (get-tool-handler normalized registry)))))
+         (tool-entry (or (and name (get-tool name registry))
+                         (and normalized (get-tool normalized registry))))
+         (handler (and tool-entry (mcp-lisp/src/primitives/tools/registry:tool-entry-handler tool-entry))))
     (cond
       ((null name)
        (error 'invalid-params-error :message "Missing tool name"))
@@ -70,15 +93,36 @@
               :message (format nil "Tool not found: ~a" name)))
       (t
        (handler-case
-           (let ((content (funcall handler server session (or args (make-hash-table)))))
-             (make-ht "content" content))
+           (let* ((*request-meta* (and params (gethash "_meta" params)))
+                  (content (funcall handler server session (or args (make-hash-table))))
+                  (result (make-ht "content" content)))
+             ;; If tool has outputSchema, check for structured content.
+             ;; Content-vector wraps hash-tables as JSON text, so we parse it back.
+             (when (and (tool-entry-output-schema tool-entry)
+                        (= 1 (length content)))
+               (let* ((block (aref content 0))
+                      (text (and (hash-table-p block) (gethash "text" block))))
+                 (when text
+                   (handler-case
+                       (let ((parsed (mcp-lisp/src/json:decode-json text)))
+                         (when (hash-table-p parsed)
+                           (setf (gethash "structuredContent" result) parsed)))
+                     (error () nil)))))
+             result)
+         (tool-error (e)
+           (let ((version (session-protocol-version session)))
+             (if (protocol-version>= version "2025-11-25")
+                 (make-ht "content" (vector (text-content (format-tool-error e)))
+                          "isError" t)
+                 (error 'internal-error
+                        :message (format-tool-error e)))))
          (error (e)
            (let ((version (session-protocol-version session)))
              (if (protocol-version>= version "2025-11-25")
-                 (make-ht "content" (vector (text-content (format nil "Tool error: ~a" e)))
+                 (make-ht "content" (vector (text-content (princ-to-string e)))
                           "isError" t)
                  (error 'internal-error
-                        :message (format nil "Tool error: ~a" e))))))))))
+                        :message (princ-to-string e))))))))))
 
 ;;; Prompts
 
@@ -130,10 +174,14 @@
                    (mime-type (resource-entry-mime-type static-entry)))
                (handler-case
                    (let* ((content (funcall handler server session))
-                          (text (if (stringp content)
-                                    content
-                                    (encode-json content)))
-                          (result (make-ht "uri" uri "text" text)))
+                          (result (make-ht "uri" uri)))
+                     (cond
+                       ((stringp content)
+                        (setf (gethash "text" result) content))
+                       ((and (hash-table-p content) (gethash "blob" content))
+                        (setf (gethash "blob" result) (gethash "blob" content)))
+                       (t
+                        (setf (gethash "text" result) (encode-json content))))
                      (when mime-type
                        (setf (gethash "mimeType" result) mime-type))
                      (make-ht "contents" (vector result)))
@@ -153,10 +201,14 @@
                         (mime-type (resource-template-entry-mime-type template-entry)))
                     (handler-case
                         (let* ((content (funcall handler server session template-params))
-                               (text (if (stringp content)
-                                         content
-                                         (encode-json content)))
-                               (result (make-ht "uri" uri "text" text)))
+                               (result (make-ht "uri" uri)))
+                          (cond
+                            ((stringp content)
+                             (setf (gethash "text" result) content))
+                            ((and (hash-table-p content) (gethash "blob" content))
+                             (setf (gethash "blob" result) (gethash "blob" content)))
+                            (t
+                             (setf (gethash "text" result) (encode-json content))))
                           (when mime-type
                             (setf (gethash "mimeType" result) mime-type))
                           (make-ht "contents" (vector result)))

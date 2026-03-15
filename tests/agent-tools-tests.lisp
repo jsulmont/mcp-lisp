@@ -21,14 +21,14 @@
 (test eval-lisp-simple-form
   "eval_lisp evaluates simple forms correctly."
   (let ((result (call-agent-tool "eval_lisp" (mcp-lisp:make-ht "code" "(+ 1 2 3)"))))
-    (is (search "Result: 6" result))))
+    (is (search "Results: 6" result))))
 
 (test eval-lisp-captures-warnings
   "eval_lisp captures and returns compiler warnings."
   (let ((result (call-agent-tool "eval_lisp"
                            (mcp-lisp:make-ht "code" "(defun test-fn (x) (let ((x 1)) x))"))))
     (is (search "Warnings:" result))
-    (is (search "Result:" result))))
+    (is (search "Results:" result))))
 
 (test eval-lisp-captures-errors
   "eval_lisp captures and returns errors."

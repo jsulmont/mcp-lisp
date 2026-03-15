@@ -14,6 +14,8 @@
            #:internal-error
            #:tool-error
            #:tool-error-tool-name
+           #:tool-error-category
+           #:tool-error-retryable-p
            #:transport-error
            #:validation-error
            #:validation-error-field))
@@ -56,12 +58,25 @@
 (define-condition tool-error (mcp-error)
   ((tool-name :initarg :tool-name
               :initform nil
-              :reader tool-error-tool-name))
+              :reader tool-error-tool-name)
+   (category :initarg :category
+             :initform nil
+             :reader tool-error-category
+             :documentation "Error category: :transient, :validation, :permission, or :business")
+   (retryable-p :initarg :retryable
+                :initform nil
+                :reader tool-error-retryable-p))
   (:report (lambda (c s)
-             (format s "Tool Error~@[ (~a)~]: ~a"
+             (format s "Tool Error~@[ (~a)~]~@[ [~a]~]: ~a"
                      (tool-error-tool-name c)
+                     (tool-error-category c)
                      (mcp-error-message c))))
-  (:documentation "Error during tool execution."))
+  (:documentation "Error during tool execution.
+CATEGORY classifies the error for recovery decisions:
+  :transient   - Temporary failure, retry may succeed (timeouts, rate limits)
+  :validation  - Bad input, don't retry with same args
+  :permission  - Access denied, don't retry
+  :business    - Policy violation (e.g., refund exceeds limit)"))
 
 (define-condition transport-error (mcp-error)
   ()

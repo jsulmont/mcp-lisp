@@ -77,6 +77,6 @@
             (format nil "req=~s(~a) opt=~s(~a)"
                     req-val (if req-present "present" "missing")
                     opt-val (if opt-present "present" "missing"))))))
-     registry)
+     :registry registry)
     ;; Verify tool was registered
     (is (not (null (mcp-lisp/src/primitives/tools/registry:get-tool "null-test" registry))))))
