@@ -105,22 +105,7 @@ Supports both stdio (subprocess) and Streamable HTTP transports:
 
 ## A2A (Agent-to-Agent Protocol)
 
-Peer-to-peer agent communication with agent cards, skills, and tasks:
-
-```lisp
-(define-agent-card
-  :name "my-agent"
-  :description "An example agent"
-  :url "http://localhost:8080"
-  :version "1.0.0")
-
-(define-skill analyze
-    ((code string "Code to analyze" :required t))
-  "Analyzes code for issues."
-  (analyze-code code))
-
-(start-a2a-server :port 8080)
-```
+Partial implementation of [A2A 1.0](https://a2a-protocol.org/latest/specification/). Covers agent card discovery, messaging, skills, and task lifecycle. Does not implement streaming, push notifications, or security schemes. No conformance suite exists for A2A.
 
 ## Conformance Testing
 
