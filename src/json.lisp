@@ -26,7 +26,8 @@ Prefer DICT for new code — same semantics with compile-time arity checking."
 
 (defun decode-json (string)
   "Parse a JSON STRING into Lisp data structures."
-  (com.inuoe.jzon:parse string))
+  (com.inuoe.jzon:parse string
+                        :max-string-length (1- array-dimension-limit)))
 
 (defun encode-json (object &optional stream)
   "Encode OBJECT as JSON. If STREAM is provided, write to it.

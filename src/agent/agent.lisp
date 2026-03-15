@@ -15,14 +15,17 @@
                 #:tool-entry-name
                 #:tool-entry-description
                 #:tool-entry-input-schema
-                #:tool-entry-handler)
+                #:tool-entry-handler
+                #:tool-entry-annotations)
   (:import-from #:dexador)
   (:export #:*provider*
            #:*api-key*
            #:*model*
            #:*max-tokens*
            #:*verbose*
+           #:*confirm-destructive*
            #:run-agent
+           #:filter-registry
            #:chat))
 
 (in-package #:mcp-lisp/src/agent/agent)
@@ -86,6 +89,20 @@
 
 ;;; LLM API calls
 
+(defun call-with-retry (fn &key (max-retries 3) (initial-delay 2))
+  "Call FN, retrying on HTTP 429/529 with exponential backoff.
+FN should return (values body status headers) like dex:post."
+  (loop for attempt from 0
+        for delay = initial-delay then (* delay 2)
+        do (multiple-value-bind (body status headers)
+               (funcall fn)
+             (if (and (member status '(429 529)) (< attempt max-retries))
+                 (let ((retry-after (ignore-errors
+                                      (parse-integer
+                                       (or (gethash "retry-after" headers) "")))))
+                   (sleep (or retry-after delay)))
+                 (return (values body status headers))))))
+
 (defun call-openai-compatible (endpoint messages &key tools system)
   "Call OpenAI-compatible API (Groq, OpenAI)."
   (let* ((model (or *model* (default-model *provider*)))
@@ -107,16 +124,11 @@
                  tools)))
     (let ((json-body (encode-json body)))
       (multiple-value-bind (response-body status)
-          (dex:post endpoint
-                    :headers headers
-                    :content json-body)
+          (call-with-retry
+           (lambda () (dex:post endpoint
+                                :headers headers
+                                :content json-body)))
         (unless (= status 200)
-          (format *error-output* "~%=== DEBUG: Request that failed ===~%")
-          (format *error-output* "Endpoint: ~a~%" endpoint)
-          (format *error-output* "Status: ~a~%" status)
-          (format *error-output* "Body sent:~%~a~%" json-body)
-          (format *error-output* "Response:~%~a~%" response-body)
-          (format *error-output* "=================================~%")
           (error "API error (~a): ~a" status response-body))
         (decode-json response-body)))))
 
@@ -133,13 +145,15 @@
       (setf (gethash "system" body) system))
     (when (and tools (> (length tools) 0))
       (setf (gethash "tools" body) tools))
-    (multiple-value-bind (response-body status)
-        (dex:post "https://api.anthropic.com/v1/messages"
-                  :headers headers
-                  :content (encode-json body))
-      (unless (= status 200)
-        (error "Claude API error (~a): ~a" status response-body))
-      (decode-json response-body))))
+    (let ((json-content (encode-json body)))
+      (multiple-value-bind (response-body status)
+          (call-with-retry
+           (lambda () (dex:post "https://api.anthropic.com/v1/messages"
+                                :headers headers
+                                :content json-content)))
+        (unless (= status 200)
+          (error "Claude API error (~a): ~a" status response-body))
+        (decode-json response-body)))))
 
 (defun call-llm (messages &key tools system)
   "Call LLM based on *provider*."
@@ -154,12 +168,28 @@
 
 ;;; Tool execution
 
+(defvar *confirm-destructive* nil
+  "When non-nil, a function (name arguments) → boolean that gates destructive tool calls.
+Return T to allow, NIL to deny.")
+
+(defun tool-read-only-p (tool)
+  "Return T if tool has readOnlyHint annotation set to true."
+  (let ((annotations (tool-entry-annotations tool)))
+    (and annotations (gethash "readOnlyHint" annotations))))
+
 (defun execute-tool (name arguments &optional (registry *global-tool-registry*))
-  "Execute tool NAME with ARGUMENTS hash-table. Returns result string."
+  "Execute tool NAME with ARGUMENTS hash-table. Returns result string.
+When *confirm-destructive* is set, non-read-only tools require confirmation."
   (let* ((tool (get-tool name registry))
          (handler (and tool (tool-entry-handler tool))))
     (unless handler
       (return-from execute-tool (format nil "Error: Unknown tool '~a'" name)))
+    ;; Gate destructive tools
+    (when (and *confirm-destructive*
+               (not (tool-read-only-p tool)))
+      (unless (funcall *confirm-destructive* name arguments)
+        (return-from execute-tool
+          (format nil "Denied: user declined to run ~a" name))))
     (handler-case
         (let ((result (funcall handler nil nil arguments)))
           ;; Handler returns content-vector, extract text
@@ -275,11 +305,22 @@ Uses stop_reason as the canonical loop control signal:
     (:anthropic
      (process-anthropic-response response messages))))
 
-(defun run-agent (prompt &key system (max-iterations 10) (registry *global-tool-registry*))
+(defun filter-registry (allowed-tools &optional (source *global-tool-registry*))
+  "Create a new registry containing only ALLOWED-TOOLS from SOURCE."
+  (let ((filtered (make-hash-table :test #'equal)))
+    (dolist (name allowed-tools filtered)
+      (let ((entry (gethash name source)))
+        (when entry
+          (setf (gethash name filtered) entry))))))
+
+(defun run-agent (prompt &key system (max-iterations 10) (registry *global-tool-registry*) allowed-tools)
   "Run agent with PROMPT until completion or MAX-ITERATIONS.
-Returns the final response text."
-  (let ((messages (list (make-ht "role" "user" "content" prompt)))
-        (tools (get-tools-for-provider registry)))
+ALLOWED-TOOLS, if provided, is a list of tool name strings to expose."
+  (let* ((effective-registry (if allowed-tools
+                                 (filter-registry allowed-tools registry)
+                                 registry))
+         (messages (list (make-ht "role" "user" "content" prompt)))
+         (tools (get-tools-for-provider effective-registry)))
     (when *verbose*
       (format t "~%User: ~a~%" prompt)
       (format t "~%[Provider: ~a, Model: ~a]~%" *provider* (or *model* (default-model *provider*)))
