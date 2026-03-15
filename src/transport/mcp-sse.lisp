@@ -492,7 +492,6 @@ Returns 202 for notifications and responses."
       ((and (eq method :get) (string= path *mcp-path*)) (get-handler))
       ((and (eq method :delete) (string= path *mcp-path*)) (delete-handler))
       ((and (eq method :get) (string= path "/health"))
-       (sb-ext:gc :full t)
        (setf (hunchentoot:content-type*) "application/json")
        (encode-json (make-ht "heap_mb" (round (/ (sb-kernel:dynamic-usage) 1048576))
                              "threads" (length (bt:all-threads))
@@ -511,7 +510,8 @@ Returns 202 for notifications and responses."
         *sse-clients* (make-hash-table :test #'equal)
         *pending-responses* (make-hash-table :test #'equal)
         *sse-server* (make-instance 'mcp-acceptor :port port
-                                    :access-log-destination nil))
+                                    :access-log-destination nil
+                                    :taskmaster (make-instance 'hunchentoot:one-thread-per-connection-taskmaster)))
   (hunchentoot:start *sse-server*)
   (log:info "MCP Streamable HTTP server started on port ~a" port)
   (format t "~&MCP server running on http://localhost:~a~a~%" port path)

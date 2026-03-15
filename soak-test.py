@@ -190,7 +190,8 @@ async def run_worker(url: str, stats: Stats, stop: asyncio.Event):
 async def get_health(url: str) -> dict | None:
     health_url = url.rsplit("/", 1)[0] + "/health"
     try:
-        async with aiohttp.ClientSession() as http:
+        timeout = aiohttp.ClientTimeout(total=2)
+        async with aiohttp.ClientSession(timeout=timeout) as http:
             async with http.get(health_url) as resp:
                 return await resp.json()
     except Exception:
@@ -216,8 +217,8 @@ async def main():
     if health_before:
         print(f"  start: heap={health_before['heap_mb']}MB threads={health_before['threads']}")
     print()
-    print(f"{'elapsed':>8s}  {'sessions':>8s}  {'requests':>9s}  {'errors':>6s}  {'req/s':>7s}  {'p50':>6s}  {'p95':>6s}  {'p99':>6s}  {'heap':>5s}")
-    print("-" * 82)
+    print(f"{'elapsed':>8s}  {'sessions':>8s}  {'requests':>9s}  {'errors':>6s}  {'req/s':>7s}  {'p50':>6s}  {'p95':>6s}  {'p99':>6s}")
+    print("-" * 75)
 
     t0 = time.monotonic()
     prev_reqs = 0
@@ -240,10 +241,7 @@ async def main():
             rps = interval_reqs / args.interval if args.interval else 0
             prev_reqs = snap["requests"]
 
-            health = await get_health(args.url)
-            heap = f"{health['heap_mb']}MB" if health else "?"
-
-            print(f"{elapsed:>7.0f}s  {snap['sessions']:>8d}  {snap['requests']:>9d}  {snap['errors']:>6d}  {rps:>7.0f}  {snap['p50']:>5.1f}ms {snap['p95']:>5.1f}ms {snap['p99']:>5.1f}ms  {heap:>5s}")
+            print(f"{elapsed:>7.0f}s  {snap['sessions']:>8d}  {snap['requests']:>9d}  {snap['errors']:>6d}  {rps:>7.0f}  {snap['p50']:>5.1f}ms {snap['p95']:>5.1f}ms {snap['p99']:>5.1f}ms")
     finally:
         stop.set()
         await asyncio.gather(*workers, return_exceptions=True)
@@ -251,7 +249,7 @@ async def main():
     elapsed = time.monotonic() - t0
     health_after = await get_health(args.url)
 
-    print("-" * 82)
+    print("-" * 75)
     print(f"Total: {elapsed:.0f}s  {stats.sessions} sessions  {stats.requests} requests  {stats.errors} errors  {stats.requests/elapsed:.0f} req/s")
     if health_before and health_after:
         delta = health_after["heap_mb"] - health_before["heap_mb"]
