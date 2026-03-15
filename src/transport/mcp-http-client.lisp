@@ -18,6 +18,7 @@
                 #:transport-notify
                 #:transport-running-p
                 #:transport-notification-handler)
+  (:import-from #:serapeum #:string-prefix-p)
   (:import-from #:dexador)
   (:export #:http-transport
            #:make-http-transport
@@ -76,11 +77,11 @@
         ((and (= 0 (length line)) current-data)
          (push (cons current-event (format nil "~{~a~^~%~}" (nreverse current-data))) events)
          (setf current-event nil current-data nil))
-        ((starts-with-p "event: " line)
+        ((string-prefix-p "event: " line)
          (setf current-event (subseq line 7)))
-        ((starts-with-p "data: " line)
+        ((string-prefix-p "data: " line)
          (push (subseq line 6) current-data))
-        ((starts-with-p "data:" line)
+        ((string-prefix-p "data:" line)
          (push (subseq line 5) current-data))))
     (when current-data
       (push (cons current-event (format nil "~{~a~^~%~}" (nreverse current-data))) events))
@@ -97,10 +98,6 @@
                         (subseq line 0 (1- (length line)))
                         line)))
         do (if pos (setf start (1+ pos)) (loop-finish))))
-
-(defun starts-with-p (prefix string)
-  (and (>= (length string) (length prefix))
-       (string= prefix string :end2 (length prefix))))
 
 ;;; SSE event dispatch
 

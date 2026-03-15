@@ -12,6 +12,7 @@
                 #:+sdk-version+)
   ;; Re-export from json
   (:import-from #:mcp-lisp/src/json
+                #:dict
                 #:make-ht
                 #:encode-json
                 #:decode-json)
@@ -169,6 +170,7 @@
            #:+supported-protocol-versions+
            #:+sdk-version+
            ;; JSON
+           #:dict
            #:make-ht
            #:encode-json
            #:decode-json

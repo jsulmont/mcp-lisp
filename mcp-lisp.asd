@@ -7,6 +7,7 @@
   :license "MIT"
   :version "0.1.0"
   :depends-on ("alexandria"
+               "serapeum"
                "bordeaux-threads"
                "log4cl"
                "hunchentoot"

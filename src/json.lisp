@@ -5,8 +5,10 @@
 (defpackage #:mcp-lisp/src/json
   (:use #:cl)
   (:import-from #:com.inuoe.jzon)
+  (:import-from #:serapeum #:dict)
   (:export #:encode-json
            #:decode-json
+           #:dict
            #:make-ht
            #:read-json-line
            #:write-json-line))
@@ -15,11 +17,12 @@
 
 (defun make-ht (&rest kvs)
   "Create a hash-table from key-value pairs.
-Example: (make-ht \"name\" \"foo\" \"version\" \"1.0\")"
-  (let ((h (make-hash-table :test #'equal)))
-    (loop for (k v) on kvs by #'cddr
-          do (setf (gethash k h) v))
-    h))
+Example: (make-ht \"name\" \"foo\" \"version\" \"1.0\")
+Prefer DICT for new code — same semantics with compile-time arity checking."
+  (apply #'dict kvs))
+
+(define-compiler-macro make-ht (&rest kvs)
+  `(dict ,@kvs))
 
 (defun decode-json (string)
   "Parse a JSON STRING into Lisp data structures."
