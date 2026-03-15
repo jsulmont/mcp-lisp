@@ -2,7 +2,7 @@
 
 Common Lisp SDK for [Model Context Protocol](https://modelcontextprotocol.io) (MCP 2025-11-25) and [Agent-to-Agent Protocol](https://github.com/google/A2A) (A2A).
 
-**40/40 conformance checks passing** against [`@modelcontextprotocol/conformance`](https://github.com/modelcontextprotocol/conformance).
+**44/44 conformance checks passing** (32 scenarios) against [`@modelcontextprotocol/conformance`](https://github.com/modelcontextprotocol/conformance).
 
 ## Requirements
 
@@ -133,6 +133,42 @@ uv run soak-test.py --concurrency 50  # terminal 2, Ctrl-C to stop
 ```
 
 Reports req/s, latency percentiles, heap usage, and leak detection every 5 seconds.
+
+## Self-Hosting Tricks
+
+The Streamable HTTP server can serve as its own MCP client, enabling some entertaining self-referential tests.
+
+### Eval Quine
+
+A `format`-based quine — code that evaluates to its own source:
+
+```lisp
+(let ((s "(let ((s ~s)) (format nil s s))"))
+  (format nil s s))
+;; => "(let ((s \"(let ((s ~s)) (format nil s s))\")) (format nil s s))"
+```
+
+### MCP Inception
+
+The server connects to itself as a client, and through that connection evals code that connects *again*, recursively:
+
+```
+Claude → eval_lisp → HTTP client → server → eval_lisp → HTTP client → server → ...
+```
+
+Each layer adds another level of JSON string escaping. At depth 4 you get 15 layers of backslashes, but the server handles it without deadlocking.
+
+### Concurrent Self-Connection Stress Test
+
+From inside the running server, spawn threads that each run full MCP session lifecycles back against the same server:
+
+```lisp
+;; 100 concurrent workers × 100 iterations = 10,000 sessions, 90,000 requests
+;; Results on Apple M4 Pro:
+;;   10 workers:  15,223 req/s, 0 errors
+;;   50 workers:  17,238 req/s, 0 errors
+;;  100 workers:  12,717 req/s, 0 errors
+```
 
 ## Testing
 
