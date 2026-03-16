@@ -80,7 +80,7 @@ Categories: `:transient`, `:validation`, `:permission`, `:business`.
 Set `*access-log-stream*` for JSON-lines operational logging:
 
 ```lisp
-(setf mcp-lisp/src/transport/mcp-sse:*access-log-stream* *standard-output*)
+(setf mcp-lisp/src/transport/mcp-woo:*access-log-stream* *standard-output*)
 ```
 
 ```json

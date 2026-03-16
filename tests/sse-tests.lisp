@@ -11,12 +11,12 @@
 (test generate-session-id-uniqueness
   "generate-session-id produces unique IDs"
   (let ((ids (loop repeat 100
-                   collect (mcp-lisp/src/transport/mcp-sse:generate-session-id))))
+                   collect (mcp-lisp/src/transport/mcp-woo:generate-session-id))))
     (is (= 100 (length (remove-duplicates ids :test #'string=))))))
 
 (test generate-session-id-format
   "generate-session-id produces well-formed IDs"
-  (let ((id (mcp-lisp/src/transport/mcp-sse:generate-session-id)))
+  (let ((id (mcp-lisp/src/transport/mcp-woo:generate-session-id)))
     (is (stringp id))
     (is (> (length id) 0))
     ;; Should contain a hyphen separator
@@ -24,9 +24,9 @@
 
 (test send-to-session-returns-nil-for-missing
   "send-to-session returns NIL when session not found"
-  (let ((mcp-lisp/src/transport/mcp-sse:*sse-clients*
+  (let ((mcp-lisp/src/transport/mcp-woo:*sse-clients*
           (make-hash-table :test #'equal)))
-    (is (null (mcp-lisp/src/transport/mcp-sse:send-to-session
+    (is (null (mcp-lisp/src/transport/mcp-woo:send-to-session
                "nonexistent-session"
                "{\"test\": true}"
                "message")))))
@@ -46,44 +46,44 @@
 (test sse-clients-is-hash-table
   "SSE clients storage uses hash-table for session lookup"
   ;; After server initialization, *sse-clients* should be a hash-table
-  (let ((mcp-lisp/src/transport/mcp-sse:*sse-clients*
+  (let ((mcp-lisp/src/transport/mcp-woo:*sse-clients*
           (make-hash-table :test #'equal)))
-    (is (hash-table-p mcp-lisp/src/transport/mcp-sse:*sse-clients*))))
+    (is (hash-table-p mcp-lisp/src/transport/mcp-woo:*sse-clients*))))
 
 ;;; --- Session map operations ---
 
 (test session-map-add-and-lookup
   "add-session stores a session retrievable by get-session"
-  (let ((mcp-lisp/src/transport/mcp-sse:*sessions*
+  (let ((mcp-lisp/src/transport/mcp-woo:*sessions*
           (make-hash-table :test #'equal)))
     (let ((session (mcp-lisp/src/server/state:make-session)))
-      (mcp-lisp/src/transport/mcp-sse::add-session "sess-1" session)
-      (is (eq session (mcp-lisp/src/transport/mcp-sse::get-session "sess-1")))
-      (is (null (mcp-lisp/src/transport/mcp-sse::get-session "nonexistent"))))))
+      (mcp-lisp/src/transport/mcp-woo::add-session "sess-1" session)
+      (is (eq session (mcp-lisp/src/transport/mcp-woo::get-session "sess-1")))
+      (is (null (mcp-lisp/src/transport/mcp-woo::get-session "nonexistent"))))))
 
 (test session-map-remove
   "remove-session removes a session from the map"
-  (let ((mcp-lisp/src/transport/mcp-sse:*sessions*
+  (let ((mcp-lisp/src/transport/mcp-woo:*sessions*
           (make-hash-table :test #'equal)))
     (let ((session (mcp-lisp/src/server/state:make-session)))
-      (mcp-lisp/src/transport/mcp-sse::add-session "sess-1" session)
-      (mcp-lisp/src/transport/mcp-sse::remove-session "sess-1")
-      (is (null (mcp-lisp/src/transport/mcp-sse::get-session "sess-1"))))))
+      (mcp-lisp/src/transport/mcp-woo::add-session "sess-1" session)
+      (mcp-lisp/src/transport/mcp-woo::remove-session "sess-1")
+      (is (null (mcp-lisp/src/transport/mcp-woo::get-session "sess-1"))))))
 
 (test session-map-multiple-independent
   "Multiple sessions in the map are independent"
-  (let ((mcp-lisp/src/transport/mcp-sse:*sessions*
+  (let ((mcp-lisp/src/transport/mcp-woo:*sessions*
           (make-hash-table :test #'equal)))
     (let ((s1 (mcp-lisp/src/server/state:make-session))
           (s2 (mcp-lisp/src/server/state:make-session)))
-      (mcp-lisp/src/transport/mcp-sse::add-session "sess-1" s1)
-      (mcp-lisp/src/transport/mcp-sse::add-session "sess-2" s2)
-      (is (eq s1 (mcp-lisp/src/transport/mcp-sse::get-session "sess-1")))
-      (is (eq s2 (mcp-lisp/src/transport/mcp-sse::get-session "sess-2")))
+      (mcp-lisp/src/transport/mcp-woo::add-session "sess-1" s1)
+      (mcp-lisp/src/transport/mcp-woo::add-session "sess-2" s2)
+      (is (eq s1 (mcp-lisp/src/transport/mcp-woo::get-session "sess-1")))
+      (is (eq s2 (mcp-lisp/src/transport/mcp-woo::get-session "sess-2")))
       ;; Removing one doesn't affect the other
-      (mcp-lisp/src/transport/mcp-sse::remove-session "sess-1")
-      (is (null (mcp-lisp/src/transport/mcp-sse::get-session "sess-1")))
-      (is (eq s2 (mcp-lisp/src/transport/mcp-sse::get-session "sess-2"))))))
+      (mcp-lisp/src/transport/mcp-woo::remove-session "sess-1")
+      (is (null (mcp-lisp/src/transport/mcp-woo::get-session "sess-1")))
+      (is (eq s2 (mcp-lisp/src/transport/mcp-woo::get-session "sess-2"))))))
 
 ;;; --- Multi-session handler isolation ---
 
@@ -114,6 +114,92 @@
                     (gethash "name" (mcp-lisp/src/server/state:session-client-info session-a))))
       (is (string= "client-b"
                     (gethash "name" (mcp-lisp/src/server/state:session-client-info session-b)))))))
+
+;;; --- Clack response and origin tests ---
+
+(test make-immediate-response-body-is-flat-list
+  "make-immediate-response wraps body-string in a single list, not nested"
+  (let ((resp (mcp-lisp/src/transport/mcp-woo::make-immediate-response
+               200 '(:content-type "text/plain") "hello")))
+    (destructuring-bind (status headers body) resp
+      (is (= 200 status))
+      (is (equal '(:content-type "text/plain") headers))
+      ;; Body must be ("hello"), not (("hello"))
+      (is (equal '("hello") body))
+      (is (stringp (first body))))))
+
+(test make-immediate-response-empty-body
+  "make-immediate-response with empty string produces a list of one empty string"
+  (let ((body (third (mcp-lisp/src/transport/mcp-woo::make-immediate-response 202 nil ""))))
+    (is (equal '("") body))))
+
+(test valid-origin-p-allows-no-origin
+  "Requests with no Origin header are allowed"
+  (let ((env (list :headers (make-hash-table :test #'equal))))
+    (is (mcp-lisp/src/transport/mcp-woo::valid-origin-p env))))
+
+(test valid-origin-p-allows-localhost
+  "Requests from localhost origins are allowed"
+  (dolist (origin '("http://localhost:3000" "http://127.0.0.1:8080"))
+    (let ((headers (make-hash-table :test #'equal)))
+      (setf (gethash "origin" headers) origin)
+      (is (mcp-lisp/src/transport/mcp-woo::valid-origin-p (list :headers headers))
+          "Expected ~a to be valid" origin))))
+
+(test valid-origin-p-rejects-external
+  "Requests from non-localhost origins are rejected"
+  (dolist (origin '("http://evil.com" "http://192.168.1.1:8080" "https://attacker.io"))
+    (let ((headers (make-hash-table :test #'equal)))
+      (setf (gethash "origin" headers) origin)
+      (is (not (mcp-lisp/src/transport/mcp-woo::valid-origin-p (list :headers headers)))
+          "Expected ~a to be rejected" origin))))
+
+(test clack-app-origin-rejection-returns-403
+  "clack-app returns 403 for invalid origin and does not crash"
+  (let ((mcp-lisp/src/transport/mcp-woo::*handlers* (make-hash-table :test #'equal))
+        (captured-response nil))
+    (let* ((headers (make-hash-table :test #'equal))
+           (_ (setf (gethash "origin" headers) "http://evil.com"))
+           (env (list :request-method :post :path-info "/mcp" :headers headers))
+           (delayed-fn (mcp-lisp/src/transport/mcp-woo::clack-app env)))
+      (declare (ignore _))
+      ;; Call the delayed response closure — must not signal an error
+      (funcall delayed-fn (lambda (resp) (setf captured-response resp)))
+      (is (not (null captured-response)))
+      (is (= 403 (first captured-response))))))
+
+(test clack-app-options-bypasses-origin-check
+  "OPTIONS requests bypass origin check (CORS preflight)"
+  (let ((mcp-lisp/src/transport/mcp-woo::*handlers* (make-hash-table :test #'equal))
+        (captured-response nil))
+    (let* ((headers (make-hash-table :test #'equal))
+           (_ (setf (gethash "origin" headers) "http://evil.com"))
+           (env (list :request-method :options :path-info "/mcp" :headers headers))
+           (delayed-fn (mcp-lisp/src/transport/mcp-woo::clack-app env)))
+      (declare (ignore _))
+      (funcall delayed-fn (lambda (resp) (setf captured-response resp)))
+      (is (not (null captured-response)))
+      ;; OPTIONS should succeed (200) even with bad origin
+      (is (= 200 (first captured-response))))))
+
+(test start-sse-server-fails-when-thread-dies
+  "start-sse-server signals an error when the server thread dies during startup"
+  ;; Temporarily override woo:run with a function that immediately errors,
+  ;; simulating a bind failure or other startup crash.
+  (let ((original-fn (symbol-function 'woo:run)))
+    (unwind-protect
+         (progn
+           (setf (symbol-function 'woo:run)
+                 (lambda (app &rest args)
+                   (declare (ignore app args))
+                   (error "simulated bind failure")))
+           (signals error
+             (mcp-lisp/src/transport/mcp-woo:start-sse-server
+              (make-hash-table :test #'equal)
+              :port 19999)))
+      (setf (symbol-function 'woo:run) original-fn)
+      ;; Ensure cleanup even if test fails
+      (ignore-errors (mcp-lisp/src/transport/mcp-woo:stop-sse-server)))))
 
 (test multi-session-subscription-isolation
   "Resource subscriptions are per-session, not global"

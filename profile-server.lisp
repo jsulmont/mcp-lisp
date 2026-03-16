@@ -91,22 +91,31 @@
 
 ;;; Start server with profiling
 
-(setf mcp-lisp/src/transport/mcp-sse:*access-log-stream* nil)
+(setf mcp-lisp/src/transport/mcp-woo:*access-log-stream* nil)
 
 (format t "~%Starting profiled MCP server on port 8080...~%")
 (format t "Hit it with: uv run soak-test.py --concurrency 50~%")
 (format t "Ctrl-C to stop and see profile report.~%~%")
 
-(let ((server (mcp-lisp:make-server :name "mcp-lisp-profiled" :version "0.1.0")))
+(let ((server (mcp-lisp:make-server :name "mcp-lisp-profiled" :version "0.1.0"))
+      (stop nil))
   (mcp-lisp:server-start server :transport :sse :port 8080)
 
   (sb-sprof:start-profiling :mode :cpu :sample-interval 0.001 :threads :all)
 
+  ;; SIGINT may arrive on the Woo event-loop thread (inside kqueue/select),
+  ;; not the main thread.  Use enable-interrupt so the handler runs in
+  ;; whichever thread receives the signal.
+  (sb-sys:enable-interrupt sb-unix:sigint
+    (lambda (signal info context)
+      (declare (ignore signal info context))
+      (setf stop t)))
 
-  (handler-case (loop (sleep 3600))
-    (sb-sys:interactive-interrupt ()
-      (sb-sprof:stop-profiling)
-      (format t "~%~%=== Allocation Profile (flat, top 40) ===~%~%")
-      (sb-sprof:report :type :flat :max 40)
-      (mcp-lisp:server-stop server)
-      (sb-ext:exit :code 0))))
+  (loop until stop do (sleep 0.5))
+
+  (sb-sprof:stop-profiling)
+  (format t "~%~%=== CPU Profile (flat, top 40) ===~%~%")
+  (sb-sprof:report :type :flat :max 40)
+  (finish-output)
+  (mcp-lisp:server-stop server)
+  (sb-ext:exit :code 0))

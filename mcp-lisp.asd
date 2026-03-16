@@ -10,7 +10,7 @@
                "serapeum"
                "bordeaux-threads"
                "log4cl"
-               "hunchentoot"
+               "woo"
                "dexador"
                "com.inuoe.jzon"
                "mcp-lisp/main")

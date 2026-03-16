@@ -5,7 +5,7 @@
 (ql:quickload :mcp-lisp :silent t)
 
 ;; Access log to stdout so you can see what Claude does
-(setf mcp-lisp/src/transport/mcp-sse:*access-log-stream* *standard-output*)
+(setf mcp-lisp/src/transport/mcp-woo:*access-log-stream* *standard-output*)
 
 (format t "~%MCP server with agent tools on port 8080~%")
 (format t "Tools: eval_lisp, shell, read_file, clear_repl, list_tools~%")

@@ -33,7 +33,7 @@
 
 (defun make-a2a-client (agent-url)
   "Create a client for the agent at AGENT-URL.
-AGENT-URL should be the base URL, e.g. http://localhost:8081"
+AGENT-URL should be the base URL, e.g. http://localhost:8080"
   (make-instance 'a2a-client :agent-url (string-right-trim "/" agent-url)))
 
 (defun fetch-agent-card (client)

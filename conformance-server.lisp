@@ -14,7 +14,7 @@
                 #:register-prompt #:*global-prompt-registry*)
   (:import-from #:mcp-lisp/src/primitives/resources/registry
                 #:register-resource #:register-resource-template)
-  (:import-from #:mcp-lisp/src/transport/mcp-sse
+  (:import-from #:mcp-lisp/src/transport/mcp-woo
                 #:*stream-notify-fn* #:*stream-call-fn*)
   (:import-from #:mcp-lisp/src/server/dispatcher #:*request-meta*))
 
@@ -301,7 +301,7 @@
 ;;;; ========= START SERVER =========
 
 ;; Enable structured access logging to stdout
-(setf mcp-lisp/src/transport/mcp-sse:*access-log-stream* *standard-output*)
+(setf mcp-lisp/src/transport/mcp-woo:*access-log-stream* *standard-output*)
 
 (format t "~%Starting MCP conformance server on port 8080...~%")
 (format t "Press Ctrl-C to stop.~%")
