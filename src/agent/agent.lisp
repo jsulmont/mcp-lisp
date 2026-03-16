@@ -24,6 +24,9 @@
            #:*max-tokens*
            #:*verbose*
            #:*confirm-destructive*
+           #:*last-api-usage*
+           #:*session-tokens*
+           #:reset-session-tokens
            #:run-agent
            #:filter-registry
            #:chat))
@@ -32,13 +35,24 @@
 
 ;;; Configuration
 
+(defun read-key-file (filename)
+  "Read an API key from ~/FILENAME, trimming whitespace. Returns NIL if missing."
+  (ignore-errors
+    (string-trim '(#\Space #\Newline #\Return #\Tab)
+                 (uiop:read-file-string
+                  (merge-pathnames filename (user-homedir-pathname))))))
+
 (defvar *provider* :groq
   "LLM provider - :groq, :anthropic, or :openai")
 
 (defvar *api-key* (or (uiop:getenv "GROQ_API_KEY")
                       (uiop:getenv "ANTHROPIC_API_KEY")
-                      (uiop:getenv "OPENAI_API_KEY"))
-  "API key. Set via environment or directly.")
+                      (uiop:getenv "OPENAI_API_KEY")
+                      (read-key-file ".groq-key")
+                      (read-key-file ".anthropic-key")
+                      (read-key-file ".openai-key"))
+  "API key. Checked in order: env vars (GROQ_API_KEY, ANTHROPIC_API_KEY,
+OPENAI_API_KEY), then key files (~/.groq-key, ~/.anthropic-key, ~/.openai-key).")
 
 (defvar *model* nil
   "Model to use. If nil, uses provider default.")
@@ -48,6 +62,75 @@
 
 (defvar *verbose* t
   "Print agent activity to *standard-output*.")
+
+;;; API usage tracking
+
+(defvar *last-api-usage* nil
+  "Plist with usage info from the last API call.
+Keys: :input-tokens, :output-tokens, and when available:
+:cache-creation-tokens, :cache-read-tokens,
+:rate-limit-tokens-remaining, :rate-limit-tokens-reset,
+:rate-limit-requests-remaining.")
+
+(defvar *session-tokens* (list :input 0 :output 0 :requests 0)
+  "Accumulated token counts across API calls. Reset with reset-session-tokens.
+Not thread-safe — concurrent run-agent calls will clobber each other.")
+
+(defun reset-session-tokens ()
+  "Reset accumulated session token counts."
+  (setf *session-tokens* (list :input 0 :output 0 :requests 0)))
+
+(defun record-usage (response headers)
+  "Extract and record token usage from API response and rate-limit headers."
+  (unless (hash-table-p response)
+    (return-from record-usage))
+  (let ((usage (gethash "usage" response)))
+    (when usage
+      (let ((in-tok (or (gethash "input_tokens" usage)
+                        (gethash "prompt_tokens" usage)
+                        0))
+            (out-tok (or (gethash "output_tokens" usage)
+                         (gethash "completion_tokens" usage)
+                         0))
+            (cache-create (gethash "cache_creation_input_tokens" usage))
+            (cache-read (gethash "cache_read_input_tokens" usage)))
+        (setf *last-api-usage*
+              (list :input-tokens in-tok :output-tokens out-tok))
+        (when cache-create
+          (setf (getf *last-api-usage* :cache-creation-tokens) cache-create))
+        (when cache-read
+          (setf (getf *last-api-usage* :cache-read-tokens) cache-read))
+        (incf (getf *session-tokens* :input) in-tok)
+        (incf (getf *session-tokens* :output) out-tok)
+        (incf (getf *session-tokens* :requests)))))
+  ;; Rate-limit headers (Anthropic and OpenAI conventions)
+  (when headers
+    (flet ((hdr (key) (gethash key headers)))
+      (let ((tok-remaining (or (hdr "anthropic-ratelimit-tokens-remaining")
+                               (hdr "x-ratelimit-remaining-tokens")))
+            (tok-reset (or (hdr "anthropic-ratelimit-tokens-reset")
+                           (hdr "x-ratelimit-reset-tokens")))
+            (req-remaining (or (hdr "anthropic-ratelimit-requests-remaining")
+                               (hdr "x-ratelimit-remaining-requests"))))
+        (when tok-remaining
+          (setf (getf *last-api-usage* :rate-limit-tokens-remaining)
+                (ignore-errors (parse-integer tok-remaining))))
+        (when tok-reset
+          (setf (getf *last-api-usage* :rate-limit-tokens-reset) tok-reset))
+        (when req-remaining
+          (setf (getf *last-api-usage* :rate-limit-requests-remaining)
+                (ignore-errors (parse-integer req-remaining)))))))
+  ;; Verbose output
+  (when (and *verbose* *last-api-usage*)
+    (format t "[Tokens: ~:d in, ~:d out | Session: ~:d in, ~:d out~a]~%"
+            (getf *last-api-usage* :input-tokens 0)
+            (getf *last-api-usage* :output-tokens 0)
+            (getf *session-tokens* :input)
+            (getf *session-tokens* :output)
+            (let ((remaining (getf *last-api-usage* :rate-limit-tokens-remaining)))
+              (if remaining
+                  (format nil " | ~:d tokens remaining" remaining)
+                  "")))))
 
 ;;; Provider configuration
 
@@ -100,6 +183,9 @@ FN should return (values body status headers) like dex:post."
                  (let ((retry-after (ignore-errors
                                       (parse-integer
                                        (or (gethash "retry-after" headers) "")))))
+                   (when *verbose*
+                     (format t "[Rate limited (~a), waiting ~as~@[ (retry-after: ~as)~]]~%"
+                             status (or retry-after delay) retry-after))
                    (sleep (or retry-after delay)))
                  (return (values body status headers))))))
 
@@ -123,14 +209,16 @@ FN should return (values body status headers) like dex:post."
                                     "function" tool))
                  tools)))
     (let ((json-body (encode-json body)))
-      (multiple-value-bind (response-body status)
+      (multiple-value-bind (response-body status response-headers)
           (call-with-retry
            (lambda () (dex:post endpoint
                                 :headers headers
                                 :content json-body)))
         (unless (= status 200)
           (error "API error (~a): ~a" status response-body))
-        (decode-json response-body)))))
+        (let ((response (decode-json response-body)))
+          (record-usage response response-headers)
+          response)))))
 
 (defun call-anthropic (messages &key tools system)
   "Call Anthropic Claude API."
@@ -146,19 +234,21 @@ FN should return (values body status headers) like dex:post."
     (when (and tools (> (length tools) 0))
       (setf (gethash "tools" body) tools))
     (let ((json-content (encode-json body)))
-      (multiple-value-bind (response-body status)
+      (multiple-value-bind (response-body status response-headers)
           (call-with-retry
            (lambda () (dex:post "https://api.anthropic.com/v1/messages"
                                 :headers headers
                                 :content json-content)))
         (unless (= status 200)
           (error "Claude API error (~a): ~a" status response-body))
-        (decode-json response-body)))))
+        (let ((response (decode-json response-body)))
+          (record-usage response response-headers)
+          response)))))
 
 (defun call-llm (messages &key tools system)
   "Call LLM based on *provider*."
   (unless *api-key*
-    (error "API key not set. Set *api-key* or appropriate environment variable."))
+    (error "API key not set. Set *api-key*, env var, or key file (~/.anthropic-key etc)."))
   (ecase *provider*
     ((:groq :openai)
      (call-openai-compatible (api-endpoint *provider*) messages
@@ -316,6 +406,7 @@ Uses stop_reason as the canonical loop control signal:
 (defun run-agent (prompt &key system (max-iterations 10) (registry *global-tool-registry*) allowed-tools)
   "Run agent with PROMPT until completion or MAX-ITERATIONS.
 ALLOWED-TOOLS, if provided, is a list of tool name strings to expose."
+  (reset-session-tokens)
   (let* ((effective-registry (if allowed-tools
                                  (filter-registry allowed-tools registry)
                                  registry))

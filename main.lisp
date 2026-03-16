@@ -160,10 +160,14 @@
                 #:*model*
                 #:*max-tokens*
                 #:*verbose*
+                #:*last-api-usage*
+                #:*session-tokens*
+                #:reset-session-tokens
                 #:run-agent
                 #:chat)
   ;; Agent tools (loading this registers the tools)
-  (:import-from #:mcp-lisp/src/agent/tools)
+  (:import-from #:mcp-lisp/src/agent/tools
+                #:*search-api-key*)
   ;; Export everything
   (:export ;; Core
            #:+protocol-version+
@@ -299,6 +303,10 @@
            #:*model*
            #:*max-tokens*
            #:*verbose*
+           #:*last-api-usage*
+           #:*session-tokens*
+           #:reset-session-tokens
+           #:*search-api-key*
            #:run-agent
            #:chat))
 

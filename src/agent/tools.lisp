@@ -6,7 +6,9 @@
   (:use #:cl)
   (:import-from #:mcp-lisp/src/primitives/tools/define-tool
                 #:define-tool)
-  (:export #:reset-sandbox))
+  (:import-from #:dexador)
+  (:export #:reset-sandbox
+           #:*search-api-key*))
 
 (in-package #:mcp-lisp/src/agent/tools)
 
@@ -146,3 +148,51 @@ system commands, git, etc."
       (format out "  ~a: ~a~%"
               (mcp-lisp/src/primitives/tools/registry:tool-entry-name tool)
               (mcp-lisp/src/primitives/tools/registry:tool-entry-description tool)))))
+
+;;; web_search - Search the web via Tavily
+
+(defun read-key-file (filename)
+  "Read an API key from ~/FILENAME, trimming whitespace. Returns NIL if missing."
+  (ignore-errors
+    (string-trim '(#\Space #\Newline #\Return #\Tab)
+                 (uiop:read-file-string
+                  (merge-pathnames filename (user-homedir-pathname))))))
+
+(defvar *search-api-key* (or (uiop:getenv "TAVILY_API_KEY")
+                              (read-key-file ".tavily-key"))
+  "Tavily API key. Checked: TAVILY_API_KEY env var, then ~/.tavily-key.")
+
+(define-tool web-search ((query string "Search query" :required t)
+                         (max-results integer "Number of results (1-10)" :default 5))
+  "Search the web using Tavily and return results with titles, URLs, and content snippets."
+  (:annotations :read-only t :open-world t)
+  (unless *search-api-key*
+    (error 'mcp-lisp/src/conditions:tool-error
+           :message "Tavily API key not found. Set TAVILY_API_KEY env var, write ~/.tavily-key, or set *search-api-key* directly."
+           :category :permission))
+  (let ((clamped-max (max 1 (min 10 (or max-results 5)))))
+    (multiple-value-bind (response-body status)
+        (dex:post "https://api.tavily.com/search"
+                  :headers '(("Content-Type" . "application/json"))
+                  :read-timeout 15
+                  :connect-timeout 5
+                  :content (mcp-lisp/src/json:encode-json
+                            (mcp-lisp/src/json:make-ht
+                             "query" query
+                             "max_results" clamped-max
+                             "api_key" *search-api-key*)))
+      (unless (= status 200)
+        (error 'mcp-lisp/src/conditions:tool-error
+               :message (format nil "Tavily API error (~a): ~a" status response-body)
+               :category :transient
+               :retryable t))
+      (let* ((data (mcp-lisp/src/json:decode-json response-body))
+             (results (gethash "results" data)))
+        (with-output-to-string (out)
+          (loop for result across results
+                for i from 1
+                do (format out "~a. ~a~%   ~a~%   ~a~%~%"
+                           i
+                           (gethash "title" result)
+                           (gethash "url" result)
+                           (gethash "content" result))))))))
