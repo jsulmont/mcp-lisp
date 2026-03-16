@@ -22,6 +22,7 @@
   (:import-from #:dexador)
   (:export #:http-transport
            #:make-http-transport
+           #:http-transport-request-handler
            ;; Re-export protocol GFs
            #:transport-start
            #:transport-stop
@@ -48,7 +49,11 @@
             :accessor transport-running-p)
    (notification-handler :initform nil
                          :accessor transport-notification-handler
-                         :documentation "Function (method params) for server notifications."))
+                         :documentation "Function (method params) for server notifications.")
+   (request-handler :initform nil
+                    :accessor http-transport-request-handler
+                    :documentation "Function (method params) -> result for server-initiated requests.
+Used for sampling/createMessage, elicitation/create, etc."))
   (:documentation "MCP client transport over Streamable HTTP."))
 
 (defun make-http-transport (url)
@@ -101,8 +106,20 @@
 
 ;;; SSE event dispatch
 
+(defun post-json-rpc-response (transport id result &key error-msg)
+  "POST a JSON-RPC response back to the server for a server-initiated request."
+  (let ((resp (if error-msg
+                  (make-ht "jsonrpc" "2.0" "id" id
+                           "error" (make-ht "code" -32603 "message" error-msg))
+                  (make-ht "jsonrpc" "2.0" "id" id "result" result))))
+    (handler-case
+        (dex:post (http-transport-url transport)
+                  :headers (request-headers transport)
+                  :content (encode-json resp))
+      (error (e) (log:warn "Failed to POST response for ~a: ~a" id e)))))
+
 (defun dispatch-sse-response (transport events)
-  "Process SSE events. Dispatch notifications, return the JSON-RPC response."
+  "Process SSE events. Dispatch notifications, handle server requests, return the JSON-RPC response."
   (let ((response nil))
     (dolist (event events)
       (let ((data (cdr event)))
@@ -119,9 +136,18 @@
                          (funcall (transport-notification-handler transport)
                                   method (gethash "params" parsed))
                        (error (e) (log:warn "Notification handler error: ~a" e)))))
-                  ;; Server request (has method and id)
+                  ;; Server request (has method and id) — invoke handler, POST response back
                   ((and method id)
-                   (log:debug "Server request received (unhandled): ~a" method))
+                   (let ((handler (http-transport-request-handler transport)))
+                     (if handler
+                         (handler-case
+                             (let ((result (funcall handler method (gethash "params" parsed))))
+                               (post-json-rpc-response transport id result))
+                           (error (e)
+                             (post-json-rpc-response transport id nil
+                                                     :error-msg (princ-to-string e))))
+                         (post-json-rpc-response transport id nil
+                                                 :error-msg (format nil "No handler for server request: ~a" method)))))
                   ;; Response (has id, no method)
                   (id
                    (setf response parsed))))

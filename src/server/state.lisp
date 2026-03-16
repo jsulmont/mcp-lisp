@@ -6,6 +6,7 @@
   (:use #:cl)
   (:export #:server-session
            #:make-session
+           #:*current-session*
            #:session-initialized-p
            #:session-client-info
            #:session-protocol-version
@@ -46,6 +47,10 @@
 (defun session-subscribed-p (session uri)
   "Return T if subscribed to URI."
   (gethash uri (session-subscriptions session)))
+
+(defvar *current-session* nil
+  "The active session for the current request.
+Bound per-request by the transport layer (SSE or stdio).")
 
 (defun make-session ()
   "Create a new server session."

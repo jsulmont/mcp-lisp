@@ -22,7 +22,8 @@
                 #:make-stdio-transport)
   (:import-from #:mcp-lisp/src/transport/mcp-http-client
                 #:http-transport
-                #:make-http-transport)
+                #:make-http-transport
+                #:http-transport-request-handler)
   (:export #:mcp-client
            #:make-client
            #:make-http-client
@@ -39,6 +40,7 @@
            #:client-call
            #:client-notify
            #:client-notification-handler
+           #:client-request-handler
            #:with-client))
 
 (in-package #:mcp-lisp/src/client/client)
@@ -120,6 +122,23 @@
   (unless (client-connected-p client)
     (error 'mcp-error :message "Client not connected"))
   (setf (transport-notification-handler (client-transport client)) handler))
+
+(defun client-request-handler (client)
+  "Get the server-request handler for CLIENT (HTTP transport only).
+Used for sampling/createMessage, elicitation/create, etc."
+  (let ((transport (client-transport client)))
+    (when (typep transport 'http-transport)
+      (http-transport-request-handler transport))))
+
+(defun (setf client-request-handler) (handler client)
+  "Set the server-request handler for CLIENT (HTTP transport only).
+HANDLER is a function (method params) -> result."
+  (unless (client-connected-p client)
+    (error 'mcp-error :message "Client not connected"))
+  (let ((transport (client-transport client)))
+    (unless (typep transport 'http-transport)
+      (error 'mcp-error :message "Server-request handler only supported on HTTP transport"))
+    (setf (http-transport-request-handler transport) handler)))
 
 ;;; Lifecycle
 

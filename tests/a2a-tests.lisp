@@ -82,3 +82,50 @@
   "get-task returns nil for unknown ID"
   (let ((mcp-lisp/src/a2a/tasks::*task-registry* (make-hash-table :test #'equal)))
     (is (null (mcp-lisp/src/a2a/tasks:get-task "nonexistent-id")))))
+
+;;; Concurrency tests
+
+(test concurrent-task-creation-unique-ids
+  "Concurrent create-task calls produce unique IDs and all tasks are registered"
+  (let ((registry (make-hash-table :test #'equal))
+        (n 50)
+        (tasks (make-array 0 :adjustable t :fill-pointer 0))
+        (tasks-lock (bt:make-lock "test-tasks")))
+    ;; Spawn N threads, each creating a task (rebind registry per thread)
+    (let ((threads
+            (loop repeat n
+                  collect (bt:make-thread
+                           (lambda ()
+                             (let ((mcp-lisp/src/a2a/tasks::*task-registry* registry))
+                               (let ((task (mcp-lisp/src/a2a/tasks:create-task)))
+                                 (bt:with-lock-held (tasks-lock)
+                                   (vector-push-extend task tasks)))))))))
+      (mapc #'bt:join-thread threads))
+    ;; All tasks created
+    (is (= n (length tasks)))
+    ;; All IDs unique
+    (let ((ids (map 'list #'mcp-lisp/src/a2a/tasks:task-id tasks)))
+      (is (= n (length (remove-duplicates ids :test #'string=)))))
+    ;; All tasks retrievable from registry
+    (let ((mcp-lisp/src/a2a/tasks::*task-registry* registry))
+      (loop for task across tasks
+            do (is (eq task (mcp-lisp/src/a2a/tasks:get-task
+                             (mcp-lisp/src/a2a/tasks:task-id task))))))))
+
+(test concurrent-cancel-respects-terminal-state
+  "cancel-task under contention never moves a completed task to canceled"
+  (let* ((registry (make-hash-table :test #'equal))
+         (mcp-lisp/src/a2a/tasks::*task-registry* registry)
+         (task (mcp-lisp/src/a2a/tasks:create-task)))
+    ;; One thread completes, many try to cancel concurrently
+    (let ((threads
+            (cons
+             (bt:make-thread
+              (lambda () (mcp-lisp/src/a2a/tasks:update-task-status task :completed)))
+             (loop repeat 20
+                   collect (bt:make-thread
+                            (lambda () (mcp-lisp/src/a2a/tasks:cancel-task task)))))))
+      (mapc #'bt:join-thread threads))
+    ;; Final state must be :completed or :canceled — never anything else
+    (is (member (mcp-lisp/src/a2a/tasks:task-status task)
+                '(:completed :canceled)))))

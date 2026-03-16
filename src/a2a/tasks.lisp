@@ -7,7 +7,9 @@
   (:import-from #:mcp-lisp/src/json
                 #:make-ht
                 #:encode-json)
+  (:import-from #:bordeaux-threads)
   (:export #:*task-registry*
+           #:*task-lock*
            #:task
            #:make-task
            #:task-id
@@ -26,6 +28,9 @@
 
 (defvar *task-registry* (make-hash-table :test #'equal)
   "Registry of active tasks.")
+
+(defvar *task-lock* (bt:make-lock "task-registry")
+  "Lock protecting *task-registry*, *task-counter*, and task mutations.")
 
 (defvar *task-counter* 0
   "Counter for generating task IDs.")
@@ -53,7 +58,7 @@
   (:documentation "A2A Task - a unit of work."))
 
 (defun generate-task-id ()
-  "Generate a unique task ID."
+  "Generate a unique task ID. Must be called under *task-lock*."
   (format nil "task-~a-~a" (get-universal-time) (incf *task-counter*)))
 
 (defun make-task (&key (id (generate-task-id)) (status :pending) messages)
@@ -67,37 +72,44 @@
                    :updated-at now)))
 
 (defun create-task (&key messages)
-  "Create and register a new task."
-  (let ((task (make-task :messages messages)))
-    (setf (gethash (task-id task) *task-registry*) task)
-    task))
+  "Create and register a new task. Thread-safe."
+  (bt:with-lock-held (*task-lock*)
+    (let ((task (make-task :messages messages)))
+      (setf (gethash (task-id task) *task-registry*) task)
+      task)))
 
 (defun get-task (id)
-  "Get a task by ID."
-  (gethash id *task-registry*))
+  "Get a task by ID. Thread-safe."
+  (bt:with-lock-held (*task-lock*)
+    (gethash id *task-registry*)))
 
 (defun update-task-status (task new-status)
-  "Update task status. Valid statuses: :pending :working :completed :failed :canceled"
-  (setf (task-status task) new-status)
-  (setf (task-updated-at task) (get-universal-time))
+  "Update task status. Thread-safe."
+  (bt:with-lock-held (*task-lock*)
+    (setf (task-status task) new-status)
+    (setf (task-updated-at task) (get-universal-time)))
   task)
 
 (defun add-task-artifact (task artifact)
-  "Add an artifact to a task."
-  (push artifact (task-artifacts task))
-  (setf (task-updated-at task) (get-universal-time))
+  "Add an artifact to a task. Thread-safe."
+  (bt:with-lock-held (*task-lock*)
+    (push artifact (task-artifacts task))
+    (setf (task-updated-at task) (get-universal-time)))
   task)
 
 (defun add-task-message (task message)
-  "Add a message to a task's history."
-  (push message (task-messages task))
-  (setf (task-updated-at task) (get-universal-time))
+  "Add a message to a task's history. Thread-safe."
+  (bt:with-lock-held (*task-lock*)
+    (push message (task-messages task))
+    (setf (task-updated-at task) (get-universal-time)))
   task)
 
 (defun cancel-task (task)
-  "Cancel a task if it's not already in a terminal state."
-  (unless (member (task-status task) '(:completed :failed :canceled))
-    (update-task-status task :canceled))
+  "Cancel a task if it's not already in a terminal state. Thread-safe."
+  (bt:with-lock-held (*task-lock*)
+    (unless (member (task-status task) '(:completed :failed :canceled))
+      (setf (task-status task) :canceled)
+      (setf (task-updated-at task) (get-universal-time))))
   task)
 
 (defun status-to-string (status)
@@ -110,8 +122,9 @@
     (:canceled "canceled")))
 
 (defun task-to-ht (task)
-  "Convert task to hash-table for JSON serialization."
-  (make-ht "id" (task-id task)
-           "status" (status-to-string (task-status task))
-           "artifacts" (coerce (reverse (task-artifacts task)) 'vector)
-           "messages" (coerce (reverse (task-messages task)) 'vector)))
+  "Convert task to hash-table for JSON serialization. Thread-safe."
+  (bt:with-lock-held (*task-lock*)
+    (make-ht "id" (task-id task)
+             "status" (status-to-string (task-status task))
+             "artifacts" (coerce (reverse (task-artifacts task)) 'vector)
+             "messages" (coerce (reverse (task-messages task)) 'vector))))

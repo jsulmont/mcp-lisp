@@ -9,6 +9,7 @@
   (:import-from #:mcp-lisp/src/server/state
                 #:server-session
                 #:make-session
+                #:*current-session*
                 #:session-initialized-p
                 #:session-subscribe
                 #:session-unsubscribe)
@@ -111,9 +112,10 @@
            "logging" (make-ht)))
 
 (defun setup-handlers (server handlers)
-  "Set up MCP handlers hash-table for the server."
-  (let ((session (server-session server))
-        (tool-registry (effective-tool-registry server))
+  "Set up MCP handlers hash-table for the server.
+Handlers read the active session from *current-session* (bound per-request
+by the transport layer), so they work correctly with multiple concurrent sessions."
+  (let ((tool-registry (effective-tool-registry server))
         (prompt-registry (effective-prompt-registry server))
         (resource-registry (effective-resource-registry server))
         (caps (or (server-capabilities server) (default-capabilities))))
@@ -121,7 +123,7 @@
     (setf (gethash "initialize" handlers)
           (lambda (params)
             (multiple-value-bind (result error-data)
-                (handle-initialize session
+                (handle-initialize *current-session*
                                    (server-name server)
                                    (server-version server)
                                    caps
@@ -144,7 +146,7 @@
 
     (setf (gethash "tools/call" handlers)
           (lambda (params)
-            (handle-tools-call-result params server session tool-registry)))
+            (handle-tools-call-result params server *current-session* tool-registry)))
 
     (setf (gethash "prompts/list" handlers)
           (lambda (params)
@@ -153,7 +155,7 @@
 
     (setf (gethash "prompts/get" handlers)
           (lambda (params)
-            (handle-prompts-get-result params server session prompt-registry)))
+            (handle-prompts-get-result params server *current-session* prompt-registry)))
 
     (setf (gethash "resources/list" handlers)
           (lambda (params)
@@ -162,7 +164,7 @@
 
     (setf (gethash "resources/read" handlers)
           (lambda (params)
-            (handle-resources-read-result params server session resource-registry)))
+            (handle-resources-read-result params server *current-session* resource-registry)))
 
     (setf (gethash "resources/templates/list" handlers)
           (lambda (params)
@@ -179,14 +181,14 @@
           (lambda (params)
             (let ((uri (and params (gethash "uri" params))))
               (when uri
-                (session-subscribe session uri))
+                (session-subscribe *current-session* uri))
               (make-ht))))
 
     (setf (gethash "resources/unsubscribe" handlers)
           (lambda (params)
             (let ((uri (and params (gethash "uri" params))))
               (when uri
-                (session-unsubscribe session uri))
+                (session-unsubscribe *current-session* uri))
               (make-ht))))
 
     (setf (gethash "logging/setLevel" handlers)
@@ -196,7 +198,7 @@
     (setf (gethash "notifications/initialized" handlers)
           (lambda (params)
             (declare (ignore params))
-            (handle-initialized session)
+            (handle-initialized *current-session*)
             nil))))
 
 (defmethod server-start ((server mcp-server) &key (transport :stdio) (port 8080))
@@ -204,14 +206,16 @@
 TRANSPORT options:
   :stdio - MCP protocol over stdio (newline-delimited JSON) - default
   :sse   - Streamable HTTP on PORT (MCP 2025-03-26+)"
-  (setf (server-session server) (make-session))
   (let ((handlers (make-hash-table :test #'equal)))
     (setup-handlers server handlers)
     (case transport
       (:sse
-       (setf (server-sse server) (start-sse-server handlers :port port)))
+       (setf (server-sse server)
+             (start-sse-server handlers :port port :session-factory #'make-session)))
       (otherwise
-       (mcp-server-loop handlers)))))
+       (setf (server-session server) (make-session))
+       (let ((*current-session* (server-session server)))
+         (mcp-server-loop handlers))))))
 
 (defmethod server-stop ((server mcp-server))
   "Stop the server."

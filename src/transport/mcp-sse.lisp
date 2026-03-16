@@ -17,6 +17,9 @@
                 #:protocol-error-code
                 #:protocol-error-data
                 #:mcp-error-message)
+  (:import-from #:mcp-lisp/src/server/state
+                #:*current-session*
+                #:session-protocol-version)
   (:export #:start-sse-server
            #:stop-sse-server
            #:*sse-server*
@@ -29,13 +32,19 @@
            #:generate-session-id
            #:send-to-session
            #:*sse-clients*
-           #:*sse-clients-lock*))
+           #:*sse-clients-lock*
+           #:*sessions*
+           #:*sessions-lock*))
 
 (in-package #:mcp-lisp/src/transport/mcp-sse)
 
 (defvar *sse-server* nil "Current Hunchentoot acceptor.")
 (defvar *handlers* nil "Hash-table of method handlers.")
-(defvar *mcp-session-id* nil "Active session ID for Streamable HTTP.")
+(defvar *mcp-session-id* nil
+  "Session ID for the current request. Bound per-request by post-handler/get-handler.")
+(defvar *sessions* nil "Hash-table: session-id -> session object.")
+(defvar *sessions-lock* (bt:make-lock "sessions"))
+(defvar *session-factory* nil "Function () -> new session object.")
 (defvar *sse-clients* nil "Hash-table of session-id -> SSE client stream (for GET listeners).")
 (defvar *sse-clients-lock* (bt:make-lock "sse-clients"))
 (defvar *session-id-lock* (bt:make-lock "session-id"))
@@ -238,6 +247,28 @@ Returns whatever THUNK returns."
             (remhash session-id *sse-clients*)
             nil))))))
 
+;;; --- Session map operations ---
+
+(defun get-session (session-id)
+  "Look up session by ID. Returns session object or NIL."
+  (when (and session-id *sessions*)
+    (bt:with-lock-held (*sessions-lock*)
+      (gethash session-id *sessions*))))
+
+(defun add-session (session-id session)
+  "Register a session in the map."
+  (bt:with-lock-held (*sessions-lock*)
+    (setf (gethash session-id *sessions*) session)))
+
+(defun remove-session (session-id)
+  "Remove a session from the map."
+  (bt:with-lock-held (*sessions-lock*)
+    (remhash session-id *sessions*)))
+
+(defun session-count ()
+  "Return the number of active sessions."
+  (if *sessions* (hash-table-count *sessions*) 0))
+
 ;;; --- Response routing for server→client requests ---
 
 (defun is-json-rpc-response-p (parsed)
@@ -400,10 +431,18 @@ The client will POST the response back, which gets routed via deliver-pending-re
 
 ;;; --- HTTP handlers ---
 
+(defun lookup-session-for-request ()
+  "Look up session by MCP-Session-Id header.
+Returns (values session session-id) or (values nil nil)."
+  (let* ((session-id (hunchentoot:header-in* "MCP-Session-Id"))
+         (session (get-session session-id)))
+    (values session session-id)))
+
 (defun post-handler ()
   "Handle POST to MCP endpoint.
 Uses SSE streaming for JSON-RPC requests (to support mid-execution messaging).
-Returns 202 for notifications and responses."
+Returns 202 for notifications and responses.
+Binds *current-session* and *mcp-session-id* per-request for session isolation."
   (let* ((body (hunchentoot:raw-post-data :force-text t))
          (parsed (handler-case (decode-json body)
                    (error () nil))))
@@ -411,39 +450,59 @@ Returns 202 for notifications and responses."
       (setf (hunchentoot:return-code*) 400)
       (return-from post-handler "Bad Request: invalid JSON"))
     (cond
-      ;; Response to a pending server->client request
+      ;; Response to a pending server->client request — no session needed
       ((is-json-rpc-response-p parsed)
        (deliver-pending-response parsed)
        (setf (hunchentoot:return-code*) 202)
        "")
       ;; Notification (no id)
       ((null (gethash "id" parsed))
-       (let ((method (gethash "method" parsed))
-             (params (gethash "params" parsed)))
-         (let ((handler (and method (gethash method *handlers*))))
-           (when handler
-             (handler-case
-                 (call-with-access-log method nil params (lambda () (funcall handler params)))
-               (error (e) (log:error "Notification handler error (~a): ~a" method e))))))
+       (multiple-value-bind (session session-id) (lookup-session-for-request)
+         (let ((*current-session* session)
+               (*mcp-session-id* session-id))
+           (let ((method (gethash "method" parsed))
+                 (params (gethash "params" parsed)))
+             (let ((handler (and method (gethash method *handlers*))))
+               (when handler
+                 (handler-case
+                     (call-with-access-log method nil params (lambda () (funcall handler params)))
+                   (error (e) (log:error "Notification handler error (~a): ~a" method e))))))))
        (setf (hunchentoot:return-code*) 202)
        "")
       ;; JSON-RPC request — use SSE streaming
       (t
-       (setf (hunchentoot:content-type*) "text/event-stream")
-       (setf (hunchentoot:header-out "Cache-Control") "no-cache")
-       ;; Assign session ID on initialize
-       (when (equal "initialize" (gethash "method" parsed))
-         (let ((session-id (generate-session-id)))
-           (setf *mcp-session-id* session-id)
-           (setf (hunchentoot:header-out "MCP-Session-Id") session-id)
-           (log:debug "Session created: ~a" session-id)))
-       (let ((stream (hunchentoot:send-headers)))
-         (handle-request-streaming body stream))))))
+       (let ((is-init (equal "initialize" (gethash "method" parsed))))
+         (if is-init
+             ;; Initialize: create session, only persist after success
+             (let* ((session-id (generate-session-id))
+                    (session (funcall *session-factory*))
+                    (*current-session* session)
+                    (*mcp-session-id* session-id))
+               (setf (hunchentoot:content-type*) "text/event-stream")
+               (setf (hunchentoot:header-out "Cache-Control") "no-cache")
+               (setf (hunchentoot:header-out "MCP-Session-Id") session-id)
+               (let* ((stream (hunchentoot:send-headers))
+                      (result (handle-request-streaming body stream)))
+                 (when (session-protocol-version session)
+                   (add-session session-id session)
+                   (log:debug "Session created: ~a" session-id))
+                 result))
+             ;; Non-initialize: look up existing session
+             (multiple-value-bind (session session-id) (lookup-session-for-request)
+               (unless session
+                 (setf (hunchentoot:return-code*) 400)
+                 (return-from post-handler "Bad Request: invalid or missing session"))
+               (let ((*current-session* session)
+                     (*mcp-session-id* session-id))
+                 (setf (hunchentoot:content-type*) "text/event-stream")
+                 (setf (hunchentoot:header-out "Cache-Control") "no-cache")
+                 (let ((stream (hunchentoot:send-headers)))
+                   (handle-request-streaming body stream))))))))))
 
 (defun get-handler ()
   "Handle GET to MCP endpoint — SSE stream for server-initiated messages."
   (let ((session-id (hunchentoot:header-in* "MCP-Session-Id")))
-    (unless (and *mcp-session-id* (equal session-id *mcp-session-id*))
+    (unless (get-session session-id)
       (setf (hunchentoot:return-code*) 400)
       (return-from get-handler "Bad Request: invalid session"))
     (setf (hunchentoot:content-type*) "text/event-stream")
@@ -471,8 +530,8 @@ Returns 202 for notifications and responses."
 (defun delete-handler ()
   "Handle DELETE to MCP endpoint — session termination."
   (let ((session-id (hunchentoot:header-in* "MCP-Session-Id")))
-    (when (and *mcp-session-id* (equal session-id *mcp-session-id*))
-      (setf *mcp-session-id* nil)
+    (when (get-session session-id)
+      (remove-session session-id)
       (bt:with-lock-held (*sse-clients-lock*)
         (when *sse-clients*
           (let ((stream (gethash session-id *sse-clients*)))
@@ -545,17 +604,23 @@ Returns 202 for notifications and responses."
        (setf (hunchentoot:content-type*) "application/json")
        (encode-json (make-ht "heap_mb" (round (/ (sb-kernel:dynamic-usage) 1048576))
                              "threads" (length (bt:all-threads))
+                             "sessions" (session-count)
                              "pending_responses" (hash-table-count *pending-responses*)
                              "sse_clients" (if *sse-clients* (hash-table-count *sse-clients*) 0))))
       (t (setf (hunchentoot:return-code*) 404) "Not Found"))))
 
 ;;; --- Public API ---
 
-(defun start-sse-server (handlers &key (port 8080) (path "/mcp"))
-  "Start MCP Streamable HTTP server on PORT with HANDLERS hash-table."
+(defun start-sse-server (handlers &key (port 8080) (path "/mcp")
+                                       (session-factory #'mcp-lisp/src/server/state:make-session))
+  "Start MCP Streamable HTTP server on PORT with HANDLERS hash-table.
+SESSION-FACTORY is a function () -> new session object, called on each initialize request.
+Defaults to make-session."
   (when *sse-server* (stop-sse-server))
   (setf *handlers* handlers
         *mcp-path* path
+        *session-factory* session-factory
+        *sessions* (make-hash-table :test #'equal)
         *mcp-session-id* nil
         *sse-clients* (make-hash-table :test #'equal)
         *pending-responses* (make-hash-table :test #'equal)
@@ -573,6 +638,7 @@ Returns 202 for notifications and responses."
   (when *sse-server*
     (hunchentoot:stop *sse-server*)
     (setf *sse-server* nil *mcp-session-id* nil)
+    (when *sessions* (clrhash *sessions*))
     (when *sse-clients* (clrhash *sse-clients*))
     (when *pending-responses* (clrhash *pending-responses*))
     (log:info "MCP server stopped")))

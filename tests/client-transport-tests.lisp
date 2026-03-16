@@ -66,3 +66,46 @@
     (signals mcp-lisp:mcp-error
       (setf (mcp-lisp:client-notification-handler client)
             (lambda (m p) (declare (ignore m p)))))))
+
+;;; Test HTTP transport request handler
+
+(test http-transport-request-handler-default-nil
+  "HTTP transport request handler defaults to NIL"
+  (let ((transport (mcp-lisp/src/transport/mcp-http-client:make-http-transport
+                    "http://localhost:9999/mcp")))
+    (is (null (mcp-lisp/src/transport/mcp-http-client:http-transport-request-handler
+               transport)))))
+
+(test http-transport-request-handler-invoked
+  "dispatch-sse-response invokes request handler for server requests"
+  (let* ((captured-method nil)
+         (captured-params nil)
+         (transport (mcp-lisp/src/transport/mcp-http-client:make-http-transport
+                     "http://localhost:9999/mcp")))
+    (setf (mcp-lisp/src/transport/mcp-http-client:http-transport-request-handler transport)
+          (lambda (method params)
+            (setf captured-method method
+                  captured-params params)
+            ;; Return a result — the POST-back will fail (no server), but handler is called
+            (mcp-lisp:make-ht "model" "test" "content" "hello")))
+    ;; Construct SSE events: a server request followed by the actual response
+    (let* ((server-req (mcp-lisp:encode-json
+                        (mcp-lisp:make-ht "jsonrpc" "2.0"
+                                           "id" "srv-1"
+                                           "method" "sampling/createMessage"
+                                           "params" (mcp-lisp:make-ht "maxTokens" 100))))
+           (response (mcp-lisp:encode-json
+                      (mcp-lisp:make-ht "jsonrpc" "2.0"
+                                         "id" 1
+                                         "result" (mcp-lisp:make-ht "ok" t))))
+           (events (list (cons "message" server-req)
+                         (cons "message" response))))
+      ;; dispatch-sse-response processes both events
+      (let ((result (mcp-lisp/src/transport/mcp-http-client::dispatch-sse-response
+                     transport events)))
+        ;; The handler was invoked with the server request
+        (is (string= "sampling/createMessage" captured-method))
+        (is (= 100 (gethash "maxTokens" captured-params)))
+        ;; The actual response is still returned
+        (is (hash-table-p result))
+        (is (= 1 (gethash "id" result)))))))
