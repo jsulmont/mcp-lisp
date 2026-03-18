@@ -275,14 +275,29 @@ JSON-RPC hash-tables on first access.  :synchronized t for safe init.")
 ;;; DNS rebinding protection (adapted for Clack env)
 ;;; =====================================================================
 
+(defun strip-port (host)
+  "Strip port suffix from HOST string.  Handles IPv6 bracket notation:
+  localhost:8080    → localhost
+  127.0.0.1:8080   → 127.0.0.1
+  [::1]:8080       → [::1]
+  [::1]            → [::1]
+  ::1              → ::1"
+  (if (and (plusp (length host)) (char= (char host 0) #\[))
+      ;; Bracketed IPv6: port follows the closing bracket
+      (let ((bracket (position #\] host)))
+        (if bracket (subseq host 0 (1+ bracket)) host))
+      ;; Non-bracketed: strip only when there's exactly one colon (host:port).
+      ;; Multiple colons means bare IPv6 — don't strip.
+      (let ((first-colon (position #\: host))
+            (last-colon (position #\: host :from-end t)))
+        (if (and first-colon (= first-colon last-colon))
+            (subseq host 0 first-colon)
+            host))))
+
 (defun localhost-p (host)
+  "Return T if HOST (with optional port) refers to localhost."
   (when host
-    (let ((h (string-downcase host)))
-      (let ((colon (position #\: h :from-end t)))
-        (when (and colon (> colon 0))
-          (unless (and (char= (char h 0) #\[)
-                       (null (position #\] h :start colon)))
-            (setf h (subseq h 0 colon)))))
+    (let ((h (strip-port (string-downcase host))))
       (or (string= h "localhost")
           (string= h "127.0.0.1")
           (string= h "[::1]")

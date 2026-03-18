@@ -133,14 +133,40 @@
   (let ((body (third (mcp-lisp/src/transport/mcp-woo::make-immediate-response 202 nil ""))))
     (is (equal '("") body))))
 
+(test localhost-p-recognizes-all-forms
+  "localhost-p handles IPv4, IPv6, with and without port"
+  (dolist (host '("localhost" "localhost:8080"
+                  "127.0.0.1" "127.0.0.1:8080"
+                  "[::1]" "[::1]:8080"
+                  "::1"
+                  "LOCALHOST" "Localhost:3000"))
+    (is (mcp-lisp/src/transport/mcp-woo::localhost-p host)
+        "Expected ~a to be recognized as localhost" host)))
+
+(test localhost-p-rejects-non-localhost
+  "localhost-p rejects non-localhost hosts"
+  (dolist (host '("evil.com" "192.168.1.1" "10.0.0.1:8080"
+                  "localhost.evil.com" "[::2]" "[::2]:80"))
+    (is (not (mcp-lisp/src/transport/mcp-woo::localhost-p host))
+        "Expected ~a to be rejected" host)))
+
+(test localhost-p-handles-nil-and-empty
+  "localhost-p returns NIL for nil and empty string"
+  (is (null (mcp-lisp/src/transport/mcp-woo::localhost-p nil)))
+  (is (null (mcp-lisp/src/transport/mcp-woo::localhost-p ""))))
+
 (test valid-origin-p-allows-no-origin
   "Requests with no Origin header are allowed"
   (let ((env (list :headers (make-hash-table :test #'equal))))
     (is (mcp-lisp/src/transport/mcp-woo::valid-origin-p env))))
 
 (test valid-origin-p-allows-localhost
-  "Requests from localhost origins are allowed"
-  (dolist (origin '("http://localhost:3000" "http://127.0.0.1:8080"))
+  "Requests from localhost origins are allowed (IPv4, IPv6, with/without port)"
+  (dolist (origin '("http://localhost:3000"
+                    "http://127.0.0.1:8080"
+                    "http://localhost"
+                    "http://[::1]:8080"
+                    "http://[::1]"))
     (let ((headers (make-hash-table :test #'equal)))
       (setf (gethash "origin" headers) origin)
       (is (mcp-lisp/src/transport/mcp-woo::valid-origin-p (list :headers headers))
