@@ -342,7 +342,7 @@ Uses finish_reason as the canonical loop control signal:
             for args-json = (gethash "arguments" func)
             for tool-input = (decode-json args-json)
             do (when *verbose*
-                 (format t "~%[Tool: ~a]~%" tool-name)
+                 (format t "~%~c[36m[Tool: ~a]~c[0m~%" #\Esc tool-name #\Esc)
                  (format t "Input: ~a~%" args-json))
                (let ((result (execute-tool tool-name tool-input)))
                  (when *verbose*
@@ -395,7 +395,7 @@ Uses stop_reason as the canonical loop control signal:
                (tool-name (gethash "name" tool-use))
                (tool-input (gethash "input" tool-use)))
           (when *verbose*
-            (format t "~%[Tool: ~a]~%" tool-name)
+            (format t "~%~c[36m[Tool: ~a]~c[0m~%" #\Esc tool-name #\Esc)
             (format t "Input: ~a~%" (encode-json tool-input)))
           (let ((result (execute-tool tool-name tool-input)))
             (when *verbose*
