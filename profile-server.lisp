@@ -101,7 +101,7 @@
       (stop nil))
   (mcp-lisp:server-start server :transport :sse :port 8080)
 
-  (sb-sprof:start-profiling :mode :cpu :sample-interval 0.001 :threads :all)
+  (sb-sprof:start-profiling :mode :alloc :sample-interval 0.001 :threads :all)
 
   ;; SIGINT may arrive on the Woo event-loop thread (inside kqueue/select),
   ;; not the main thread.  Use enable-interrupt so the handler runs in
@@ -114,7 +114,7 @@
   (loop until stop do (sleep 0.5))
 
   (sb-sprof:stop-profiling)
-  (format t "~%~%=== CPU Profile (flat, top 40) ===~%~%")
+  (format t "~%~%=== Allocation Profile (flat, top 40) ===~%~%")
   (sb-sprof:report :type :flat :max 40)
   (finish-output)
   (mcp-lisp:server-stop server)

@@ -183,7 +183,28 @@ FN should return (values body status headers) like dex:post."
                    (sleep (or retry-after delay)))
                  (return (values body status headers))))))
 
-(defun call-openai-compatible (endpoint messages &key tools system)
+(defun tool-choice-for-openai (choice)
+  "Convert unified tool-choice to OpenAI/Groq format."
+  (etypecase choice
+    (null nil)
+    (keyword (ecase choice
+               (:auto "auto")
+               (:any "required")
+               (:none "none")))
+    (string (make-ht "type" "function"
+                     "function" (make-ht "name" choice)))))
+
+(defun tool-choice-for-anthropic (choice)
+  "Convert unified tool-choice to Anthropic format."
+  (etypecase choice
+    (null nil)
+    (keyword (ecase choice
+               (:auto (make-ht "type" "auto"))
+               (:any (make-ht "type" "any"))
+               (:none nil)))
+    (string (make-ht "type" "tool" "name" choice))))
+
+(defun call-openai-compatible (endpoint messages &key tools system tool-choice)
   "Call OpenAI-compatible API (Groq, OpenAI)."
   (let* ((model (or *model* (default-model *provider*)))
          (body (make-ht "model" model
@@ -201,7 +222,9 @@ FN should return (values body status headers) like dex:post."
             (map 'vector (lambda (tool)
                            (make-ht "type" "function"
                                     "function" tool))
-                 tools)))
+                 tools))
+      (let ((tc (tool-choice-for-openai tool-choice)))
+        (when tc (setf (gethash "tool_choice" body) tc))))
     (let ((json-body (encode-json body)))
       (multiple-value-bind (response-body status response-headers)
           (call-with-retry
@@ -214,7 +237,7 @@ FN should return (values body status headers) like dex:post."
           (record-usage response response-headers)
           response)))))
 
-(defun call-anthropic (messages &key tools system)
+(defun call-anthropic (messages &key tools system tool-choice)
   "Call Anthropic Claude API."
   (let* ((model (or *model* (default-model :anthropic)))
          (body (make-ht "model" model
@@ -226,7 +249,9 @@ FN should return (values body status headers) like dex:post."
     (when system
       (setf (gethash "system" body) system))
     (when (and tools (> (length tools) 0))
-      (setf (gethash "tools" body) tools))
+      (setf (gethash "tools" body) tools)
+      (let ((tc (tool-choice-for-anthropic tool-choice)))
+        (when tc (setf (gethash "tool_choice" body) tc))))
     (let ((json-content (encode-json body)))
       (multiple-value-bind (response-body status response-headers)
           (call-with-retry
@@ -239,16 +264,18 @@ FN should return (values body status headers) like dex:post."
           (record-usage response response-headers)
           response)))))
 
-(defun call-llm (messages &key tools system)
+(defun call-llm (messages &key tools system tool-choice)
   "Call LLM based on *provider*."
   (unless *api-key*
     (error "API key not set. Set *api-key*, env var, or key file (~/.anthropic-key etc)."))
   (ecase *provider*
     ((:groq :openai)
      (call-openai-compatible (api-endpoint *provider*) messages
-                             :tools tools :system system))
+                             :tools tools :system system
+                             :tool-choice tool-choice))
     (:anthropic
-     (call-anthropic messages :tools tools :system system))))
+     (call-anthropic messages :tools tools :system system
+                              :tool-choice tool-choice))))
 
 ;;; Tool execution
 
@@ -397,15 +424,23 @@ Uses stop_reason as the canonical loop control signal:
         (when entry
           (setf (gethash name filtered) entry))))))
 
-(defun run-agent (prompt &key system (max-iterations 10) (registry *global-tool-registry*) allowed-tools)
+(defun run-agent (prompt &key system (max-iterations 10) (registry *global-tool-registry*)
+                            allowed-tools tool-choice)
   "Run agent with PROMPT until completion or MAX-ITERATIONS.
-ALLOWED-TOOLS, if provided, is a list of tool name strings to expose."
+ALLOWED-TOOLS, if provided, is a list of tool name strings to expose.
+TOOL-CHOICE controls tool selection on the first LLM call:
+  :auto  — model decides (default)
+  :any   — model must call a tool
+  :none  — no tools (text only)
+  \"name\" — model must call this specific tool
+After the first call, reverts to :auto so the model can stop."
   (reset-session-tokens)
   (let* ((effective-registry (if allowed-tools
                                  (filter-registry allowed-tools registry)
                                  registry))
          (messages (list (make-ht "role" "user" "content" prompt)))
-         (tools (get-tools-for-provider effective-registry)))
+         (tools (get-tools-for-provider effective-registry))
+         (current-tool-choice tool-choice))
     (when *verbose*
       (format t "~%User: ~a~%" prompt)
       (format t "~%[Provider: ~a, Model: ~a]~%" *provider* (or *model* (default-model *provider*)))
@@ -414,7 +449,9 @@ ALLOWED-TOOLS, if provided, is a list of tool name strings to expose."
     (loop for i from 1 to max-iterations
           do (when *verbose*
                (format t "~%--- Iteration ~a ---~%" i))
-             (let ((response (call-llm messages :tools tools :system system)))
+             (let ((response (call-llm messages :tools tools :system system
+                                                :tool-choice current-tool-choice)))
+               (setf current-tool-choice nil) ; revert to auto after first call
                (multiple-value-bind (done-p result new-messages)
                    (process-response response messages)
                  (if done-p

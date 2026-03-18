@@ -38,10 +38,8 @@ The handler receives (server session arguments) and returns a list of messages."
        (let ,(mapcar (lambda (arg-name)
                        `(,arg-name (gethash ,(string-downcase (symbol-name arg-name))
                                             arguments)))
-                     arg-names)
-         ,@body))))
-
-(defmacro define-prompt (name (&rest args) &body body)
+              arg-names)
+         ,@body))))(defmacro define-prompt (name (&rest args) &body body)
   "Define an MCP prompt.
 
 NAME is the prompt name (symbol).
