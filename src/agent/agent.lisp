@@ -265,17 +265,19 @@ FN should return (values body status headers) like dex:post."
           response)))))
 
 (defun call-llm (messages &key tools system tool-choice)
-  "Call LLM based on *provider*."
+  "Call LLM based on *provider*.
+When TOOL-CHOICE is :none, tools are omitted entirely."
   (unless *api-key*
     (error "API key not set. Set *api-key*, env var, or key file (~/.anthropic-key etc)."))
-  (ecase *provider*
-    ((:groq :openai)
-     (call-openai-compatible (api-endpoint *provider*) messages
-                             :tools tools :system system
-                             :tool-choice tool-choice))
-    (:anthropic
-     (call-anthropic messages :tools tools :system system
-                              :tool-choice tool-choice))))
+  (let ((effective-tools (if (eq tool-choice :none) nil tools)))
+    (ecase *provider*
+      ((:groq :openai)
+       (call-openai-compatible (api-endpoint *provider*) messages
+                               :tools effective-tools :system system
+                               :tool-choice (unless (eq tool-choice :none) tool-choice)))
+      (:anthropic
+       (call-anthropic messages :tools effective-tools :system system
+                                :tool-choice (unless (eq tool-choice :none) tool-choice))))))
 
 ;;; Tool execution
 
@@ -424,17 +426,19 @@ Uses stop_reason as the canonical loop control signal:
         (when entry
           (setf (gethash name filtered) entry))))))
 
+(defun session-tokens-used ()
+  (+ (getf *session-tokens* :input) (getf *session-tokens* :output)))
+
 (defun run-agent (prompt &key system (max-iterations 10) (registry *global-tool-registry*)
-                            allowed-tools tool-choice)
+                            allowed-tools tool-choice token-budget (reset-tokens t))
   "Run agent with PROMPT until completion or MAX-ITERATIONS.
-ALLOWED-TOOLS, if provided, is a list of tool name strings to expose.
-TOOL-CHOICE controls tool selection on the first LLM call:
-  :auto  — model decides (default)
-  :any   — model must call a tool
-  :none  — no tools (text only)
-  \"name\" — model must call this specific tool
-After the first call, reverts to :auto so the model can stop."
-  (reset-session-tokens)
+ALLOWED-TOOLS: list of tool name strings to expose.
+TOOL-CHOICE: controls tool selection on the first LLM call —
+  :auto, :any, :none, or a tool name string. Reverts to :auto after.
+TOKEN-BUDGET: max total tokens before forcing synthesis. When 85% consumed,
+  tools are stripped and the model must synthesize with what it has.
+RESET-TOKENS: if nil, preserves the running token count (for nested agents)."
+  (when reset-tokens (reset-session-tokens))
   (let* ((effective-registry (if allowed-tools
                                  (filter-registry allowed-tools registry)
                                  registry))
@@ -445,13 +449,28 @@ After the first call, reverts to :auto so the model can stop."
       (format t "~%User: ~a~%" prompt)
       (format t "~%[Provider: ~a, Model: ~a]~%" *provider* (or *model* (default-model *provider*)))
       (format t "[Tools available: ~{~a~^, ~}]~%"
-              (mapcar #'tool-entry-name (get-all-tools registry))))
+              (mapcar #'tool-entry-name (get-all-tools effective-registry))))
     (loop for i from 1 to max-iterations
+          for budget-exceeded = (and token-budget
+                                    (> (session-tokens-used) (* token-budget 0.85)))
+          for winding-down = (or budget-exceeded
+                                 (= i (1- max-iterations)))
           do (when *verbose*
-               (format t "~%--- Iteration ~a ---~%" i))
+               (format t "~%--- Iteration ~a ---~%" i)
+               (when winding-down
+                 (format t "[Wind-down: ~a]~%"
+                         (if budget-exceeded "token budget" "final iteration"))))
+             ;; On wind-down, strip tools and inject synthesis instruction
+             (when (and winding-down (not (eq current-tool-choice :none)))
+               (setf current-tool-choice :none)
+               (setf messages
+                     (append messages
+                             (list (make-ht "role" "user"
+                                            "content" "Synthesize your final answer now with what you have. Do not request more information.")))))
              (let ((response (call-llm messages :tools tools :system system
                                                 :tool-choice current-tool-choice)))
-               (setf current-tool-choice nil) ; revert to auto after first call
+               (when (and current-tool-choice (not (eq current-tool-choice :none)))
+                 (setf current-tool-choice nil))
                (multiple-value-bind (done-p result new-messages)
                    (process-response response messages)
                  (if done-p
