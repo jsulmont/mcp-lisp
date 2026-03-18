@@ -290,6 +290,34 @@
       ;; OPTIONS should succeed (200) even with bad origin
       (is (= 200 (first captured-response))))))
 
+(test notification-with-invalid-session-does-not-crash
+  "A notification with a missing/invalid session ID returns 202 without crashing"
+  (let ((mcp-lisp/src/transport/mcp-woo::*handlers* (make-hash-table :test #'equal))
+        (mcp-lisp/src/transport/mcp-woo:*sessions*
+          (make-hash-table :test #'equal :synchronized t))
+        (handler-called nil)
+        (captured-response nil))
+    ;; Register a notification handler that should NOT be called
+    (setf (gethash "notifications/initialized" mcp-lisp/src/transport/mcp-woo::*handlers*)
+          (lambda (params) (declare (ignore params)) (setf handler-called t)))
+    (let* ((headers (make-hash-table :test #'equal))
+           (_ (setf (gethash "mcp-session-id" headers) "nonexistent"))
+           (body (mcp-lisp:encode-json
+                  (mcp-lisp:make-ht "jsonrpc" "2.0"
+                                     "method" "notifications/initialized")))
+           (body-bytes (trivial-utf-8:string-to-utf-8-bytes body))
+           (env (list :request-method :post :path-info "/mcp"
+                      :headers headers
+                      :raw-body body-bytes
+                      :content-length (length body-bytes)))
+           (delayed-fn (mcp-lisp/src/transport/mcp-woo::clack-app env)))
+      (declare (ignore _))
+      (funcall delayed-fn (lambda (resp) (setf captured-response resp)))
+      ;; Should get 202 (accepted), not a crash
+      (is (= 202 (first captured-response)))
+      ;; Handler should NOT have been called with nil session
+      (is (null handler-called)))))
+
 (test start-sse-server-fails-when-thread-dies
   "start-sse-server signals an error when the server thread dies during startup"
   ;; Temporarily override woo:run with a function that immediately errors,

@@ -582,15 +582,17 @@ All handlers run inline on the event loop thread."
       ;; Notification (no id) — run inline
       ((null (gethash "id" parsed))
        (let* ((session-id (env-header env "mcp-session-id"))
-              (*current-session* (get-session session-id))
-              (*mcp-session-id* session-id)
-              (method (gethash "method" parsed))
-              (params (gethash "params" parsed))
-              (handler (and method (gethash method *handlers*))))
-         (when handler
-           (handler-case
-               (call-with-access-log method nil params (lambda () (funcall handler params)))
-             (error (e) (log:error "Notification handler error (~a): ~a" method e)))))
+              (session (get-session session-id)))
+         (when session
+           (let* ((*current-session* session)
+                  (*mcp-session-id* session-id)
+                  (method (gethash "method" parsed))
+                  (params (gethash "params" parsed))
+                  (handler (and method (gethash method *handlers*))))
+             (when handler
+               (handler-case
+                   (call-with-access-log method nil params (lambda () (funcall handler params)))
+                 (error (e) (log:error "Notification handler error (~a): ~a" method e)))))))
        (funcall responder (make-immediate-response 202 (list :access-control-allow-origin "*") "")))
 
       ;; tools/call — SSE streaming (needs *stream-notify-fn* and *stream-call-fn*)
