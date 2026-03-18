@@ -202,19 +202,21 @@ by the transport layer), so they work correctly with multiple concurrent session
             nil))))
 
 (defmethod server-start ((server mcp-server) &key (transport :stdio) (port 8080)
-                                                   (event-loops nil))
+                                                   (event-loops nil) (tool-workers nil))
   "Start the server with the specified transport.
 TRANSPORT options:
   :stdio - MCP protocol over stdio (newline-delimited JSON) - default
   :sse   - Streamable HTTP on PORT (MCP 2025-03-26+)
-EVENT-LOOPS: number of Woo event loop threads (nil = auto-detect CPU cores)."
+EVENT-LOOPS: number of Woo event loop threads (nil = auto-detect CPU cores).
+TOOL-WORKERS: number of worker threads for tools/call (nil = same as event loops)."
   (let ((handlers (make-hash-table :test #'equal)))
     (setup-handlers server handlers)
     (case transport
       (:sse
        (setf (server-sse server)
              (start-sse-server handlers :port port :session-factory #'make-session
-                                        :event-loops event-loops)))
+                                        :event-loops event-loops
+                                        :tool-workers tool-workers)))
       (otherwise
        (setf (server-session server) (make-session))
        (let ((*current-session* (server-session server)))
@@ -227,11 +229,12 @@ EVENT-LOOPS: number of Woo event loop threads (nil = auto-detect CPU cores)."
     (setf (server-sse server) nil)))
 
 (defun run-server (&key (name "mcp-lisp-server") (version "1.0.0") (transport :stdio) (port 8080)
-                        (event-loops nil))
+                        (event-loops nil) (tool-workers nil))
   "Create and start an MCP server in one call.
 TRANSPORT options:
   :stdio - MCP protocol over stdio (newline-delimited JSON) - for Claude Code
   :sse   - Streamable HTTP on PORT - for persistent servers"
   (let ((server (make-server :name name :version version)))
     (server-start server :transport transport :port port
-                         :event-loops event-loops)))
+                         :event-loops event-loops
+                         :tool-workers tool-workers)))

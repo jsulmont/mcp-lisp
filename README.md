@@ -52,7 +52,7 @@ ln -s /path/to/mcp-lisp ~/quicklisp/local-projects/mcp-lisp
 ### Transports
 
 - `:stdio` (default) -- newline-delimited JSON over stdio, for Claude Code
-- `:sse` -- Streamable HTTP on a configurable port, for interactive development and HTTP clients
+- `:sse` -- Streamable HTTP via [Woo](https://github.com/fukamachi/woo) (libev), for persistent servers and HTTP clients
 
 ```lisp
 ;; Non-blocking HTTP server for REPL development
@@ -60,6 +60,19 @@ ln -s /path/to/mcp-lisp ~/quicklisp/local-projects/mcp-lisp
 (server-start *server* :transport :sse :port 8080)
 ;; server running on http://localhost:8080/mcp
 (server-stop *server*)
+```
+
+#### SSE Server Configuration
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `:port` | 8080 | Listen port |
+| `:event-loops` | CPU cores | Woo event loop threads. Handle all requests except `tools/call`. |
+| `:tool-workers` | = event-loops | Worker pool threads for `tools/call`. Runs off the event loop so tool handlers can block (e.g. sampling, elicitation) without deadlocking. |
+
+```lisp
+(server-start *server* :transport :sse :port 9090
+              :event-loops 4 :tool-workers 8)
 ```
 
 ### Structured Tool Errors
@@ -123,16 +136,30 @@ npx @modelcontextprotocol/conformance client \
   --command "sbcl --non-interactive --load conformance-client.lisp"
 ```
 
-## Soak Testing
+## Stress Testing
 
-Continuous stress test with live health monitoring:
+Two test scripts, both targeting the conformance server:
 
 ```bash
 sbcl --load conformance-server.lisp   # terminal 1
-uv run soak-test.py --concurrency 50  # terminal 2, Ctrl-C to stop
 ```
 
-Reports req/s, latency percentiles, heap usage, and leak detection every 5 seconds.
+**soak-test.py** -- uniform load, single scenario, simple stats:
+```bash
+uv run soak-test.py --concurrency 50
+```
+
+**stress-test.py** -- multi-scenario with per-scenario stats and result verification:
+```bash
+uv run stress-test.py --concurrency 20
+```
+
+Runs three scenario types concurrently:
+- **simple** -- conformance tools, resources, prompts (content assertions)
+- **eval** -- multi-step `eval_lisp` sessions: define functions, call with random inputs, verify computed results, clear sandbox, verify isolation
+- **errors** -- bad tool names, missing params, syntax errors, nonexistent resources
+
+Reports per-scenario req/s, latency percentiles, assertion failures, heap usage, and leak detection. Ctrl-C to stop.
 
 ## Self-Hosting Tricks
 
@@ -173,7 +200,7 @@ From inside the running server, spawn threads that each run full MCP session lif
 ## Testing
 
 ```bash
-make test    # 182 unit tests
+make test    # 317 unit tests
 make clean   # remove .fasl files
 ```
 
