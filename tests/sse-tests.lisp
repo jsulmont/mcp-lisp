@@ -201,6 +201,50 @@
       ;; Ensure cleanup even if test fails
       (ignore-errors (mcp-lisp/src/transport/mcp-woo:stop-sse-server)))))
 
+;;; --- Worker pool lifecycle integration ---
+
+(test start-sse-server-creates-tool-pool
+  "start-sse-server creates a worker pool and stop-sse-server destroys it"
+  (let ((original-fn (symbol-function 'woo:run)))
+    (unwind-protect
+         (progn
+           ;; Mock woo:run to block until signaled
+           (let ((stop-flag nil))
+             (setf (symbol-function 'woo:run)
+                   (lambda (app &rest args)
+                     (declare (ignore app args))
+                     ;; Simulate a listening server by sleeping
+                     (loop until stop-flag do (sleep 0.05))))
+             ;; Use a port that's free (mock doesn't bind anything, but
+             ;; start-sse-server polls with usocket — mock that too)
+             (let ((orig-connect (symbol-function 'usocket:socket-connect)))
+               (unwind-protect
+                    (progn
+                      ;; Make the connectivity check succeed immediately
+                      (setf (symbol-function 'usocket:socket-connect)
+                            (lambda (host port &rest args)
+                              (declare (ignore args))
+                              (funcall orig-connect host port)))
+                      ;; Start server
+                      (ignore-errors
+                        (mcp-lisp/src/transport/mcp-woo:start-sse-server
+                         (make-hash-table :test #'equal)
+                         :port 19876 :tool-workers 2))
+                      ;; Pool should exist and be running
+                      (is (not (null mcp-lisp/src/transport/mcp-woo::*tool-pool*)))
+                      (is (mcp-lisp/src/transport/worker-pool:worker-pool-running-p
+                           mcp-lisp/src/transport/mcp-woo::*tool-pool*))
+                      (is (= 2 (mcp-lisp/src/transport/worker-pool:worker-pool-size
+                                mcp-lisp/src/transport/mcp-woo::*tool-pool*)))
+                      ;; Stop server
+                      (setf stop-flag t)
+                      (mcp-lisp/src/transport/mcp-woo:stop-sse-server)
+                      ;; Pool should be gone
+                      (is (null mcp-lisp/src/transport/mcp-woo::*tool-pool*)))
+                 (setf (symbol-function 'usocket:socket-connect) orig-connect)))))
+      (setf (symbol-function 'woo:run) original-fn)
+      (ignore-errors (mcp-lisp/src/transport/mcp-woo:stop-sse-server)))))
+
 (test multi-session-subscription-isolation
   "Resource subscriptions are per-session, not global"
   (let* ((server (mcp-lisp/src/server/server:make-server :name "test" :version "1.0"))

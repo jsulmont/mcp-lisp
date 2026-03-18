@@ -21,6 +21,10 @@
   (:import-from #:mcp-lisp/src/server/state
                 #:*current-session*
                 #:session-protocol-version)
+  (:import-from #:mcp-lisp/src/transport/worker-pool
+                #:make-worker-pool
+                #:submit-to-pool
+                #:stop-worker-pool)
   (:export #:start-sse-server
            #:stop-sse-server
            #:*sse-server*
@@ -67,6 +71,9 @@
 ;;; Keepalive
 (defvar *keepalive-thread* nil "Keepalive thread for SSE clients.")
 (defvar *keepalive-stop* nil "Flag to signal keepalive thread to exit.")
+
+;;; Worker pool for streaming handlers (tools/call)
+(defvar *tool-pool* nil "Worker pool for tool execution (avoids blocking event loops).")
 
 ;;; A2A handler (set externally)
 (defvar *a2a-handler* nil
@@ -397,13 +404,13 @@ Returns the bridge for this event loop."
   (funcall writer nil :close t))
 
 ;;; =====================================================================
-;;; stream-call (server→client request, inline on event loop)
+;;; stream-call (server→client request, runs on worker thread)
 ;;; =====================================================================
 
-(defun stream-call (writer method params timeout)
-  "Send a JSON-RPC request via SSE writer and wait for the response.
-Called inline on an event loop thread; the response POST must arrive on
-a different event loop to avoid deadlock (safe when event-loops > 1)."
+(defun stream-call-via-bridge (bridge writer method params timeout)
+  "Send a JSON-RPC request via SSE and wait for the response.
+Writes go through the bridge (safe from any thread); the calling thread
+blocks on a CV until the response POST arrives on an event loop."
   (let* ((id (next-request-id))
          (lock (bt:make-lock "stream-call"))
          (cv (bt:make-condition-variable :name "stream-call-cv"))
@@ -413,10 +420,13 @@ a different event loop to avoid deadlock (safe when event-loops > 1)."
       (setf (gethash id *pending-responses*) (cons lock (cons cv result-cell))))
     (unwind-protect
          (progn
-           ;; Send request as SSE event directly (same thread owns the writer)
+           ;; Send request via bridge (not direct write — we're on a worker thread)
            (let ((req-json (encode-json (make-json-rpc-request id method params))))
-             (write-sse writer (format-sse-event req-json "message")))
-           ;; Wait for response
+             (enqueue-to-bridge bridge
+               (make-completion :type :sse-write
+                                :writer writer
+                                :data (format-sse-event req-json "message"))))
+           ;; Wait for response — blocks the worker thread, not the event loop
            (bt:with-lock-held (lock)
              (let ((deadline (+ (get-internal-real-time)
                                 (* timeout internal-time-units-per-second))))
@@ -604,8 +614,10 @@ All handlers run inline on the event loop thread."
                                     (format nil "Method not found: ~a" method))))))))))
 
 (defun handle-post-streaming (env responder parsed)
-  "Handle a JSON-RPC request via SSE streaming (inline on event loop).
-Used for tools/call which may need mid-execution notifications."
+  "Handle a JSON-RPC request via SSE streaming.
+The handler runs on a worker thread so it can block (e.g. stream-call
+for sampling/elicitation) without deadlocking the event loop.  All SSE
+writes go through the ev_async bridge."
   (let* ((session-id (env-header env "mcp-session-id"))
          (session (get-session session-id)))
     (unless session
@@ -613,35 +625,47 @@ Used for tools/call which may need mid-execution notifications."
                           400 (list :access-control-allow-origin "*")
                           "Bad Request: invalid or missing session"))
       (return-from handle-post-streaming))
-    (let* ((*current-session* session)
-           (*mcp-session-id* session-id)
+    (let* ((bridge (ensure-bridge))
            (writer (funcall responder (list 200 (make-sse-headers))))
            (id (gethash "id" parsed))
            (method (gethash "method" parsed))
            (params (gethash "params" parsed))
            (handler (gethash method *handlers*)))
       (if handler
-          (let ((response-json
-                  (handler-case
-                      (let* ((*stream-notify-fn*
-                               (lambda (m p)
-                                 (let ((notif-json (encode-json (make-json-rpc-notification m p))))
-                                   (write-sse writer (format-sse-event notif-json "message")))))
-                             (*stream-call-fn*
-                               (lambda (m p &key (timeout 30))
-                                 (stream-call writer m p timeout)))
-                             (result (call-with-access-log method id params
-                                       (lambda () (funcall handler params)))))
-                        (encode-json (make-json-rpc-response id result)))
-                    (protocol-error (e)
-                      (encode-json (make-json-rpc-error
-                                    id (protocol-error-code e)
-                                    (mcp-error-message e) (protocol-error-data e))))
-                    (error (e)
-                      (encode-json (make-json-rpc-error id -32603 (princ-to-string e)))))))
-            (write-sse writer (format-sse-event response-json "message"))
-            (close-sse writer))
-          ;; Unknown method
+          ;; Dispatch to worker pool — event loop returns immediately
+          (submit-to-pool *tool-pool*
+            (lambda ()
+              (let* ((*current-session* session)
+                     (*mcp-session-id* session-id)
+                     (*stream-notify-fn*
+                       (lambda (m p)
+                         (let ((notif-json (encode-json (make-json-rpc-notification m p))))
+                           (enqueue-to-bridge bridge
+                             (make-completion :type :sse-write
+                                              :writer writer
+                                              :data (format-sse-event notif-json "message"))))))
+                     (*stream-call-fn*
+                       (lambda (m p &key (timeout 30))
+                         (stream-call-via-bridge bridge writer m p timeout)))
+                     (response-json
+                       (handler-case
+                           (encode-json
+                            (make-json-rpc-response
+                             id (call-with-access-log method id params
+                                  (lambda () (funcall handler params)))))
+                         (protocol-error (e)
+                           (encode-json (make-json-rpc-error
+                                         id (protocol-error-code e)
+                                         (mcp-error-message e) (protocol-error-data e))))
+                         (error (e)
+                           (encode-json (make-json-rpc-error id -32603 (princ-to-string e)))))))
+                (enqueue-to-bridge bridge
+                  (make-completion :type :sse-write
+                                   :writer writer
+                                   :data (format-sse-event response-json "message")))
+                (enqueue-to-bridge bridge
+                  (make-completion :type :sse-close :writer writer)))))
+          ;; Unknown method — respond inline (no handler to run)
           (progn
             (emit-access-log method id session-id 0 "not_found"
                             :target (extract-target method params))
@@ -767,10 +791,13 @@ Returns a delayed response (lambda (responder) ...) for all routes."
 
 (defun start-sse-server (handlers &key (port 8080) (path "/mcp")
                                        (session-factory #'mcp-lisp/src/server/state:make-session)
-                                       (event-loops nil))
+                                       (event-loops nil)
+                                       (tool-workers nil))
   "Start MCP Streamable HTTP server on PORT.
 EVENT-LOOPS: number of Woo event loop threads (nil = auto-detect CPU cores).
-Each event loop handles requests inline — no separate worker pool.
+TOOL-WORKERS: number of worker threads for tools/call (nil = same as event loops).
+Most requests run inline on event loops; tools/call runs on the worker
+pool so it can block for sampling/elicitation without deadlocking.
 Blocks until the server is listening or signals an error on failure."
   (when *sse-server* (stop-sse-server))
   (let ((num-loops (or event-loops (cpu-count))))
@@ -782,6 +809,9 @@ Blocks until the server is listening or signals an error on failure."
           *sse-clients* (make-hash-table :test #'equal)
           *pending-responses* (make-hash-table :test #'equal))
     (clrhash *bridges*)
+    ;; Start worker pool for streaming handlers (tools/call)
+    (setf *tool-pool* (make-worker-pool (or tool-workers num-loops)
+                                         :name "mcp-tool-worker"))
     ;; Start keepalive thread
     (start-keepalive)
     ;; Start Woo in a separate thread (woo:run blocks).
@@ -827,6 +857,10 @@ Blocks until the server is listening or signals an error on failure."
   "Stop the MCP Streamable HTTP server."
   ;; Stop keepalive
   (stop-keepalive)
+  ;; Stop worker pool
+  (when *tool-pool*
+    (stop-worker-pool *tool-pool* :timeout 5)
+    (setf *tool-pool* nil))
   ;; Stop Woo
   (when (and *server-thread* (bt:thread-alive-p *server-thread*))
     (bt:destroy-thread *server-thread*)

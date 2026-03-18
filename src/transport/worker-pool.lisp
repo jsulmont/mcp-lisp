@@ -33,7 +33,7 @@ so the stop flag is eventually seen even if a notify is missed."
              (if thunk
                  (handler-case (funcall thunk)
                    (error (e)
-                     (log:error "Worker pool task error: ~a" e)))
+                     (log:debug "Worker pool task error: ~a" e)))
                  (bt:with-lock-held ((worker-pool-lock pool))
                    (unless (worker-pool-stop pool)
                      (bt:condition-wait (worker-pool-cv pool)
