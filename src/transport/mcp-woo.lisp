@@ -514,10 +514,24 @@ blocks on a CV until the response POST arrives on an event loop."
         ((simple-array (unsigned-byte 8) (*))
          (trivial-utf-8:utf-8-bytes-to-string raw-body))
         (stream
-         (let* ((len (or content-length 65536))
-                (buf (make-array len :element-type '(unsigned-byte 8))))
-           (let ((n (read-sequence buf raw-body)))
-             (trivial-utf-8:utf-8-bytes-to-string buf :end n))))))))
+         (if content-length
+             (let ((buf (make-array content-length :element-type '(unsigned-byte 8))))
+               (let ((n (read-sequence buf raw-body)))
+                 (trivial-utf-8:utf-8-bytes-to-string buf :end n)))
+             ;; No content-length: read all available bytes
+             (let ((chunks nil) (total 0))
+               (loop for buf = (make-array 8192 :element-type '(unsigned-byte 8))
+                     for n = (read-sequence buf raw-body)
+                     while (plusp n)
+                     do (push (subseq buf 0 n) chunks)
+                        (incf total n))
+               (let ((result (make-array total :element-type '(unsigned-byte 8)))
+                     (pos 0))
+                 (dolist (chunk (nreverse chunks))
+                   (replace result chunk :start1 pos)
+                   (incf pos (length chunk)))
+                 (trivial-utf-8:utf-8-bytes-to-string result)))))))))
+
 
 ;;; =====================================================================
 ;;; Request handlers (called on event loop thread via Clack app)

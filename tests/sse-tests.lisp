@@ -8,6 +8,48 @@
 
 (in-suite sse-tests)
 
+;;; --- read-body-string ---
+
+(defun call-with-binary-file-stream (bytes fn)
+  "Write BYTES to a temp file, open it as a binary stream, call FN with it."
+  (let ((path (format nil "/tmp/mcp-test-~a.bin" (get-universal-time))))
+    (unwind-protect
+         (progn
+           (with-open-file (out path :direction :output
+                                     :element-type '(unsigned-byte 8)
+                                     :if-exists :supersede)
+             (write-sequence bytes out))
+           (with-open-file (in path :direction :input
+                                    :element-type '(unsigned-byte 8))
+             (funcall fn in)))
+      (ignore-errors (delete-file path)))))
+
+(test read-body-string-with-content-length
+  "read-body-string reads exactly content-length bytes from a stream"
+  (let* ((text "hello world")
+         (bytes (trivial-utf-8:string-to-utf-8-bytes text)))
+    (call-with-binary-file-stream bytes
+      (lambda (stream)
+        (let ((env (list :raw-body stream :content-length (length bytes))))
+          (is (string= text (mcp-lisp/src/transport/mcp-woo::read-body-string env))))))))
+
+(test read-body-string-without-content-length-large
+  "read-body-string reads all bytes (>64KB) when content-length is missing"
+  (let* ((text (make-string 100000 :initial-element #\x))
+         (bytes (trivial-utf-8:string-to-utf-8-bytes text)))
+    (call-with-binary-file-stream bytes
+      (lambda (stream)
+        (let ((env (list :raw-body stream)))
+          (is (= 100000
+                  (length (mcp-lisp/src/transport/mcp-woo::read-body-string env)))))))))
+
+(test read-body-string-byte-array
+  "read-body-string handles byte-array raw-body directly"
+  (let* ((text "{\"jsonrpc\":\"2.0\"}")
+         (bytes (trivial-utf-8:string-to-utf-8-bytes text))
+         (env (list :raw-body bytes)))
+    (is (string= text (mcp-lisp/src/transport/mcp-woo::read-body-string env)))))
+
 (test generate-session-id-uniqueness
   "generate-session-id produces unique IDs"
   (let ((ids (loop repeat 100
