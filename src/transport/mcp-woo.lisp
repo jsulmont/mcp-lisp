@@ -704,8 +704,12 @@ Registers the writer with its event loop's bridge."
     (let ((writer (funcall responder
                            (list 200 (make-sse-headers
                                       (list :connection "keep-alive"))))))
-      ;; Register writer + bridge for this session
+      ;; Close previous writer on reconnect to avoid leaking the old socket
       (bt:with-lock-held (*sse-clients-lock*)
+        (let ((old (and *sse-clients* (gethash session-id *sse-clients*))))
+          (when old
+            (enqueue-to-bridge (cdr old)
+              (make-completion :type :sse-close :writer (car old)))))
         (setf (gethash session-id *sse-clients*) (cons writer bridge))))))
 
 (defun handle-delete (env responder)

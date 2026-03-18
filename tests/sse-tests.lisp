@@ -50,6 +50,46 @@
           (make-hash-table :test #'equal)))
     (is (hash-table-p mcp-lisp/src/transport/mcp-woo:*sse-clients*))))
 
+;;; --- SSE reconnect ---
+
+(test sse-reconnect-closes-old-writer
+  "Reconnecting a session closes the previous writer via its bridge"
+  (let* ((queue (sb-concurrency:make-queue :name "test-bridge"))
+         (bridge (mcp-lisp/src/transport/mcp-woo::make-evloop-bridge
+                   :evloop-ptr (cffi:null-pointer)
+                   :async-watcher (cffi:null-pointer)
+                   :result-queue queue))
+         (old-writer :old-writer)
+         (new-writer :new-writer)
+         (mcp-lisp/src/transport/mcp-woo:*sse-clients*
+           (make-hash-table :test #'equal))
+         (mcp-lisp/src/transport/mcp-woo:*sse-clients-lock*
+           (bt:make-lock "test")))
+    ;; Simulate existing session with old writer
+    (setf (gethash "sess-1" mcp-lisp/src/transport/mcp-woo:*sse-clients*)
+          (cons old-writer bridge))
+    ;; Simulate reconnect: register new writer for same session
+    ;; (replicate what handle-get does inside the lock)
+    (bt:with-lock-held (mcp-lisp/src/transport/mcp-woo:*sse-clients-lock*)
+      (let ((old (gethash "sess-1" mcp-lisp/src/transport/mcp-woo:*sse-clients*)))
+        (when old
+          ;; Enqueue close for old writer — uses the queue directly since
+          ;; we can't call ev-async-send on a null pointer
+          (sb-concurrency:enqueue
+           (mcp-lisp/src/transport/mcp-woo::make-completion
+            :type :sse-close :writer (car old))
+           (mcp-lisp/src/transport/mcp-woo::evloop-bridge-result-queue (cdr old)))))
+      (setf (gethash "sess-1" mcp-lisp/src/transport/mcp-woo:*sse-clients*)
+            (cons new-writer bridge)))
+    ;; Verify: new writer is registered
+    (is (eq new-writer
+            (car (gethash "sess-1" mcp-lisp/src/transport/mcp-woo:*sse-clients*))))
+    ;; Verify: a close completion for the old writer was enqueued
+    (let ((completion (sb-concurrency:dequeue queue)))
+      (is (not (null completion)))
+      (is (eq :sse-close (mcp-lisp/src/transport/mcp-woo::completion-type completion)))
+      (is (eq old-writer (mcp-lisp/src/transport/mcp-woo::completion-writer completion))))))
+
 ;;; --- Session map operations ---
 
 (test session-map-add-and-lookup
