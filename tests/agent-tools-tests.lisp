@@ -55,6 +55,43 @@
   (let ((result (call-agent-tool "shell" (mcp-lisp:make-ht "command" "exit 42"))))
     (is (search "Exit code: 42" result))))
 
+;;; Per-session sandbox isolation
+
+(test sandbox-isolation-between-sessions
+  "Definitions in one session's sandbox are not visible in another."
+  (let ((session-a (mcp-lisp/src/server/state:make-session))
+        (session-b (mcp-lisp/src/server/state:make-session))
+        (tool (mcp-lisp/src/primitives/tools/registry:get-tool "eval_lisp")))
+    (let ((handler (mcp-lisp/src/primitives/tools/registry:tool-entry-handler tool)))
+      (unwind-protect
+           (progn
+             ;; Session A defines a function
+             (funcall handler nil session-a
+                      (mcp-lisp:make-ht "code" "(defun my-fn () 42)"))
+             (let ((result-a (gethash "text" (aref (funcall handler nil session-a
+                                                            (mcp-lisp:make-ht "code" "(my-fn)")) 0))))
+               (is (search "42" result-a)))
+             ;; Session B should NOT see it
+             (let ((result-b (gethash "text" (aref (funcall handler nil session-b
+                                                            (mcp-lisp:make-ht "code" "(my-fn)")) 0))))
+               (is (search "Error" result-b))))
+        (mcp-lisp/src/agent/tools:cleanup-session-sandbox session-a)
+        (mcp-lisp/src/agent/tools:cleanup-session-sandbox session-b)))))
+
+(test sandbox-cleanup-on-session-removal
+  "Sandbox package is deleted when session is cleaned up."
+  (let* ((session (mcp-lisp/src/server/state:make-session))
+         (tool (mcp-lisp/src/primitives/tools/registry:get-tool "eval_lisp"))
+         (handler (mcp-lisp/src/primitives/tools/registry:tool-entry-handler tool)))
+    ;; Create the sandbox by using eval_lisp
+    (funcall handler nil session (mcp-lisp:make-ht "code" "42"))
+    (let ((pkg (gethash session mcp-lisp/src/agent/tools::*session-sandboxes*)))
+      (is (not (null pkg)))
+      ;; Cleanup
+      (mcp-lisp/src/agent/tools:cleanup-session-sandbox session)
+      ;; Package should be gone
+      (is (null (gethash session mcp-lisp/src/agent/tools::*session-sandboxes*))))))
+
 ;;; read_file tests
 
 (test read-file-nonexistent

@@ -4,35 +4,65 @@
 
 (defpackage #:mcp-lisp/src/agent/tools
   (:use #:cl)
+  (:import-from #:bordeaux-threads)
   (:import-from #:mcp-lisp/src/primitives/tools/define-tool
-                #:define-tool)
+                #:define-tool
+                #:session)
   (:import-from #:mcp-lisp/src/agent/util
                 #:read-key-file)
+  (:import-from #:mcp-lisp/src/transport/mcp-woo
+                #:*session-cleanup-hook*)
   (:import-from #:dexador)
   (:export #:reset-sandbox
+           #:cleanup-session-sandbox
            #:*search-api-key*))
 
 (in-package #:mcp-lisp/src/agent/tools)
 
-;;; Sandbox package for isolated evaluation
+;;; Per-session sandbox packages.
+;;; When SESSION is nil (run-agent REPL), falls back to a global sandbox.
 
-(defun ensure-sandbox ()
-  "Ensure the sandbox package exists, creating it if needed."
-  (or (find-package :agent-sandbox)
-      (make-package :agent-sandbox :use '(:cl))))
+(defvar *sandbox-counter* 0)
+(defvar *sandbox-counter-lock* (bt:make-lock "sandbox-counter"))
+(defvar *session-sandboxes* (make-hash-table :test #'eq :synchronized t))
 
-(defun reset-sandbox ()
-  "Delete and recreate the sandbox package for a clean slate."
-  (let ((pkg (find-package :agent-sandbox)))
-    (when pkg
-      (do-symbols (sym pkg)
-        (unintern sym pkg))
-      (delete-package pkg)))
-  (make-package :agent-sandbox :use '(:cl))
+(defun make-sandbox ()
+  (let ((n (bt:with-lock-held (*sandbox-counter-lock*)
+             (incf *sandbox-counter*))))
+    (make-package (format nil "AGENT-SANDBOX-~A" n) :use '(:cl))))
+
+(defun delete-sandbox (pkg)
+  (when pkg
+    (do-symbols (sym pkg) (unintern sym pkg))
+    (delete-package pkg)))
+
+(defun ensure-sandbox (&optional session)
+  (if (null session)
+      (or (find-package :agent-sandbox)
+          (make-package :agent-sandbox :use '(:cl)))
+      (or (gethash session *session-sandboxes*)
+          (setf (gethash session *session-sandboxes*) (make-sandbox)))))
+
+(defun reset-sandbox (&optional session)
+  "Delete and recreate the sandbox. Per-session when SESSION is provided."
+  (if (null session)
+      (let ((pkg (find-package :agent-sandbox)))
+        (when pkg (delete-sandbox pkg))
+        (make-package :agent-sandbox :use '(:cl)))
+      (let ((old (gethash session *session-sandboxes*)))
+        (when old (delete-sandbox old))
+        (setf (gethash session *session-sandboxes*) (make-sandbox))))
   t)
 
-;; Initialize sandbox on load
+(defun cleanup-session-sandbox (session)
+  "Remove and delete the sandbox for SESSION. Called on session teardown."
+  (let ((pkg (gethash session *session-sandboxes*)))
+    (when pkg
+      (delete-sandbox pkg)
+      (remhash session *session-sandboxes*))))
+
 (ensure-sandbox)
+(setf *session-cleanup-hook* #'cleanup-session-sandbox)
 
 (defun json-serializable-p (value)
   "Return T if VALUE can be directly serialized to JSON."
@@ -59,22 +89,19 @@ in nested eval scenarios."
 evaluated in sequence, so definitions are available to subsequent forms.
 Captures printed output, warnings, and errors."
   (:annotations :destructive t :idempotent nil)
-  (ensure-sandbox)
-  (let ((warnings nil)
+  (let ((sandbox (ensure-sandbox session))
+        (warnings nil)
         (results nil)
         (error-msg nil)
         (printed-output nil))
-    ;; Capture compiler warnings and printed output
     (handler-bind
         ((warning (lambda (w)
                     (push (princ-to-string w) warnings)
                     (muffle-warning w))))
       (handler-case
-          (let ((*package* (find-package :agent-sandbox)))
-            ;; Capture any printed output
+          (let ((*package* sandbox))
             (setf printed-output
                   (with-output-to-string (*standard-output*)
-                    ;; Read and evaluate all forms
                     (loop with pos = 0
                           with len = (length code)
                           while (< pos len)
@@ -86,7 +113,6 @@ Captures printed output, warnings, and errors."
                                (push (eval form) results))))))
         (error (e)
           (setf error-msg (princ-to-string e)))))
-    ;; Return structured feedback
     (let ((final-results (nreverse results)))
       (with-output-to-string (out)
         (when (and printed-output (plusp (length printed-output)))
@@ -107,7 +133,7 @@ Captures printed output, warnings, and errors."
 with a clean environment. All previously defined functions and variables
 will be removed."
   (:annotations :destructive t :idempotent t)
-  (reset-sandbox)
+  (reset-sandbox session)
   "Sandbox cleared. All definitions have been removed.")
 
 ;;; shell - Execute shell commands

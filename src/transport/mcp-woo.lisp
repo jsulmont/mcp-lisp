@@ -1,4 +1,4 @@
-;;;; src/transport/mcp-woo.lisp
+s;;;; src/transport/mcp-woo.lisp
 ;;;;
 ;;;; MCP Streamable HTTP transport using Woo (libev).
 ;;;;
@@ -35,7 +35,8 @@
            #:send-to-session
            #:*sse-clients*
            #:*sse-clients-lock*
-           #:*sessions*))
+           #:*sessions*
+           #:*session-cleanup-hook*))
 
 (in-package #:mcp-lisp/src/transport/mcp-woo)
 
@@ -74,6 +75,10 @@
 
 ;;; Worker pool for streaming handlers (tools/call)
 (defvar *tool-pool* nil "Worker pool for tool execution (avoids blocking event loops).")
+
+;;; Session lifecycle hook
+(defvar *session-cleanup-hook* nil
+  "Function (session) called when a session is removed. Set by application code.")
 
 ;;; A2A handler (set externally)
 (defvar *a2a-handler* nil
@@ -177,7 +182,12 @@ Writes happen once per event loop at startup (locked); reads are lock-free after
 
 (defun remove-session (session-id)
   (when *sessions*
-    (remhash session-id *sessions*)))
+    (let ((session (gethash session-id *sessions*)))
+      (when session
+        (when *session-cleanup-hook*
+          (handler-case (funcall *session-cleanup-hook* session)
+            (error (e) (log:debug "Session cleanup hook error: ~a" e))))
+        (remhash session-id *sessions*)))))
 
 (defun session-count ()
   (if *sessions* (hash-table-count *sessions*) 0))

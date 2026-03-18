@@ -15,7 +15,9 @@
                 #:type-to-json-type
                 #:make-property-schema
                 #:make-input-schema)
-  (:export #:define-tool))
+  (:export #:define-tool
+           #:server
+           #:session))
 
 (in-package #:mcp-lisp/src/primitives/tools/define-tool)
 
