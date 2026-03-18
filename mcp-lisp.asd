@@ -18,7 +18,7 @@
 
 (asdf:defsystem "mcp-lisp/tests"
   :description "Tests for mcp-lisp"
-  :depends-on ("mcp-lisp" "fiveam")
+  :depends-on ("mcp-lisp" "mcp-lisp/src/transport/worker-pool" "fiveam")
   :pathname "tests/"
   :serial t
   :components ((:file "package")
@@ -33,7 +33,8 @@
                (:file "sse-tests")
                (:file "define-tool-tests")
                (:file "client-transport-tests")
-               (:file "agent-tools-tests"))
+               (:file "agent-tools-tests")
+               (:file "worker-pool-tests"))
   :perform (test-op (o c)
                     (symbol-call :fiveam :run!
                                  (find-symbol "MCP-LISP-TESTS"
