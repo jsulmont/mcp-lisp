@@ -116,6 +116,106 @@ Supports both stdio (subprocess) and Streamable HTTP transports:
   (list-tools c))
 ```
 
+## REPL Agent
+
+Run Claude (or Groq, OpenAI) with tools in your Lisp environment:
+
+```lisp
+(use-package :mcp-lisp)
+
+(setf *provider* :anthropic)  ; or :groq, :openai
+
+(run-agent "Write a function that computes fibonacci numbers and test it"
+           :system "You are a Lisp coding assistant."
+           :max-iterations 10
+           :thinking-budget 10000)    ; Anthropic extended thinking (optional)
+```
+
+### Built-in Tools
+
+| Tool | Description |
+|------|-------------|
+| `eval_lisp` | Evaluate Lisp in a sandboxed package. Per-session isolation. |
+| `clear_repl` | Reset the sandbox. |
+| `shell` | Execute shell commands. |
+| `read_file` | Read file contents. |
+| `web_search` | Search via Tavily. |
+| `grep_files` | Search file contents (uses rg or grep). |
+| `find_files` | Find files by name (uses fd or find). |
+| `list_tools` | List all registered tools. |
+
+### Multi-Provider Support
+
+```lisp
+(setf *provider* :anthropic)  ; Claude (default: claude-sonnet-4-20250514)
+(setf *provider* :groq)       ; Llama (default: llama-4-maverick-17b-128e-instruct)
+(setf *provider* :openai)     ; GPT (default: gpt-4o)
+(setf *model* "claude-opus-4-20250514")  ; override default
+```
+
+### Prompt Caching
+
+Anthropic prompt caching is enabled automatically. The system prompt and tool definitions are marked with `cache_control`, so iterations 2+ of the agent loop pay ~0.1x for the cached prefix. The verbose output shows cache status:
+
+```
+[Tokens: 459 in, 276 out (cache hit: 1,141) | Session: 1,843 in, 610 out]
+```
+
+### Extended Thinking
+
+Enable Anthropic's extended thinking for complex reasoning tasks:
+
+```lisp
+(run-agent "Design a data structure for..."
+           :thinking-budget 10000)  ; tokens allocated for reasoning
+```
+
+The agent shows `[Thinking: N chars]` in verbose output. Thinking is incompatible with `tool_choice`, so the model chooses tools freely when thinking is enabled.
+
+## Agent Swarm
+
+`agent-swarm.lisp` is a multi-agent coordinator that decomposes tasks across specialists:
+
+```
+Coordinator (delegation + test_tool)
+  ├─ ask_researcher  →  Researcher (web_search, read_file)
+  ├─ ask_coder       →  Coder (eval_lisp, clear_repl, test_tool)
+  ├─ ask_analyst     →  Analyst (shell, read_file)
+  └─ test_tool       →  Test agent (any registered tool)
+```
+
+```bash
+sbcl --load agent-swarm.lisp
+```
+
+### Self-Extending: Runtime Tool Creation
+
+The swarm can create and register new MCP tools at runtime, then test them via a sub-agent that discovers the tool from its schema alone. Tools created during a session persist in the registry and are available to subsequent tasks.
+
+Example session ([full trace](swarm-create-and-register-a-new-mcp-tool-call.log)):
+
+```
+swarm> create and register a new MCP tool called add-n -- that should take
+       at least 1 integer and add them all. once done, call this new tool
+       a few times, with different values
+
+>> CODER: defines add-n via eval_lisp, tests with pp, runs test_tool
+   [Thinking: 1989 chars]
+   [cache hit: 1,160]
+   Test 1 - Sum of [1, 2, 3, 4, 5]:  → 15
+   Test 2 - Single integer [42]:      → 42
+   Test 3 - Mix [-5, 10, -3, 8]:      → 10
+   test_tool smoke test: 10+25+7+13   → 55
+
+>> TEST-AGENT: coordinator calls add_n via test_tool
+   7 + 8 + 9     → 24
+   100+200+300+50 → 650
+   -5+10-15+25    → 15
+   42             → 42
+```
+
+The coder defines the tool, unit-tests it with `pp`, then `test_tool` spawns a fresh agent that only sees `add_n` in its tool list — verifying the schema and description work end-to-end.
+
 ## A2A (Agent-to-Agent Protocol)
 
 Partial implementation of [A2A 1.0](https://a2a-protocol.org/latest/specification/). Covers agent card discovery, messaging, skills, and task lifecycle. Does not implement streaming, push notifications, or security schemes. No conformance suite exists for A2A.
