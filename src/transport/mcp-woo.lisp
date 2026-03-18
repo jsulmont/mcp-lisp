@@ -626,24 +626,26 @@ All handlers run inline on the event loop thread."
            (params (gethash "params" parsed))
            (handler (gethash method *handlers*)))
       (if handler
-          (let ((response-json
-                  (handler-case
-                      (let ((result (call-with-access-log method id params
-                                      (lambda () (funcall handler params)))))
-                        (when (and is-init (session-protocol-version session))
-                          (add-session session-id session))
-                        (encode-json (make-json-rpc-response id result)))
-                    (protocol-error (e)
-                      (encode-json (make-json-rpc-error
-                                    id (protocol-error-code e)
-                                    (mcp-error-message e) (protocol-error-data e))))
-                    (error (e)
-                      (encode-json (make-json-rpc-error id -32603 (princ-to-string e)))))))
+          (let* ((init-ok nil)
+                 (response-json
+                   (handler-case
+                       (let ((result (call-with-access-log method id params
+                                       (lambda () (funcall handler params)))))
+                         (when (and is-init (session-protocol-version session))
+                           (add-session session-id session)
+                           (setf init-ok t))
+                         (encode-json (make-json-rpc-response id result)))
+                     (protocol-error (e)
+                       (encode-json (make-json-rpc-error
+                                     id (protocol-error-code e)
+                                     (mcp-error-message e) (protocol-error-data e))))
+                     (error (e)
+                       (encode-json (make-json-rpc-error id -32603 (princ-to-string e)))))))
             (funcall responder
                      (make-immediate-response
                       200
                       (append (make-json-headers)
-                              (when is-init (list :mcp-session-id session-id)))
+                              (when init-ok (list :mcp-session-id session-id)))
                       response-json)))
           ;; Unknown method
           (progn
@@ -921,6 +923,7 @@ Blocks until the server is listening or signals an error on failure."
            *bridges*)
   (clrhash *bridges*)
   (setf *sse-server* nil *mcp-session-id* nil)
+  (clrhash *thread-envelopes*)
   (when *sessions* (clrhash *sessions*))
   (when *sse-clients* (clrhash *sse-clients*))
   (when *pending-responses* (clrhash *pending-responses*))

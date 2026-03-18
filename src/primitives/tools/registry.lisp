@@ -84,8 +84,7 @@
 
 (defun get-all-tool-descriptors (&optional (registry *global-tool-registry*))
   "Get all tool descriptors as a vector for tools/list response."
-  (coerce (mapcar #'tool-entry-to-descriptor (get-all-tools registry))
-          'vector))
+  (map 'vector #'tool-entry-to-descriptor (get-all-tools registry)))
 
 (defun clear-tools (&optional (registry *global-tool-registry*))
   "Clear all tools from the registry."

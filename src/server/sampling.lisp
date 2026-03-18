@@ -28,8 +28,7 @@ COST-PRIORITY, SPEED-PRIORITY, INTELLIGENCE-PRIORITY are 0-1 floats."
   (let ((prefs (make-ht)))
     (when hints
       (setf (gethash "hints" prefs)
-            (coerce (mapcar (lambda (name) (make-ht "name" name)) hints)
-                    'vector)))
+            (map 'vector (lambda (name) (make-ht "name" name)) hints)))
     (when cost-priority
       (setf (gethash "costPriority" prefs) cost-priority))
     (when speed-priority

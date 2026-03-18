@@ -6,6 +6,8 @@
   (:use #:cl)
   (:import-from #:mcp-lisp/src/primitives/tools/define-tool
                 #:define-tool)
+  (:import-from #:mcp-lisp/src/agent/util
+                #:read-key-file)
   (:import-from #:dexador)
   (:export #:reset-sandbox
            #:*search-api-key*))
@@ -150,13 +152,6 @@ system commands, git, etc."
               (mcp-lisp/src/primitives/tools/registry:tool-entry-description tool)))))
 
 ;;; web_search - Search the web via Tavily
-
-(defun read-key-file (filename)
-  "Read an API key from ~/FILENAME, trimming whitespace. Returns NIL if missing."
-  (ignore-errors
-    (string-trim '(#\Space #\Newline #\Return #\Tab)
-                 (uiop:read-file-string
-                  (merge-pathnames filename (user-homedir-pathname))))))
 
 (defvar *search-api-key* (or (uiop:getenv "TAVILY_API_KEY")
                               (read-key-file ".tavily-key"))

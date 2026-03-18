@@ -71,8 +71,7 @@ ARGUMENTS is a list of argument descriptors (hash-tables with name, description,
 
 (defun get-all-prompt-descriptors (&optional (registry *global-prompt-registry*))
   "Get all prompt descriptors as a vector for prompts/list response."
-  (coerce (mapcar #'prompt-entry-to-descriptor (get-all-prompts registry))
-          'vector))
+  (map 'vector #'prompt-entry-to-descriptor (get-all-prompts registry)))
 
 (defun clear-prompts (&optional (registry *global-prompt-registry*))
   "Clear all prompts from the registry."

@@ -17,6 +17,8 @@
                 #:tool-entry-input-schema
                 #:tool-entry-handler
                 #:tool-entry-annotations)
+  (:import-from #:mcp-lisp/src/agent/util
+                #:read-key-file)
   (:import-from #:dexador)
   (:export #:*provider*
            #:*api-key*
@@ -34,13 +36,6 @@
 (in-package #:mcp-lisp/src/agent/agent)
 
 ;;; Configuration
-
-(defun read-key-file (filename)
-  "Read an API key from ~/FILENAME, trimming whitespace. Returns NIL if missing."
-  (ignore-errors
-    (string-trim '(#\Space #\Newline #\Return #\Tab)
-                 (uiop:read-file-string
-                  (merge-pathnames filename (user-homedir-pathname))))))
 
 (defvar *provider* :groq
   "LLM provider - :groq, :anthropic, or :openai")
@@ -167,8 +162,7 @@ Not thread-safe — concurrent run-agent calls will clobber each other.")
   (let ((converter (ecase *provider*
                      ((:groq :openai) #'tool-to-openai-format)
                      (:anthropic #'tool-to-anthropic-format))))
-    (coerce (mapcar converter (get-all-tools registry))
-            'vector)))
+    (map 'vector converter (get-all-tools registry))))
 
 ;;; LLM API calls
 

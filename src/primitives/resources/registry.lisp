@@ -204,13 +204,11 @@ Returns (values handler params) where params is an alist for templates."
 
 (defun get-all-resource-descriptors (&optional (registry *global-resource-registry*))
   "Get all resource descriptors as a vector for resources/list response."
-  (coerce (mapcar #'resource-entry-to-descriptor (get-all-resources registry))
-          'vector))
+  (map 'vector #'resource-entry-to-descriptor (get-all-resources registry)))
 
 (defun get-all-template-descriptors (&optional (registry *global-resource-registry*))
   "Get all template descriptors as a vector for resources/templates/list response."
-  (coerce (mapcar #'template-entry-to-descriptor (get-all-resource-templates registry))
-          'vector))
+  (map 'vector #'template-entry-to-descriptor (get-all-resource-templates registry)))
 
 (defun clear-resources (&optional (registry *global-resource-registry*))
   "Clear all resources and templates from the registry."
