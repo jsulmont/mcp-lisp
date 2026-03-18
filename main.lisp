@@ -15,7 +15,10 @@
                 #:dict
                 #:make-ht
                 #:encode-json
-                #:decode-json)
+                #:decode-json
+                #:pp
+                #:ht-keys
+                #:ht-values)
   ;; Re-export from content
   (:import-from #:mcp-lisp/src/content
                 #:text-content
@@ -25,6 +28,7 @@
   ;; Re-export from conditions
   (:import-from #:mcp-lisp/src/conditions
                 #:mcp-error
+                #:mcp-error-message
                 #:protocol-error
                 #:tool-error
                 #:tool-error-category
@@ -179,6 +183,9 @@
            #:make-ht
            #:encode-json
            #:decode-json
+           #:pp
+           #:ht-keys
+           #:ht-values
            ;; Content
            #:text-content
            #:image-content
@@ -186,6 +193,7 @@
            #:content-vector
            ;; Conditions
            #:mcp-error
+           #:mcp-error-message
            #:protocol-error
            #:tool-error
            #:tool-error-category

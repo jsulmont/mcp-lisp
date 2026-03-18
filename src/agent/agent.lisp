@@ -117,15 +117,22 @@ Not thread-safe — concurrent run-agent calls will clobber each other.")
                 (ignore-errors (parse-integer req-remaining)))))))
   ;; Verbose output
   (when (and *verbose* *last-api-usage*)
-    (format t "[Tokens: ~:d in, ~:d out | Session: ~:d in, ~:d out~a]~%"
-            (getf *last-api-usage* :input-tokens 0)
-            (getf *last-api-usage* :output-tokens 0)
-            (getf *session-tokens* :input)
-            (getf *session-tokens* :output)
-            (let ((remaining (getf *last-api-usage* :rate-limit-tokens-remaining)))
-              (if remaining
-                  (format nil " | ~:d tokens remaining" remaining)
-                  "")))))
+    (let ((cache-read (getf *last-api-usage* :cache-read-tokens))
+          (cache-create (getf *last-api-usage* :cache-creation-tokens)))
+      (format t "[Tokens: ~:d in, ~:d out~a | Session: ~:d in, ~:d out~a]~%"
+              (getf *last-api-usage* :input-tokens 0)
+              (getf *last-api-usage* :output-tokens 0)
+              (cond ((and cache-read (plusp cache-read))
+                     (format nil " (cache hit: ~:d)" cache-read))
+                    ((and cache-create (plusp cache-create))
+                     (format nil " (cache write: ~:d)" cache-create))
+                    (t ""))
+              (getf *session-tokens* :input)
+              (getf *session-tokens* :output)
+              (let ((remaining (getf *last-api-usage* :rate-limit-tokens-remaining)))
+                (if remaining
+                    (format nil " | ~:d tokens remaining" remaining)
+                    ""))))))
 
 ;;; Provider configuration
 
@@ -168,20 +175,34 @@ Not thread-safe — concurrent run-agent calls will clobber each other.")
 
 (defun call-with-retry (fn &key (max-retries 3) (initial-delay 2))
   "Call FN, retrying on HTTP 429/529 with exponential backoff.
-FN should return (values body status headers) like dex:post."
+FN should return (values body status headers) like dex:post.
+Handles both status-code returns and dexador condition signals."
   (loop for attempt from 0
         for delay = initial-delay then (* delay 2)
-        do (multiple-value-bind (body status headers)
-               (funcall fn)
-             (if (and (member status '(429 529)) (< attempt max-retries))
-                 (let ((retry-after (ignore-errors
-                                      (parse-integer
-                                       (or (gethash "retry-after" headers) "")))))
-                   (when *verbose*
-                     (format t "[Rate limited (~a), waiting ~as~@[ (retry-after: ~as)~]]~%"
-                             status (or retry-after delay) retry-after))
-                   (sleep (or retry-after delay)))
-                 (return (values body status headers))))))
+        do (handler-case
+               (multiple-value-bind (body status headers)
+                   (funcall fn)
+                 (if (and (member status '(429 529)) (< attempt max-retries))
+                     (let ((retry-after (ignore-errors
+                                          (parse-integer
+                                           (or (gethash "retry-after" headers) "")))))
+                       (when *verbose*
+                         (format t "[Rate limited (~a), waiting ~as~@[ (retry-after: ~as)~]]~%"
+                                 status (or retry-after delay) retry-after))
+                       (sleep (or retry-after delay)))
+                     (return (values body status headers))))
+             (dexador.error:http-request-failed (e)
+               (let ((status (dexador.error:response-status e)))
+                 (if (and (member status '(429 529)) (< attempt max-retries))
+                     (let ((retry-after (ignore-errors
+                                          (parse-integer
+                                           (or (gethash "retry-after"
+                                                        (dexador.error:response-headers e)) "")))))
+                       (when *verbose*
+                         (format t "[Rate limited (~a), waiting ~as~@[ (retry-after: ~as)~]]~%"
+                                 status (or retry-after delay) retry-after))
+                       (sleep (or retry-after delay)))
+                     (error e)))))))
 
 (defun tool-choice-for-openai (choice)
   "Convert unified tool-choice to OpenAI/Groq format."
@@ -237,8 +258,21 @@ FN should return (values body status headers) like dex:post."
           (record-usage response response-headers)
           response)))))
 
-(defun call-anthropic (messages &key tools system tool-choice)
-  "Call Anthropic Claude API."
+(defun cacheable-system (system)
+  "Wrap a system prompt string in a content block array with cache_control."
+  (vector (make-ht "type" "text"
+                   "text" system
+                   "cache_control" (make-ht "type" "ephemeral"))))
+
+(defun mark-last-tool-cacheable (tools)
+  "Add cache_control to the last tool definition. Mutates the tool hash-table."
+  (when (> (length tools) 0)
+    (setf (gethash "cache_control" (aref tools (1- (length tools))))
+          (make-ht "type" "ephemeral")))
+  tools)
+
+(defun call-anthropic (messages &key tools system tool-choice thinking-budget)
+  "Call Anthropic Claude API with prompt caching and optional extended thinking."
   (let* ((model (or *model* (default-model :anthropic)))
          (body (make-ht "model" model
                         "max_tokens" *max-tokens*
@@ -246,12 +280,18 @@ FN should return (values body status headers) like dex:post."
          (headers `(("x-api-key" . ,*api-key*)
                     ("anthropic-version" . "2023-06-01")
                     ("content-type" . "application/json"))))
+    (when thinking-budget
+      (setf (gethash "thinking" body)
+            (make-ht "type" "enabled" "budget_tokens" thinking-budget))
+      (setf (gethash "temperature" body) 1))
     (when system
-      (setf (gethash "system" body) system))
+      (setf (gethash "system" body) (cacheable-system system)))
     (when (and tools (> (length tools) 0))
-      (setf (gethash "tools" body) tools)
-      (let ((tc (tool-choice-for-anthropic tool-choice)))
-        (when tc (setf (gethash "tool_choice" body) tc))))
+      (setf (gethash "tools" body) (mark-last-tool-cacheable tools))
+      ;; tool_choice is incompatible with extended thinking
+      (unless thinking-budget
+        (let ((tc (tool-choice-for-anthropic tool-choice)))
+          (when tc (setf (gethash "tool_choice" body) tc)))))
     (let ((json-content (encode-json body)))
       (multiple-value-bind (response-body status response-headers)
           (call-with-retry
@@ -264,9 +304,10 @@ FN should return (values body status headers) like dex:post."
           (record-usage response response-headers)
           response)))))
 
-(defun call-llm (messages &key tools system tool-choice)
+(defun call-llm (messages &key tools system tool-choice thinking-budget)
   "Call LLM based on *provider*.
-When TOOL-CHOICE is :none, tools are omitted entirely."
+When TOOL-CHOICE is :none, tools are omitted entirely.
+THINKING-BUDGET: Anthropic-only, enables extended thinking with this token budget."
   (unless *api-key*
     (error "API key not set. Set *api-key*, env var, or key file (~/.anthropic-key etc)."))
   (let ((effective-tools (if (eq tool-choice :none) nil tools)))
@@ -277,7 +318,8 @@ When TOOL-CHOICE is :none, tools are omitted entirely."
                                :tool-choice (unless (eq tool-choice :none) tool-choice)))
       (:anthropic
        (call-anthropic messages :tools effective-tools :system system
-                                :tool-choice (unless (eq tool-choice :none) tool-choice))))))
+                                :tool-choice (unless (eq tool-choice :none) tool-choice)
+                                :thinking-budget thinking-budget)))))
 
 ;;; Tool execution
 
@@ -371,20 +413,26 @@ Uses stop_reason as the canonical loop control signal:
          (stop-reason (gethash "stop_reason" response))
          (tool-uses nil)
          (text-parts nil))
-    ;; Collect text and tool uses
+    ;; Collect text, tool uses, and thinking blocks
     (loop for block across content
           for block-type = (gethash "type" block)
           do (cond
                ((string= block-type "text")
                 (push (gethash "text" block) text-parts))
                ((string= block-type "tool_use")
-                (push block tool-uses))))
+                (push block tool-uses))
+               ((string= block-type "thinking")
+                (when *verbose*
+                  (let ((thinking (gethash "thinking" block)))
+                    (when thinking
+                      (format t "~%~c[90m[Thinking: ~a chars]~c[0m~%"
+                              #\Esc (length thinking) #\Esc)))))))
     ;; stop_reason is the canonical signal — not presence/absence of tool_use blocks
     (when (string/= stop-reason "tool_use")
       (let ((final-text (format nil "~{~a~^~%~}" (nreverse text-parts))))
         (return-from process-anthropic-response
           (values t final-text messages))))
-    ;; Print thinking if verbose
+    ;; Print text content if verbose
     (when (and *verbose* text-parts)
       (format t "~%~a~%" (format nil "~{~a~^~%~}" (nreverse text-parts))))
     ;; Execute tools and build tool results
@@ -430,13 +478,18 @@ Uses stop_reason as the canonical loop control signal:
   (+ (getf *session-tokens* :input) (getf *session-tokens* :output)))
 
 (defun run-agent (prompt &key system (max-iterations 10) (registry *global-tool-registry*)
-                            allowed-tools tool-choice token-budget (reset-tokens t))
+                            allowed-tools tool-choice token-budget call-budget
+                            thinking-budget (reset-tokens t))
   "Run agent with PROMPT until completion or MAX-ITERATIONS.
 ALLOWED-TOOLS: list of tool name strings to expose.
 TOOL-CHOICE: controls tool selection on the first LLM call —
   :auto, :any, :none, or a tool name string. Reverts to :auto after.
 TOKEN-BUDGET: max total tokens before forcing synthesis. When 85% consumed,
   tools are stripped and the model must synthesize with what it has.
+CALL-BUDGET: max total LLM API calls (across all nested agents). Uses the
+  global session request counter, so nested agents count against the same budget.
+THINKING-BUDGET: Anthropic-only. When set, enables extended thinking with this
+  many tokens of thinking budget per API call.
 RESET-TOKENS: if nil, preserves the running token count (for nested agents)."
   (when reset-tokens (reset-session-tokens))
   (let* ((effective-registry (if allowed-tools
@@ -451,15 +504,21 @@ RESET-TOKENS: if nil, preserves the running token count (for nested agents)."
       (format t "[Tools available: ~{~a~^, ~}]~%"
               (mapcar #'tool-entry-name (get-all-tools effective-registry))))
     (loop for i from 1 to max-iterations
-          for budget-exceeded = (and token-budget
+          for token-exceeded = (and token-budget
                                     (> (session-tokens-used) (* token-budget 0.85)))
-          for winding-down = (or budget-exceeded
+          for calls-exceeded = (and call-budget
+                                    (>= (getf *session-tokens* :requests)
+                                         (1- call-budget)))
+          for winding-down = (or token-exceeded
+                                 calls-exceeded
                                  (= i (1- max-iterations)))
           do (when *verbose*
                (format t "~%--- Iteration ~a ---~%" i)
                (when winding-down
                  (format t "[Wind-down: ~a]~%"
-                         (if budget-exceeded "token budget" "final iteration"))))
+                         (cond (token-exceeded "token budget")
+                               (calls-exceeded "call budget")
+                               (t "final iteration")))))
              ;; On wind-down, strip tools and inject synthesis instruction
              (when (and winding-down (not (eq current-tool-choice :none)))
                (setf current-tool-choice :none)
@@ -468,7 +527,8 @@ RESET-TOKENS: if nil, preserves the running token count (for nested agents)."
                              (list (make-ht "role" "user"
                                             "content" "Synthesize your final answer now with what you have. Do not request more information.")))))
              (let ((response (call-llm messages :tools tools :system system
-                                                :tool-choice current-tool-choice)))
+                                                :tool-choice current-tool-choice
+                                                :thinking-budget thinking-budget)))
                (when (and current-tool-choice (not (eq current-tool-choice :none)))
                  (setf current-tool-choice nil))
                (multiple-value-bind (done-p result new-messages)

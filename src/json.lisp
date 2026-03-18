@@ -10,6 +10,9 @@
            #:decode-json
            #:dict
            #:make-ht
+           #:pp
+           #:ht-keys
+           #:ht-values
            #:read-json-line
            #:write-json-line))
 
@@ -35,6 +38,23 @@ Otherwise return a string."
   (if stream
       (com.inuoe.jzon:stringify object :stream stream)
       (com.inuoe.jzon:stringify object)))
+
+(defun pp (object)
+  "Pretty-print OBJECT as JSON to *standard-output* and return the string.
+Useful for inspecting hash-tables, vectors, and nested structures that
+print as #<HASH-TABLE ...> with standard CL printing."
+  (let ((s (encode-json object)))
+    (write-string s)
+    (terpri)
+    s))
+
+(defun ht-keys (ht)
+  "Return a list of keys in hash-table HT."
+  (loop for k being the hash-keys of ht collect k))
+
+(defun ht-values (ht)
+  "Return a list of values in hash-table HT."
+  (loop for v being the hash-values of ht collect v))
 
 (defun read-json-line (stream)
   "Read a line and parse as JSON. Returns NIL on EOF. Skips blank lines."

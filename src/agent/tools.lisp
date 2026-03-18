@@ -26,10 +26,17 @@
 (defvar *sandbox-counter-lock* (bt:make-lock "sandbox-counter"))
 (defvar *session-sandboxes* (make-hash-table :test #'eq :synchronized t))
 
+(defun sandbox-use-list ()
+  "Packages available in eval sandboxes. Includes mcp-lisp when loaded."
+  (let ((pkgs (list :cl)))
+    (when (find-package :mcp-lisp)
+      (push :mcp-lisp pkgs))
+    pkgs))
+
 (defun make-sandbox ()
   (let ((n (bt:with-lock-held (*sandbox-counter-lock*)
              (incf *sandbox-counter*))))
-    (make-package (format nil "AGENT-SANDBOX-~A" n) :use '(:cl))))
+    (make-package (format nil "AGENT-SANDBOX-~A" n) :use (sandbox-use-list))))
 
 (defun delete-sandbox (pkg)
   (when pkg
@@ -38,8 +45,16 @@
 
 (defun ensure-sandbox (&optional session)
   (if (null session)
-      (or (find-package :agent-sandbox)
-          (make-package :agent-sandbox :use '(:cl)))
+      (let ((pkg (or (find-package :agent-sandbox)
+                     (make-package :agent-sandbox :use (sandbox-use-list)))))
+        ;; The global sandbox may have been created before :mcp-lisp was loaded
+        ;; (package-inferred-system loads tools.lisp before main.lisp).
+        ;; Patch the use-list if needed.
+        (when (and (find-package :mcp-lisp)
+                   (not (member (find-package :mcp-lisp)
+                                (package-use-list pkg))))
+          (use-package :mcp-lisp pkg))
+        pkg)
       (or (gethash session *session-sandboxes*)
           (setf (gethash session *session-sandboxes*) (make-sandbox)))))
 
@@ -48,7 +63,7 @@
   (if (null session)
       (let ((pkg (find-package :agent-sandbox)))
         (when pkg (delete-sandbox pkg))
-        (make-package :agent-sandbox :use '(:cl)))
+        (make-package :agent-sandbox :use (sandbox-use-list)))
       (let ((old (gethash session *session-sandboxes*)))
         (when old (delete-sandbox old))
         (setf (gethash session *session-sandboxes*) (make-sandbox))))
@@ -113,7 +128,7 @@ Captures printed output, warnings, and errors."
                                (push (eval form) results))))))
         (error (e)
           (setf error-msg (princ-to-string e)))))
-    (let ((final-results (nreverse results)))
+    (let ((last-result (car (last results))))
       (with-output-to-string (out)
         (when (and printed-output (plusp (length printed-output)))
           (format out "Output:~%~a~%" printed-output))
@@ -123,8 +138,8 @@ Captures printed output, warnings, and errors."
             (format out "  ~a~%" w)))
         (when error-msg
           (format out "Error: ~a~%" error-msg))
-        (format out "Results: ~{~a~^, ~}"
-                (mapcar #'result-to-string final-results))))))
+        (when last-result
+          (format out "=> ~a" (result-to-string last-result)))))))
 
 ;;; clear_repl - Reset the sandbox
 
@@ -217,3 +232,76 @@ system commands, git, etc."
                            (gethash "title" result)
                            (gethash "url" result)
                            (gethash "content" result))))))))
+
+;;; grep_files - Search file contents (rg or grep)
+
+(defun find-executable (&rest names)
+  "Return the first executable found in PATH, or NIL."
+  (loop for name in names
+        for path = (ignore-errors
+                     (string-trim '(#\Newline #\Space #\Return)
+                                  (uiop:run-program (list "which" name)
+                                                    :output :string
+                                                    :ignore-error-status t)))
+        when (and path (plusp (length path)))
+          return (values path name)))
+
+(let ((grep-cmd (find-executable "rg" "grep")))
+  (when grep-cmd
+    (define-tool grep-files
+        ((pattern string "Search pattern (regex)" :required t)
+         (path string "Directory or file to search" :default ".")
+         (glob string "File glob filter (e.g. \"*.lisp\")" :default nil)
+         (max-results integer "Maximum number of matching lines" :default 50))
+      "Search file contents for a pattern. Returns matching lines with filenames and line numbers."
+      (:annotations :read-only t)
+      (let* ((use-rg (search "rg" grep-cmd))
+             (args (if use-rg
+                       (append (list grep-cmd "-n" "--no-heading" "--color=never"
+                                     "-m" (princ-to-string (or max-results 50)))
+                               (when glob (list "-g" glob))
+                               (list pattern (or path ".")))
+                       (append (list grep-cmd "-rn" "--color=never")
+                               (when glob (list "--include" glob))
+                               (list pattern (or path "."))))))
+        (multiple-value-bind (output error-output exit-code)
+            (uiop:run-program args :output :string :error-output :string
+                                   :ignore-error-status t)
+          (declare (ignore error-output))
+          (if (zerop exit-code)
+              (let ((lines (uiop:split-string output :separator '(#\Newline))))
+                (format nil "~{~a~%~}" (subseq lines 0 (min (length lines)
+                                                             (or max-results 50)))))
+              (if (= exit-code 1) "No matches found." output)))))))
+
+;;; find_files - Find files by name (fd or find)
+
+(let ((find-cmd (find-executable "fd" "find")))
+  (when find-cmd
+    (define-tool find-files
+        ((pattern string "File name pattern" :required t)
+         (path string "Directory to search" :default ".")
+         (file-type string "Filter: file, directory, or symlink" :default nil))
+      "Find files by name pattern. Returns matching file paths."
+      (:annotations :read-only t)
+      (let* ((use-fd (search "fd" find-cmd))
+             (args (if use-fd
+                       (append (list find-cmd "--color=never")
+                               (when file-type
+                                 (list "-t" (cond ((string-equal file-type "file") "f")
+                                                  ((string-equal file-type "directory") "d")
+                                                  ((string-equal file-type "symlink") "l")
+                                                  (t file-type))))
+                               (list pattern (or path ".")))
+                       (append (list find-cmd (or path "."))
+                               (when file-type
+                                 (list "-type" (cond ((string-equal file-type "file") "f")
+                                                     ((string-equal file-type "directory") "d")
+                                                     ((string-equal file-type "symlink") "l")
+                                                     (t file-type))))
+                               (list "-name" pattern)))))
+        (multiple-value-bind (output error-output exit-code)
+            (uiop:run-program args :output :string :error-output :string
+                                   :ignore-error-status t)
+          (declare (ignore error-output exit-code))
+          output)))))
