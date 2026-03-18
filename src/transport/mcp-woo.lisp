@@ -465,9 +465,14 @@ blocks on a CV until the response POST arrives on an event loop."
 ;;; SSE keepalive thread
 ;;; =====================================================================
 
+(defvar *keepalive-lock* (bt:make-lock "keepalive"))
+(defvar *keepalive-cv* (bt:make-condition-variable :name "keepalive-cv"))
+
 (defun keepalive-loop ()
   (loop until *keepalive-stop*
-        do (sleep 30)
+        do ;; Sleep via CV wait so stop-keepalive can wake us immediately
+           (bt:with-lock-held (*keepalive-lock*)
+             (bt:condition-wait *keepalive-cv* *keepalive-lock* :timeout 30))
            (unless *keepalive-stop*
              (handler-case
                  (let ((clients nil))
@@ -492,7 +497,14 @@ blocks on a CV until the response POST arrives on an event loop."
         (bt:make-thread #'keepalive-loop :name "mcp-keepalive")))
 
 (defun stop-keepalive ()
+  "Stop the keepalive thread and wait for it to exit."
   (setf *keepalive-stop* t)
+  ;; Wake the thread from its CV wait
+  (bt:with-lock-held (*keepalive-lock*)
+    (bt:condition-notify *keepalive-cv*))
+  ;; Join — thread exits promptly since we woke it
+  (when (and *keepalive-thread* (bt:thread-alive-p *keepalive-thread*))
+    (ignore-errors (bt:join-thread *keepalive-thread*)))
   (setf *keepalive-thread* nil))
 
 ;;; =====================================================================
