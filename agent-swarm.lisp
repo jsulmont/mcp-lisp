@@ -328,7 +328,9 @@ full MCP contract end-to-end. Returns the agent's final answer."
                          (format t "~a~%"
                                  (ansi 90 (format nil "[Consumed before interrupt: ~:d tokens, ~d API calls]"
                                                   (+ (getf tok :input) (getf tok :output))
-                                                  (getf tok :requests)))))))))
+                                                  (getf tok :requests))))))
+                     (error (e)
+                       (format t "~%~%~a~%" (ansi 31 (format nil "[Error: ~a]" e)))))))
     (#+sbcl sb-sys:interactive-interrupt #-sbcl condition ()
       (format t "~%~%Bye.~%")
       (sb-ext:exit :code 0))))
