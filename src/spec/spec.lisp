@@ -186,8 +186,62 @@ Returns (values fields relations derived)."
   (clrhash *invariants*)
   (values))
 
+(defun entity-accessor-p (sym)
+  "Return T if SYM looks like an entity accessor (ENTITY-FIELD or ENTITY-RELATION)."
+  (let ((name (string-downcase (symbol-name sym))))
+    (maphash (lambda (ekey plist)
+               (let ((prefix (concatenate 'string ekey "-")))
+                 (when (and (> (length name) (length prefix))
+                            (string= prefix name :end2 (length prefix)))
+                   (let ((suffix (subseq name (length prefix))))
+                     (when (or (some (lambda (f)
+                                       (string= suffix
+                                                (string-downcase (symbol-name (first f)))))
+                                     (getf plist :fields))
+                               (some (lambda (r)
+                                       (string= suffix
+                                                (string-downcase (symbol-name (second r)))))
+                                     (getf plist :relations)))
+                       (return-from entity-accessor-p t))))))
+             *entities*)
+    nil))
+
+(defun collect-called-symbols (form)
+  "Walk FORM and collect every symbol that appears in function-call position."
+  (let ((syms nil))
+    (labels ((walk (f)
+               (when (consp f)
+                 (let ((head (car f)))
+                   (cond
+                     ;; (quote ...) — skip entirely
+                     ((eq head 'quote) nil)
+                     ;; (lambda ...) — walk body, skip params
+                     ((eq head 'lambda)
+                      (dolist (body-form (cddr f))
+                        (walk body-form)))
+                     (t
+                      (when (symbolp head)
+                        (pushnew head syms :test #'eq))
+                      (dolist (sub (cdr f))
+                        (walk sub))))))))
+      (walk form))
+    syms))
+
+(defun check-form-symbols (form context-label warnings)
+  "Check that every called symbol in FORM is resolvable. Push warnings for undefined ones."
+  (dolist (sym (collect-called-symbols form))
+    (unless (or (special-operator-p sym)
+                (macro-function sym)
+                (fboundp sym)
+                (entity-accessor-p sym)
+                (keywordp sym))
+      (push (format nil "~A: undefined function ~A" context-label sym)
+            warnings)))
+  warnings)
+
 (defun validate-specs ()
-  "Check that all rules/invariants reference known entities.
+  "Check that all rules/invariants reference known entities and that
+forms in :check/:requires/:ensures/:let use resolvable symbols.
 Returns a list of warning strings. Empty list = all clear."
   (let ((entity-keys (loop for k being the hash-keys of *entities* collect k))
         (warnings nil))
@@ -219,7 +273,34 @@ Returns a list of warning strings. Empty list = all clear."
                        (push (format nil "entity ~A: relation ~S references unknown entity ~A"
                                      key rel of-target)
                              warnings)))))
-               *entities*))
+               *entities*)
+      ;; Check forms in invariant :check clauses
+      (maphash (lambda (key plist)
+                 (when (getf plist :check)
+                   (setf warnings
+                         (check-form-symbols (getf plist :check)
+                                             (format nil "invariant ~A" key)
+                                             warnings))))
+               *invariants*)
+      ;; Check forms in rule :requires, :ensures, and :let clauses
+      (maphash (lambda (key plist)
+                 (dolist (form (getf plist :requires))
+                   (setf warnings
+                         (check-form-symbols form
+                                             (format nil "rule ~A :requires" key)
+                                             warnings)))
+                 (dolist (form (getf plist :ensures))
+                   (setf warnings
+                         (check-form-symbols form
+                                             (format nil "rule ~A :ensures" key)
+                                             warnings)))
+                 (dolist (binding (getf plist :let))
+                   (when (and (consp binding) (second binding))
+                     (setf warnings
+                           (check-form-symbols (second binding)
+                                               (format nil "rule ~A :let" key)
+                                               warnings)))))
+               *rules*))
     (nreverse warnings)))
 
 ;;; ---------------------------------------------------------------------------

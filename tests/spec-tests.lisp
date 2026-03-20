@@ -226,7 +226,7 @@
     (mcp-lisp:defentity order () (id string))
     (mcp-lisp:defentity account () (balance number))
     (mcp-lisp:defrule place-order :when (order :state :draft))
-    (mcp-lisp:definvariant positive-balance :on account :check (> (balance account) 0))
+    (mcp-lisp:definvariant positive-balance :on account :check (> (account-balance account) 0))
     (is (null (mcp-lisp:validate-specs)))))
 
 (test validate-specs-dangling-rule
@@ -240,10 +240,11 @@
 (test validate-specs-dangling-invariant
   "validate-specs catches invariants referencing unknown entities"
   (with-fresh-specs
-    (mcp-lisp:definvariant positive-balance :on account :check (> (balance account) 0))
+    (mcp-lisp:definvariant positive-balance :on account :check (> (account-balance account) 0))
     (let ((warnings (mcp-lisp:validate-specs)))
-      (is (= 1 (length warnings)))
-      (is (search "unknown entity" (first warnings))))))
+      ;; Dangling entity + unresolvable accessor (entity doesn't exist)
+      (is (>= (length warnings) 1))
+      (is (some (lambda (w) (search "unknown entity" w)) warnings)))))
 
 (test validate-specs-dangling-relation
   "validate-specs catches relations referencing unknown entities"
@@ -263,6 +264,55 @@
     (mcp-lisp:definvariant i1 :on baz :check t)
     (let ((warnings (mcp-lisp:validate-specs)))
       (is (= 3 (length warnings))))))
+
+(test validate-specs-undefined-function-in-invariant
+  "validate-specs catches undefined functions in invariant :check"
+  (with-fresh-specs
+    (mcp-lisp:defentity account ()
+      (balance number :required t))
+    (mcp-lisp:definvariant positive-balance
+      :on account
+      :check (pos (account-balance account)))
+    (let ((warnings (mcp-lisp:validate-specs)))
+      (is (= 1 (length warnings)))
+      (is (search "undefined function" (first warnings)))
+      (is (search "POS" (first warnings))))))
+
+(test validate-specs-undefined-function-in-rule
+  "validate-specs catches undefined functions in rule :requires"
+  (with-fresh-specs
+    (mcp-lisp:defentity order ()
+      (quantity number :required t))
+    (mcp-lisp:defrule validate-order
+      :when (order :state :pending)
+      :requires ((pos (order-quantity order))))
+    (let ((warnings (mcp-lisp:validate-specs)))
+      (is (= 1 (length warnings)))
+      (is (search "undefined function" (first warnings))))))
+
+(test validate-specs-entity-accessors-ok
+  "validate-specs does not warn about entity accessor patterns"
+  (with-fresh-specs
+    (mcp-lisp:defentity account ()
+      (balance number :required t)
+      (name string))
+    (mcp-lisp:definvariant positive-balance
+      :on account
+      :check (>= (account-balance account) 0))
+    (is (null (mcp-lisp:validate-specs)))))
+
+(test validate-specs-cl-builtins-ok
+  "validate-specs does not warn about CL builtins and special operators"
+  (with-fresh-specs
+    (mcp-lisp:defentity trader ()
+      (margin-ratio number :default 1.0)
+      (suspended boolean :default nil))
+    (mcp-lisp:definvariant check-margin
+      :on trader
+      :check (if (trader-suspended trader)
+                 (< (trader-margin-ratio trader) 0.5)
+                 t))
+    (is (null (mcp-lisp:validate-specs)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; JSON export
