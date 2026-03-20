@@ -28,8 +28,9 @@
 
 (defparameter +alphanumeric+ "abcdefghijklmnopqrstuvwxyz0123456789")
 
-(defun generate-value (type-spec)
-  "Generate a random value conforming to TYPE-SPEC."
+(defun generate-value (type-spec &key min max)
+  "Generate a random value conforming to TYPE-SPEC.
+Optional MIN and MAX constrain numeric types."
   (cond
     ((eq type-spec 'string)
      (let ((len (random 20)))
@@ -39,12 +40,30 @@
               (char +alphanumeric+ (random (length +alphanumeric+))))
             (make-string len))))
     ((eq type-spec 'number)
-     (- (random 2000.0) 1000.0))
+     (let ((lo (or min -1000.0))
+           (hi (or max 1000.0)))
+       (+ lo (random (- hi lo)))))
     ((eq type-spec 'integer)
-     (- (random 201) 100))
+     (let ((lo (or (and min (ceiling min)) -100))
+           (hi (or (and max (floor max)) 100)))
+       (+ lo (random (1+ (- hi lo))))))
     ((and (consp type-spec) (eq (car type-spec) 'member))
      (let ((choices (cdr type-spec)))
        (nth (random (length choices)) choices)))
+    ((eq type-spec 'boolean)
+     (zerop (random 2)))
+    (t nil)))
+
+;;; ---------------------------------------------------------------------------
+;;; Helpers
+;;; ---------------------------------------------------------------------------
+
+(defun find-symbol-named (name form)
+  "Find the first symbol whose symbol-name is NAME (case-insensitive) in FORM."
+  (cond
+    ((and (symbolp form) (string-equal (symbol-name form) name)) form)
+    ((consp form) (or (find-symbol-named name (car form))
+                      (find-symbol-named name (cdr form))))
     (t nil)))
 
 ;;; ---------------------------------------------------------------------------
@@ -55,19 +74,55 @@
   "Convert a field name symbol to a keyword for plist access."
   (intern (symbol-name field-name-sym) :keyword))
 
+(defun field-constraints (field)
+  "Extract plist of generator constraints (:min :max :derived-from) from a field spec."
+  (let ((kwargs (cddr field))
+        (constraints nil))
+    (loop for (k v) on kwargs by #'cddr
+          do (case k
+               (:min          (setf (getf constraints :min) v))
+               (:max          (setf (getf constraints :max) v))
+               (:derived-from (setf (getf constraints :derived-from) v))))
+    constraints))
+
 (defun generate-instance (entity-name &optional overrides)
   "Generate a random instance of ENTITY-NAME as a plist.
-OVERRIDES is an alist of (field-keyword . value) to fix specific fields."
+OVERRIDES is an alist of (field-keyword . value) to fix specific fields.
+Respects :min/:max constraints and computes :derived-from fields."
   (let* ((entity (describe-entity entity-name))
          (fields (getf entity :fields))
-         (instance nil))
+         (instance nil)
+         (deferred nil))
+    ;; First pass: generate non-derived fields
     (dolist (field (reverse fields))
       (let* ((fname (first field))
              (ftype (second field))
              (key (field-keyword fname))
+             (constraints (field-constraints field))
              (override (assoc key overrides)))
-        (push (if override (cdr override) (generate-value ftype)) instance)
-        (push key instance)))
+        (cond
+          (override
+           (push (cdr override) instance)
+           (push key instance))
+          ((getf constraints :derived-from)
+           ;; Placeholder — will compute after other fields are set
+           (push nil instance)
+           (push key instance)
+           (push (list key (getf constraints :derived-from)) deferred))
+          (t
+           (push (generate-value ftype
+                                 :min (getf constraints :min)
+                                 :max (getf constraints :max))
+                 instance)
+           (push key instance)))))
+    ;; Second pass: compute derived fields using the instance as context
+    (when deferred
+      (ensure-entity-accessors entity-name)
+      (dolist (entry deferred)
+        (destructuring-bind (key form) entry
+          (let* ((inst-sym (find-symbol-named "INSTANCE" form))
+                 (fn (compile nil `(lambda (,inst-sym) ,form))))
+            (setf (getf instance key) (funcall fn instance))))))
     instance))
 
 ;;; ---------------------------------------------------------------------------

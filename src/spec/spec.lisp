@@ -49,7 +49,7 @@
 ;;; Known keywords for validation at macroexpand time
 ;;; ---------------------------------------------------------------------------
 
-(defparameter +known-field-keys+ '(:required :default :unique))
+(defparameter +known-field-keys+ '(:required :default :unique :min :max :derived-from))
 (defparameter +relation-types+ '(:has-many :has-one :belongs-to))
 
 ;;; ---------------------------------------------------------------------------
@@ -263,9 +263,12 @@ Returns a list of warning strings. Empty list = all clear."
          (ht (dict "name" name "type" type)))
     (loop for (k v) on (cddr field-spec) by #'cddr
           do (case k
-               (:required (when v (setf (gethash "required" ht) t)))
-               (:unique   (when v (setf (gethash "unique" ht) t)))
-               (:default  (setf (gethash "default" ht) (form-to-string v)))))
+               (:required     (when v (setf (gethash "required" ht) t)))
+               (:unique       (when v (setf (gethash "unique" ht) t)))
+               (:default      (setf (gethash "default" ht) (form-to-string v)))
+               (:min          (setf (gethash "min" ht) v))
+               (:max          (setf (gethash "max" ht) v))
+               (:derived-from (setf (gethash "derived-from" ht) (form-to-string v)))))
     ht))
 
 (defun relation-to-ht (rel-spec)
@@ -341,6 +344,12 @@ Returns a list of warning strings. Empty list = all clear."
       (setf spec (append spec (list :default (read-from-string (gethash "default" ht))))))
     (when (gethash "unique" ht)
       (setf spec (append spec (list :unique t))))
+    (when (gethash "min" ht)
+      (setf spec (append spec (list :min (gethash "min" ht)))))
+    (when (gethash "max" ht)
+      (setf spec (append spec (list :max (gethash "max" ht)))))
+    (when (gethash "derived-from" ht)
+      (setf spec (append spec (list :derived-from (read-from-string (gethash "derived-from" ht))))))
     spec))
 
 (defun ht-to-relation (ht)
@@ -422,7 +431,13 @@ Merges with existing specs — call CLEAR-SPECS first for a clean import."
                       "required" (dict "type" "boolean")
                       "default" (dict "type" "string"
                                       "description" "Default value as CL form")
-                      "unique" (dict "type" "boolean"))))
+                      "unique" (dict "type" "boolean")
+                      "min" (dict "type" "number"
+                                  "description" "Minimum value for generator")
+                      "max" (dict "type" "number"
+                                  "description" "Maximum value for generator")
+                      "derived-from" (dict "type" "string"
+                                           "description" "CL form to compute from other fields"))))
         (relation-schema
           (dict "type" "object"
                 "required" (vector "kind" "name" "of")

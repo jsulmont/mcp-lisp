@@ -153,3 +153,56 @@
       ;; Only account should appear in results (user has no invariants)
       (is (= 1 (length results)))
       (is (string= "account" (getf (first results) :entity))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Generator constraints
+;;; ---------------------------------------------------------------------------
+
+(test generate-value-respects-min-max-number
+  "generate-value with :min/:max constrains numeric range"
+  (dotimes (i 100)
+    (let ((v (mcp-lisp:generate-value 'number :min 0.0 :max 10.0)))
+      (is (>= v 0.0))
+      (is (< v 10.0)))))
+
+(test generate-value-respects-min-max-integer
+  "generate-value with :min/:max constrains integer range"
+  (dotimes (i 100)
+    (let ((v (mcp-lisp:generate-value 'integer :min 5 :max 20)))
+      (is (integerp v))
+      (is (>= v 5))
+      (is (<= v 20)))))
+
+(test generate-instance-uses-field-constraints
+  "generate-instance respects :min/:max on fields"
+  (with-fresh-specs
+    (mcp-lisp:defentity account ()
+      (id string :required t)
+      (balance number :required t :min 0.0 :max 1000.0))
+    (dotimes (i 50)
+      (let ((inst (mcp-lisp:generate-instance "account")))
+        (is (>= (getf inst :balance) 0.0))
+        (is (< (getf inst :balance) 1000.0))))))
+
+(test generate-instance-computes-derived-from
+  "generate-instance evaluates :derived-from to compute field values"
+  (with-fresh-specs
+    (mcp-lisp:defentity position ()
+      (quantity number :required t :min 1.0 :max 100.0)
+      (price number :required t :min 1.0 :max 100.0)
+      (notional number :derived-from (* (getf instance :quantity) (getf instance :price))))
+    (dotimes (i 50)
+      (let ((inst (mcp-lisp:generate-instance "position")))
+        (is (= (getf inst :notional)
+                (* (getf inst :quantity) (getf inst :price))))))))
+
+(test constrained-pbt-all-pass
+  "PBT passes when constraints make invariants satisfiable"
+  (with-fresh-specs
+    (mcp-lisp:defentity account ()
+      (balance number :required t :min 0.0 :max 1000.0))
+    (mcp-lisp:definvariant non-negative
+      :on account
+      :check (>= (account-balance account) 0))
+    (let ((results (mcp-lisp:run-pbt :trials 200)))
+      (is (= 0 (getf (first results) :failed))))))
