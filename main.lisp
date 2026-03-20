@@ -198,6 +198,8 @@
   (:import-from #:mcp-lisp/src/spec/pbt
                 #:generate-value
                 #:generate-instance
+                #:default-generate-instance
+                #:defgenerator
                 #:ensure-entity-accessors
                 #:check-invariants
                 #:run-pbt)
@@ -370,6 +372,8 @@
    ;; Spec PBT
    #:generate-value
    #:generate-instance
+   #:default-generate-instance
+   #:defgenerator
    #:ensure-entity-accessors
    #:check-invariants
    #:run-pbt))

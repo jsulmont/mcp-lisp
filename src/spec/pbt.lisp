@@ -8,6 +8,7 @@
   (:import-from #:mcp-lisp/src/spec/spec
                 #:*entities*
                 #:*invariants*
+                #:*generators*
                 #:describe-entity
                 #:list-entities
                 #:describe-invariant
@@ -16,6 +17,8 @@
                 #:entity-relations)
   (:export #:generate-value
            #:generate-instance
+           #:default-generate-instance
+           #:defgenerator
            #:ensure-entity-accessors
            #:check-invariants
            #:run-pbt))
@@ -85,8 +88,8 @@ Optional MIN and MAX constrain numeric types."
                (:derived-from (setf (getf constraints :derived-from) v))))
     constraints))
 
-(defun generate-instance (entity-name &optional overrides)
-  "Generate a random instance of ENTITY-NAME as a plist.
+(defun default-generate-instance (entity-name &optional overrides)
+  "Generate a random instance of ENTITY-NAME as a plist using default field-by-field generation.
 OVERRIDES is an alist of (field-keyword . value) to fix specific fields.
 Respects :min/:max constraints and computes :derived-from fields."
   (let* ((entity (describe-entity entity-name))
@@ -125,6 +128,33 @@ Respects :min/:max constraints and computes :derived-from fields."
                        (compile nil `(lambda (,inst-sym) ,form)))))
             (setf (getf instance key) (funcall fn instance))))))
     instance))
+
+(defun generate-instance (entity-name &optional overrides)
+  "Generate a random instance of ENTITY-NAME as a plist.
+If a custom generator is registered via DEFGENERATOR, uses that.
+Otherwise falls back to default field-by-field generation."
+  (let ((custom (gethash (string-downcase (string entity-name)) *generators*)))
+    (if custom
+        (funcall custom overrides)
+        (default-generate-instance entity-name overrides))))
+
+(defmacro defgenerator (entity-name (overrides-var) &body body)
+  "Register a custom instance generator for ENTITY-NAME.
+The generator receives OVERRIDES (an alist of (keyword . value) or NIL)
+and must return a plist. GENERATE-VALUE and DEFAULT-GENERATE-INSTANCE
+are available within the body for building instances.
+
+  (defgenerator trader (overrides)
+    (let ((inst (default-generate-instance \"trader\" overrides)))
+      (when (getf inst :suspended)
+        (setf (getf inst :margin-ratio) (random 0.5)))
+      inst))"
+  (let ((key (string-downcase (string entity-name))))
+    `(progn
+       (setf (gethash ,key *generators*)
+             (lambda (,overrides-var)
+               ,@body))
+       ',entity-name)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Accessor generation

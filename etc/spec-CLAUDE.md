@@ -47,6 +47,24 @@ Generate random entity instances and check invariants automatically:
 
 This will generate random instances for every entity that has invariants, check all applicable invariants, and report counterexamples on failure. Use `(check-invariants "entity-name" instance)` for targeted checking and `(generate-instance "entity-name")` to produce test data.
 
+#### Custom generators
+
+The default generator picks each field independently, which can't satisfy cross-field invariants (e.g. "suspended implies margin < 0.5"). Use `defgenerator` to register a custom generator that enforces these dependencies:
+
+```lisp
+(defgenerator trader (overrides)
+  (let ((inst (default-generate-instance "trader" overrides)))
+    (when (getf inst :suspended)
+      (setf (getf inst :margin-ratio)
+            (generate-value 'number :min 0.0 :max 0.5)))
+    inst))
+```
+
+- `defgenerator` registers a generator function for an entity. It receives `overrides` (an alist of `(keyword . value)` or NIL) and must return a plist.
+- `default-generate-instance` is the original field-by-field generator — use it as a base, then fix up cross-field dependencies.
+- `generate-value` is available for generating individual typed values (e.g. `(generate-value 'number :min 0.0 :max 10.0)`).
+- `clear-specs` also clears registered generators.
+
 ### JSON persistence
 
 - `(specs-to-json)` — export all specs as a JSON string (conforms to JSON Schema 2020-12)

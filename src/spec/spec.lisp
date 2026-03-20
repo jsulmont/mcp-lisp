@@ -14,6 +14,7 @@
            #:*entities*
            #:*rules*
            #:*invariants*
+           #:*generators*
            ;; Macros
            #:defentity
            #:defrule
@@ -44,6 +45,7 @@
 (defvar *entities* (make-hash-table :test #'equal))
 (defvar *rules* (make-hash-table :test #'equal))
 (defvar *invariants* (make-hash-table :test #'equal))
+(defvar *generators* (make-hash-table :test #'equal))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Known keywords for validation at macroexpand time
@@ -184,6 +186,7 @@ Returns (values fields relations derived)."
   (clrhash *entities*)
   (clrhash *rules*)
   (clrhash *invariants*)
+  (clrhash *generators*)
   (values))
 
 (defun entity-accessor-p (sym)

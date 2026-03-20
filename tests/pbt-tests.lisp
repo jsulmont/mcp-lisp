@@ -11,7 +11,8 @@
 (defmacro with-fresh-specs (&body body)
   `(let ((mcp-lisp/src/spec/spec::*entities* (make-hash-table :test #'equal))
          (mcp-lisp/src/spec/spec::*rules* (make-hash-table :test #'equal))
-         (mcp-lisp/src/spec/spec::*invariants* (make-hash-table :test #'equal)))
+         (mcp-lisp/src/spec/spec::*invariants* (make-hash-table :test #'equal))
+         (mcp-lisp/src/spec/spec::*generators* (make-hash-table :test #'equal)))
      ,@body))
 
 ;;; ---------------------------------------------------------------------------
@@ -206,3 +207,70 @@
       :check (>= (account-balance account) 0))
     (let ((results (mcp-lisp:run-pbt :trials 200)))
       (is (= 0 (getf (first results) :failed))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Custom generators
+;;; ---------------------------------------------------------------------------
+
+(test defgenerator-replaces-default
+  "defgenerator replaces the default generator for an entity"
+  (with-fresh-specs
+    (mcp-lisp:defentity account ()
+      (id string :required t)
+      (balance number :required t))
+    (mcp-lisp:defgenerator account (overrides)
+      (declare (ignore overrides))
+      (list :id "fixed-id" :balance 42))
+    (let ((inst (mcp-lisp:generate-instance "account")))
+      (is (string= "fixed-id" (getf inst :id)))
+      (is (= 42 (getf inst :balance))))))
+
+(test defgenerator-with-default-fixup
+  "defgenerator can call default-generate-instance and fix up cross-field deps"
+  (with-fresh-specs
+    (mcp-lisp:defentity trader ()
+      (id string :required t)
+      (margin-ratio number :required t :min 0.0 :max 100.0)
+      (suspended boolean))
+    (mcp-lisp:definvariant suspended-margin
+      :on trader
+      :check (if (trader-suspended trader)
+                 (< (trader-margin-ratio trader) 0.5)
+                 t))
+    (mcp-lisp:defgenerator trader (overrides)
+      (let ((inst (mcp-lisp:default-generate-instance "trader" overrides)))
+        (when (getf inst :suspended)
+          (setf (getf inst :margin-ratio)
+                (mcp-lisp:generate-value 'number :min 0.0 :max 0.5)))
+        inst))
+    (let ((results (mcp-lisp:run-pbt :trials 200)))
+      (is (= 0 (getf (first results) :failed))))))
+
+(test defgenerator-receives-overrides
+  "custom generator receives overrides from generate-instance"
+  (with-fresh-specs
+    (mcp-lisp:defentity account ()
+      (id string :required t)
+      (balance number :required t))
+    (mcp-lisp:defgenerator account (overrides)
+      (let ((inst (mcp-lisp:default-generate-instance "account" overrides)))
+        inst))
+    (let ((inst (mcp-lisp:generate-instance "account" '((:balance . 99)))))
+      (is (= 99 (getf inst :balance))))))
+
+(test defgenerator-cleared-by-clear-specs
+  "clear-specs removes custom generators"
+  (with-fresh-specs
+    (mcp-lisp:defentity account ()
+      (balance number :required t))
+    (mcp-lisp:defgenerator account (overrides)
+      (declare (ignore overrides))
+      (list :balance 42))
+    (is (= 42 (getf (mcp-lisp:generate-instance "account") :balance)))
+    (mcp-lisp:clear-specs)
+    ;; After clear, defentity again — should use default generator
+    (mcp-lisp:defentity account ()
+      (balance number :required t))
+    (let ((inst (mcp-lisp:generate-instance "account")))
+      ;; Should be random, not 42 every time
+      (is (numberp (getf inst :balance))))))
