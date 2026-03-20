@@ -121,7 +121,8 @@ Respects :min/:max constraints and computes :derived-from fields."
       (dolist (entry deferred)
         (destructuring-bind (key form) entry
           (let* ((inst-sym (find-symbol-named "INSTANCE" form))
-                 (fn (compile nil `(lambda (,inst-sym) ,form))))
+                 (fn (handler-bind ((warning #'muffle-warning))
+                       (compile nil `(lambda (,inst-sym) ,form)))))
             (setf (getf instance key) (funcall fn instance))))))
     instance))
 
@@ -181,7 +182,8 @@ Returns a list of violated invariant name strings. Empty list = all pass."
         (let ((on-sym (getf inv :on))
               (check-form (getf inv :check)))
           (handler-case
-              (let ((fn (compile nil `(lambda (,on-sym) ,check-form))))
+              (let ((fn (handler-bind ((warning #'muffle-warning))
+                          (compile nil `(lambda (,on-sym) ,check-form)))))
                 (unless (funcall fn instance)
                   (push inv-name violations)))
             (error (e)

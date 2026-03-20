@@ -239,6 +239,54 @@ Returns (values fields relations derived)."
             warnings)))
   warnings)
 
+(defun collect-free-symbols (form &optional bound)
+  "Walk FORM collecting symbols in variable position not in BOUND list.
+Handles QUOTE, LAMBDA, LET, LET* binding forms."
+  (let ((syms nil))
+    (labels ((walk (f env)
+               (cond
+                 ((null f) nil)
+                 ((and (symbolp f)
+                       (not (keywordp f))
+                       (not (eq f t))
+                       (not (member f env :test #'eq)))
+                  (pushnew f syms :test #'eq))
+                 ((consp f)
+                  (let ((head (car f)))
+                    (cond
+                      ((eq head 'quote) nil)
+                      ((eq head 'lambda)
+                       ;; bind params, walk body
+                       (let ((params (remove-if (lambda (s) (member s '(&optional &rest &key &body)))
+                                                (second f))))
+                         (dolist (body-form (cddr f))
+                           (walk body-form (append params env)))))
+                      ((member head '(let let*))
+                       ;; walk init forms, then body with bindings
+                       (let ((bindings (second f))
+                             (new-env env))
+                         (dolist (b bindings)
+                           (let ((var (if (consp b) (car b) b))
+                                 (init (when (consp b) (second b))))
+                             (when init (walk init (if (eq head 'let*) new-env env)))
+                             (push var new-env)))
+                         (dolist (body-form (cddr f))
+                           (walk body-form new-env))))
+                      (t
+                       ;; head is function position — skip it, walk args
+                       (dolist (arg (cdr f))
+                         (walk arg env)))))))))
+      (walk form bound))
+    syms))
+
+(defun check-form-free-variables (form bound-vars context-label warnings)
+  "Check that every free variable in FORM is among BOUND-VARS. Push warnings otherwise."
+  (dolist (sym (collect-free-symbols form bound-vars))
+    (push (format nil "~A: free variable ~A is not bound (expected one of: ~{~A~^, ~})"
+                  context-label sym bound-vars)
+          warnings))
+  warnings)
+
 (defun validate-specs ()
   "Check that all rules/invariants reference known entities and that
 forms in :check/:requires/:ensures/:let use resolvable symbols.
@@ -274,13 +322,20 @@ Returns a list of warning strings. Empty list = all clear."
                                      key rel of-target)
                              warnings)))))
                *entities*)
-      ;; Check forms in invariant :check clauses
+      ;; Check forms in invariant :check clauses — functions and free variables
       (maphash (lambda (key plist)
                  (when (getf plist :check)
                    (setf warnings
                          (check-form-symbols (getf plist :check)
                                              (format nil "invariant ~A" key)
-                                             warnings))))
+                                             warnings))
+                   (when (getf plist :on)
+                     (setf warnings
+                           (check-form-free-variables
+                            (getf plist :check)
+                            (list (getf plist :on))
+                            (format nil "invariant ~A" key)
+                            warnings)))))
                *invariants*)
       ;; Check forms in rule :requires, :ensures, and :let clauses
       (maphash (lambda (key plist)

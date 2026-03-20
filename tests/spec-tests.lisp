@@ -265,6 +265,22 @@
     (let ((warnings (mcp-lisp:validate-specs)))
       (is (= 3 (length warnings))))))
 
+(test validate-specs-free-variable-in-invariant
+  "validate-specs catches invariant :check using wrong entity variable"
+  (with-fresh-specs
+    (mcp-lisp:defentity position ()
+      (notional number :required t)
+      (quantity number :required t)
+      (entry-price number :required t))
+    ;; Bug: uses 'order' instead of 'position' as the variable
+    (mcp-lisp:definvariant notional-correct
+      :on position
+      :check (= (position-notional order) (* (position-quantity order) (position-entry-price order))))
+    (let ((warnings (mcp-lisp:validate-specs)))
+      (is (plusp (length warnings)))
+      (is (some (lambda (w) (search "free variable" w)) warnings))
+      (is (some (lambda (w) (search "ORDER" w)) warnings)))))
+
 (test validate-specs-undefined-function-in-invariant
   "validate-specs catches undefined functions in invariant :check"
   (with-fresh-specs
