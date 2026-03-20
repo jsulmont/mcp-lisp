@@ -216,6 +216,54 @@ swarm> create and register a new MCP tool called add-n -- that should take
 
 The coder defines the tool, unit-tests it with `pp`, then `test_tool` spawns a fresh agent that only sees `add_n` in its tool list — verifying the schema and description work end-to-end.
 
+## Behavioral Specs
+
+A specification DSL for capturing domain models as structured metadata — entities, rules, and invariants — queryable and testable at the REPL or via MCP tools. Inspired by [JUXT Allium](https://github.com/juxt/allium) but executable from day one.
+
+```lisp
+(defentity account ()
+  (id string :required t :unique t)
+  (balance number :required t :default 0)
+  (:belongs-to owner :of user))
+
+(defrule withdraw
+  :when (account :state :active)
+  :requires ((>= (account-balance account) amount))
+  :ensures ((= (account-balance account) (- old-balance amount))))
+
+(definvariant non-negative-balance
+  :on account
+  :check (>= (account-balance account) 0))
+```
+
+### Property-Based Testing
+
+Generate random entity instances and check invariants — with counterexamples on failure:
+
+```lisp
+(run-pbt :trials 200)
+
+;; === PBT Results ===
+;;
+;; account (1 invariants)
+;;   104/200 passed, 96 FAILED
+;;   counterexample: (:BALANCE -876.8)
+;;     violated: non-negative-balance
+```
+
+### JSON Persistence
+
+Export specs as JSON (conforming to JSON Schema 2020-12) for version control and cross-session persistence:
+
+```lisp
+(specs-to-json)    ;; => JSON string
+(json-to-specs s)  ;; import from JSON
+```
+
+### Claude Code Integration
+
+Copy [`etc/spec-CLAUDE.md`](etc/spec-CLAUDE.md) into your project's `CLAUDE.md` to teach Claude Code the spec-first workflow. Claude will then define specs via `eval_lisp` before generating code.
+
 ## A2A (Agent-to-Agent Protocol)
 
 Partial implementation of [A2A 1.0](https://a2a-protocol.org/latest/specification/). Covers agent card discovery, messaging, skills, and task lifecycle. Does not implement streaming, push notifications, or security schemes. No conformance suite exists for A2A.
@@ -300,7 +348,7 @@ From inside the running server, spawn threads that each run full MCP session lif
 ## Testing
 
 ```bash
-make test    # 317 unit tests
+make test    # 438 unit tests
 make clean   # remove .fasl files
 ```
 
