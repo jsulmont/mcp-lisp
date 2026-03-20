@@ -173,151 +173,205 @@
   ;; Agent tools (loading this registers the tools)
   (:import-from #:mcp-lisp/src/agent/tools
                 #:*search-api-key*)
+  ;; Spec DSL
+  (:import-from #:mcp-lisp/src/spec/spec
+                #:*entities*
+                #:*rules*
+                #:*invariants*
+                #:defentity
+                #:defrule
+                #:definvariant
+                #:list-entities
+                #:describe-entity
+                #:entity-fields
+                #:entity-relations
+                #:list-rules
+                #:describe-rule
+                #:list-invariants
+                #:describe-invariant
+                #:clear-specs
+                #:validate-specs
+                #:specs-to-json
+                #:json-to-specs
+                #:spec-json-schema)
+  ;; Spec PBT
+  (:import-from #:mcp-lisp/src/spec/pbt
+                #:generate-value
+                #:generate-instance
+                #:ensure-entity-accessors
+                #:check-invariants
+                #:run-pbt)
   ;; Export everything
   (:export ;; Core
-           #:+protocol-version+
-           #:+supported-protocol-versions+
-           #:+sdk-version+
-           ;; JSON
-           #:dict
-           #:make-ht
-           #:encode-json
-           #:decode-json
-           #:pp
-           #:ht-keys
-           #:ht-values
-           ;; Content
-           #:text-content
-           #:image-content
-           #:make-content
-           #:content-vector
-           ;; Conditions
-           #:mcp-error
-           #:mcp-error-message
-           #:protocol-error
-           #:tool-error
-           #:tool-error-category
-           #:tool-error-retryable-p
-           #:transport-error
-           #:validation-error
-           ;; Client
-           #:mcp-client
-           #:make-client
-           #:make-http-client
-           #:client-name
-           #:client-version
-           #:client-server-info
-           #:client-server-capabilities
-           #:client-protocol-version
-           #:client-connected-p
-           #:client-connect
-           #:client-disconnect
-           #:client-initialize
-           #:client-shutdown
-           #:client-call
-           #:client-notify
-           #:client-notification-handler
-           #:client-request-handler
-           #:with-client
-           ;; Client operations
-           #:list-tools
-           #:call-tool
-           #:list-resources
-           #:read-resource
-           #:list-prompts
-           #:get-prompt
-           #:ping
-           ;; Server
-           #:mcp-server
-           #:make-server
-           #:server-name
-           #:server-version
-           #:server-start
-           #:server-stop
-           #:run-server
-           ;; Tools
-           #:register-tool
-           #:unregister-tool
-           #:get-tool
-           #:get-all-tools
-           #:*global-tool-registry*
-           #:define-tool
-           ;; Prompts
-           #:register-prompt
-           #:unregister-prompt
-           #:get-all-prompts
-           #:*global-prompt-registry*
-           #:define-prompt
-           ;; Resources
-           #:register-resource
-           #:register-resource-template
-           #:unregister-resource
-           #:unregister-resource-template
-           #:get-all-resources
-           #:get-all-resource-templates
-           #:*global-resource-registry*
-           #:define-resource
-           #:define-resource-template
-           ;; Notifications
-           #:notify-tools-list-changed
-           #:notify-prompts-list-changed
-           #:notify-resources-list-changed
-           #:notify-resource-updated
-           ;; Logging
-           #:*log-level*
-           #:set-log-level
-           ;; Progress
-           #:send-progress
-           #:with-progress
-           ;; Sampling
-           #:create-message
-           #:make-sampling-message
-           #:make-model-preferences
-           ;; Elicitation
-           #:elicit-form
-           #:elicit-url
-           ;; Transport utilities
-           #:setup-file-logging
-           ;; A2A - Agent Card
-           #:*agent-card*
-           #:define-agent-card
-           #:agent-card-to-json
-           ;; A2A - Skills
-           #:define-skill
-           #:invoke-skill
-           ;; A2A - Tasks
-           #:create-task
-           #:task-id
-           #:task-status
-           #:task-to-ht
-           ;; A2A - Messages
-           #:make-message
-           #:make-text-part
-           #:make-file-part
-           #:make-data-part
-           ;; A2A - Client
-           #:a2a-client
-           #:make-a2a-client
-           #:client-agent-url
-           #:client-agent-card
-           #:fetch-agent-card
-           #:send-message
-           #:fetch-task-status
-           #:request-task-cancel
-           ;; A2A - Server
-           #:start-a2a-server
-           #:stop-a2a-server
-           ;; Agent
-           #:*provider*
-           #:*api-key*
-           #:*model*
-           #:*max-tokens*
-           #:*verbose*
-           #:*last-api-usage*
-           #:*session-tokens*
-           #:reset-session-tokens
-           #:*search-api-key*
-           #:run-agent
-           #:chat))
+   #:+protocol-version+
+   #:+supported-protocol-versions+
+   #:+sdk-version+
+   ;; JSON
+   #:dict
+   #:make-ht
+   #:encode-json
+   #:decode-json
+   #:pp
+   #:ht-keys
+   #:ht-values
+   ;; Content
+   #:text-content
+   #:image-content
+   #:make-content
+   #:content-vector
+   ;; Conditions
+   #:mcp-error
+   #:mcp-error-message
+   #:protocol-error
+   #:tool-error
+   #:tool-error-category
+   #:tool-error-retryable-p
+   #:transport-error
+   #:validation-error
+   ;; Client
+   #:mcp-client
+   #:make-client
+   #:make-http-client
+   #:client-name
+   #:client-version
+   #:client-server-info
+   #:client-server-capabilities
+   #:client-protocol-version
+   #:client-connected-p
+   #:client-connect
+   #:client-disconnect
+   #:client-initialize
+   #:client-shutdown
+   #:client-call
+   #:client-notify
+   #:client-notification-handler
+   #:client-request-handler
+   #:with-client
+   ;; Client operations
+   #:list-tools
+   #:call-tool
+   #:list-resources
+   #:read-resource
+   #:list-prompts
+   #:get-prompt
+   #:ping
+   ;; Server
+   #:mcp-server
+   #:make-server
+   #:server-name
+   #:server-version
+   #:server-start
+   #:server-stop
+   #:run-server
+   ;; Tools
+   #:register-tool
+   #:unregister-tool
+   #:get-tool
+   #:get-all-tools
+   #:*global-tool-registry*
+   #:define-tool
+   ;; Prompts
+   #:register-prompt
+   #:unregister-prompt
+   #:get-all-prompts
+   #:*global-prompt-registry*
+   #:define-prompt
+   ;; Resources
+   #:register-resource
+   #:register-resource-template
+   #:unregister-resource
+   #:unregister-resource-template
+   #:get-all-resources
+   #:get-all-resource-templates
+   #:*global-resource-registry*
+   #:define-resource
+   #:define-resource-template
+   ;; Notifications
+   #:notify-tools-list-changed
+   #:notify-prompts-list-changed
+   #:notify-resources-list-changed
+   #:notify-resource-updated
+   ;; Logging
+   #:*log-level*
+   #:set-log-level
+   ;; Progress
+   #:send-progress
+   #:with-progress
+   ;; Sampling
+   #:create-message
+   #:make-sampling-message
+   #:make-model-preferences
+   ;; Elicitation
+   #:elicit-form
+   #:elicit-url
+   ;; Transport utilities
+   #:setup-file-logging
+   ;; A2A - Agent Card
+   #:*agent-card*
+   #:define-agent-card
+   #:agent-card-to-json
+   ;; A2A - Skills
+   #:define-skill
+   #:invoke-skill
+   ;; A2A - Tasks
+   #:create-task
+   #:task-id
+   #:task-status
+   #:task-to-ht
+   ;; A2A - Messages
+   #:make-message
+   #:make-text-part
+   #:make-file-part
+   #:make-data-part
+   ;; A2A - Client
+   #:a2a-client
+   #:make-a2a-client
+   #:client-agent-url
+   #:client-agent-card
+   #:fetch-agent-card
+   #:send-message
+   #:fetch-task-status
+   #:request-task-cancel
+   ;; A2A - Server
+   #:start-a2a-server
+   #:stop-a2a-server
+   ;; Agent
+   #:*provider*
+   #:*api-key*
+   #:*model*
+   #:*max-tokens*
+   #:*verbose*
+   #:*last-api-usage*
+   #:*session-tokens*
+   #:reset-session-tokens
+   #:*search-api-key*
+   #:run-agent
+   #:chat
+   ;; Spec DSL
+   #:*entities*
+   #:*rules*
+   #:*invariants*
+   #:defentity
+   #:defrule
+   #:definvariant
+   #:list-entities
+   #:describe-entity
+   #:entity-fields
+   #:entity-relations
+   #:list-rules
+   #:describe-rule
+   #:list-invariants
+   #:describe-invariant
+   #:clear-specs
+   #:validate-specs
+   #:specs-to-json
+   #:json-to-specs
+   #:spec-json-schema
+   ;; Spec PBT
+   #:generate-value
+   #:generate-instance
+   #:ensure-entity-accessors
+   #:check-invariants
+   #:run-pbt))
 
 (in-package #:mcp-lisp/main)
