@@ -21,7 +21,8 @@
            #:defgenerator
            #:ensure-entity-accessors
            #:check-invariants
-           #:run-pbt))
+           #:run-pbt
+           #:extract-generation-constraints))
 
 (in-package #:mcp-lisp/src/spec/pbt)
 
@@ -69,10 +70,6 @@ Optional MIN and MAX constrain numeric types."
                       (find-symbol-named name (cdr form))))
     (t nil)))
 
-;;; ---------------------------------------------------------------------------
-;;; Instance generation
-;;; ---------------------------------------------------------------------------
-
 (defun field-keyword (field-name-sym)
   "Convert a field name symbol to a keyword for plist access."
   (intern (symbol-name field-name-sym) :keyword))
@@ -88,37 +85,365 @@ Optional MIN and MAX constrain numeric types."
                (:derived-from (setf (getf constraints :derived-from) v))))
     constraints))
 
+(defun member-type-p (type-spec)
+  "Return T if TYPE-SPEC is a member/enum type like (MEMBER :A :B :C)."
+  (and (consp type-spec) (eq (car type-spec) 'member)))
+
+;;; ---------------------------------------------------------------------------
+;;; Invariant constraint extraction
+;;; ---------------------------------------------------------------------------
+
+(defun getf-field-p (form entity-var)
+  "If FORM accesses a field of ENTITY-VAR, return the field keyword.
+Recognizes both (GETF ENTITY-VAR :FIELD) and (ENTITY-FIELD ENTITY-VAR) patterns."
+  (cond
+    ;; (getf entity-var :keyword)
+    ((and (consp form) (= (length form) 3)
+          (eq (first form) 'getf)
+          (eq (second form) entity-var)
+          (keywordp (third form)))
+     (third form))
+    ;; (entity-field entity-var) — accessor pattern
+    ((and (consp form) (= (length form) 2)
+          (symbolp (first form))
+          (eq (second form) entity-var))
+     (let* ((accessor-name (string-downcase (symbol-name (first form))))
+            (entity-name (string-downcase (symbol-name entity-var)))
+            (prefix (concatenate 'string entity-name "-")))
+       (when (and (> (length accessor-name) (length prefix))
+                  (string= prefix accessor-name :end2 (length prefix)))
+         (intern (string-upcase (subseq accessor-name (length prefix)))
+                 :keyword))))))
+
+(defun extract-scaled-ref (form entity-var)
+  "Recognize (* FACTOR (GETF E :F)) or (* (GETF E :F) FACTOR).
+Returns (:field KEYWORD :factor NUMBER) or NIL."
+  (when (and (consp form) (eq (car form) '*) (= (length form) 3))
+    (let ((a (second form))
+          (b (third form)))
+      (cond
+        ((and (numberp a) (getf-field-p b entity-var))
+         (list :field (getf-field-p b entity-var) :factor a))
+        ((and (numberp b) (getf-field-p a entity-var))
+         (list :field (getf-field-p a entity-var) :factor b))))))
+
+(defun extract-comparison (form entity-var)
+  "Extract constraint(s) from a comparison form (OP LHS RHS).
+Returns a list of constraint plists or NIL."
+  (when (and (consp form) (= (length form) 3)
+             (member (first form) '(> >= < <= =)))
+    (let* ((op (first form))
+           (lhs (second form))
+           (rhs (third form))
+           (lf (getf-field-p lhs entity-var))
+           (rf (getf-field-p rhs entity-var))
+           (epsilon 0.001))
+      (cond
+        ;; (op (getf e :field) number)
+        ((and lf (numberp rhs))
+         (list (case op
+                 (>  (list :field lf :min (+ rhs epsilon)))
+                 (>= (list :field lf :min rhs))
+                 (<  (list :field lf :max (- rhs epsilon)))
+                 (<= (list :field lf :max rhs))
+                 (=  (list :field lf :eq rhs)))))
+        ;; (op number (getf e :field))
+        ((and rf (numberp lhs))
+         (list (case op
+                 (>  (list :field rf :max (- lhs epsilon)))
+                 (>= (list :field rf :max lhs))
+                 (<  (list :field rf :min (+ lhs epsilon)))
+                 (<= (list :field rf :min lhs))
+                 (=  (list :field rf :eq lhs)))))
+        ;; (op (getf e :f1) (getf e :f2))
+        ((and lf rf)
+         (list (case op
+                 (>  (list :field lf :min-field rf :exclusive t))
+                 (>= (list :field lf :min-field rf))
+                 (<  (list :field lf :max-field rf :exclusive t))
+                 (<= (list :field lf :max-field rf))
+                 (=  (list :field lf :eq-field rf)))))
+        ;; (op (getf e :f) (* factor (getf e :other)))
+        ((and lf (extract-scaled-ref rhs entity-var))
+         (let* ((scaled (extract-scaled-ref rhs entity-var))
+                (ref (getf scaled :field))
+                (factor (getf scaled :factor)))
+           (list (case op
+                   ((>= >) (list :field lf :min-field ref :factor factor))
+                   ((<= <) (list :field lf :max-field ref :factor factor))
+                   (=      (list :field lf :eq-field ref :factor factor))))))))))
+
+(defun extract-condition (form entity-var)
+  "Extract a condition from (EQ (GETF E :F) :V), (NOT ...), or (MEMBER ...).
+Returns (:field KW :value V :negated BOOL) or (:field KW :values LIST :negated BOOL) or NIL."
+  (cond
+    ;; (eq (getf e :field) value)
+    ((and (consp form) (eq (first form) 'eq) (= (length form) 3))
+     (let ((field (getf-field-p (second form) entity-var)))
+       (when field
+         (list :field field :value (third form) :negated nil))))
+    ;; (not expr) — negate
+    ((and (consp form) (eq (first form) 'not) (= (length form) 2))
+     (let ((inner (extract-condition (second form) entity-var)))
+       (when inner
+         (setf (getf inner :negated) (not (getf inner :negated)))
+         inner)))
+    ;; (member (getf e :field) '(values...))
+    ((and (consp form) (eq (first form) 'member))
+     (let ((field (getf-field-p (second form) entity-var)))
+       (when field
+         (let ((values (third form)))
+           ;; Unquote if needed
+           (when (and (consp values) (eq (car values) 'quote))
+             (setf values (second values)))
+           (when (listp values)
+             (list :field field :values values :negated nil))))))))
+
+(defun negate-condition (condition)
+  "Return a copy of CONDITION with :negated flipped."
+  (when condition
+    (let ((copy (copy-list condition)))
+      (setf (getf copy :negated) (not (getf copy :negated)))
+      copy)))
+
+(defun extract-constraints-from-form (form entity-var &optional condition)
+  "Recursively extract generation constraints from an invariant check form.
+CONDITION, if present, gates when extracted constraints apply.
+Returns a list of constraint plists."
+  (when (consp form)
+    (case (first form)
+      ;; (and c1 c2 ...) — extract from each conjunct
+      ((and)
+       (loop for sub in (cdr form)
+             nconc (extract-constraints-from-form sub entity-var condition)))
+
+      ;; (or branch1 branch2 ...) — extract if branches are conditional
+      ((or)
+       (let ((branches (cdr form)))
+         ;; Check if each branch is either (and (condition) ...) or a bare condition
+         (let ((extracted nil)
+               (all-ok t))
+           (dolist (branch branches)
+             (cond
+               ;; (and (eq/member ...) constraints...)
+               ((and (consp branch) (eq (car branch) 'and) (cddr branch)
+                     (extract-condition (second branch) entity-var))
+                (let ((branch-cond (extract-condition (second branch) entity-var)))
+                  (dolist (sub (cddr branch))
+                    (setf extracted
+                          (nconc extracted
+                                 (extract-constraints-from-form
+                                  sub entity-var
+                                  (or condition branch-cond)))))))
+               ;; Bare condition like (eq (getf e :state) :idle) — no constraints, just satisfied
+               ((extract-condition branch entity-var)
+                nil) ;; nothing to extract, branch is just "pass"
+               ;; Unrecognized branch — bail on the whole or
+               (t (setf all-ok nil)
+                  (return))))
+           (when all-ok extracted))))
+
+      ;; (if condition then else)
+      ((if)
+       (when (= (length form) 4)
+         (let ((cond-form (second form))
+               (then-form (third form))
+               (else-form (fourth form)))
+           (let ((cond-info (extract-condition cond-form entity-var)))
+             (when cond-info
+               (let ((neg-cond (negate-condition cond-info)))
+                 (cond
+                   ;; (if condition constraints t) — most common
+                   ((eq else-form t)
+                    (extract-constraints-from-form then-form entity-var
+                                                   (or condition cond-info)))
+                   ;; (if condition t constraints)
+                   ((eq then-form t)
+                    (extract-constraints-from-form else-form entity-var
+                                                   (or condition neg-cond)))
+                   ;; Both branches have constraints
+                   (t
+                    (append
+                     (extract-constraints-from-form then-form entity-var
+                                                    (or condition cond-info))
+                     (extract-constraints-from-form else-form entity-var
+                                                    (or condition neg-cond)))))))))))
+
+      ;; Comparison operators
+      ((> >= < <= =)
+       (let ((constraints (extract-comparison form entity-var)))
+         (when constraints
+           (if condition
+               (mapcar (lambda (c) (append c (list :when condition))) constraints)
+               constraints))))
+
+      ;; Default — unrecognized, skip
+      (otherwise nil))))
+
+(defun extract-generation-constraints (entity-name)
+  "Extract per-field generation constraints from all invariants for ENTITY-NAME.
+Returns a hash table mapping field keywords to lists of constraint plists."
+  (let ((result (make-hash-table :test #'eq))
+        (entity (describe-entity entity-name))
+        (invs (invariants-for entity-name)))
+    (let ((entity-var (getf entity :name)))
+      (dolist (entry invs)
+        (destructuring-bind (inv-name inv) entry
+          (declare (ignore inv-name))
+          (let ((check (getf inv :check)))
+            (dolist (constraint (extract-constraints-from-form check entity-var))
+              (let ((field (getf constraint :field)))
+                (when field
+                  (push constraint (gethash field result)))))))))
+    result))
+
+;;; ---------------------------------------------------------------------------
+;;; Constraint resolution
+;;; ---------------------------------------------------------------------------
+
+(defun condition-satisfied-p (condition instance)
+  "Check if CONDITION is satisfied by the current INSTANCE state."
+  (when condition
+    (let* ((field (getf condition :field))
+           (actual (getf instance field))
+           (negated (getf condition :negated))
+           (match (cond
+                    ((getf condition :values)
+                     (member actual (getf condition :values)))
+                    (t (equal actual (getf condition :value))))))
+      (if negated (not match) match))))
+
+(defun resolve-field-bounds (field-keyword inv-constraints field-constraints instance)
+  "Given a field's invariant constraints, field-level :min/:max, and current instance,
+compute effective generation bounds. Returns (:min N :max N :eq N)."
+  (let ((lo (getf field-constraints :min))
+        (hi (getf field-constraints :max))
+        (fixed nil))
+    ;; Apply invariant-extracted constraints
+    (dolist (c inv-constraints)
+      (let ((when-cond (getf c :when)))
+        (when (or (null when-cond) (condition-satisfied-p when-cond instance))
+          ;; Constant bounds
+          (when (getf c :min)
+            (setf lo (if lo (max lo (getf c :min)) (getf c :min))))
+          (when (getf c :max)
+            (setf hi (if hi (min hi (getf c :max)) (getf c :max))))
+          ;; Equality
+          (when (getf c :eq)
+            (setf fixed (getf c :eq)))
+          ;; Field-reference bounds
+          (when (getf c :min-field)
+            (let* ((ref (getf instance (getf c :min-field)))
+                   (factor (or (getf c :factor) 1))
+                   (exclusive (getf c :exclusive)))
+              (when ref
+                (let ((bound (+ (* ref factor) (if exclusive 0.001 0))))
+                  (setf lo (if lo (max lo bound) bound))))))
+          (when (getf c :max-field)
+            (let* ((ref (getf instance (getf c :max-field)))
+                   (factor (or (getf c :factor) 1))
+                   (exclusive (getf c :exclusive)))
+              (when ref
+                (let ((bound (- (* ref factor) (if exclusive 0.001 0))))
+                  (setf hi (if hi (min hi bound) bound))))))
+          ;; Equality with field
+          (when (getf c :eq-field)
+            (let* ((ref (getf instance (getf c :eq-field)))
+                   (factor (or (getf c :factor) 1)))
+              (when ref (setf fixed (* ref factor))))))))
+    (list :min lo :max hi :eq fixed)))
+
+;;; ---------------------------------------------------------------------------
+;;; Field dependency ordering
+;;; ---------------------------------------------------------------------------
+
+(defun field-deps (field-keyword inv-constraints)
+  "Return a list of field keywords that FIELD-KEYWORD depends on via constraints."
+  (let ((deps nil))
+    (dolist (c inv-constraints)
+      (when (getf c :min-field) (pushnew (getf c :min-field) deps))
+      (when (getf c :max-field) (pushnew (getf c :max-field) deps))
+      (when (getf c :eq-field)  (pushnew (getf c :eq-field) deps)))
+    deps))
+
+(defun toposort-fields (non-member-fields constraint-map)
+  "Topologically sort NON-MEMBER-FIELDS so dependencies come first.
+CONSTRAINT-MAP maps field keywords to lists of constraint plists."
+  (let* ((keys (mapcar (lambda (f) (field-keyword (first f))) non-member-fields))
+         (key->field (make-hash-table :test #'eq))
+         (visited (make-hash-table :test #'eq))
+         (sorted nil))
+    (dolist (f non-member-fields)
+      (setf (gethash (field-keyword (first f)) key->field) f))
+    (labels ((visit (k)
+               (case (gethash k visited)
+                 (:done nil)
+                 (:visiting nil) ;; cycle — break it
+                 (t
+                  (setf (gethash k visited) :visiting)
+                  (dolist (dep (field-deps k (gethash k constraint-map)))
+                    (when (member dep keys)
+                      (visit dep)))
+                  (setf (gethash k visited) :done)
+                  (push (gethash k key->field) sorted)))))
+      (dolist (k keys) (visit k)))
+    (nreverse sorted)))
+
+;;; ---------------------------------------------------------------------------
+;;; Instance generation
+;;; ---------------------------------------------------------------------------
+
 (defun default-generate-instance (entity-name &optional overrides)
-  "Generate a random instance of ENTITY-NAME as a plist using default field-by-field generation.
-OVERRIDES is an alist of (field-keyword . value) to fix specific fields.
-Respects :min/:max constraints and computes :derived-from fields."
+  "Generate a random instance of ENTITY-NAME as a plist.
+Uses invariant-extracted constraints for smarter generation:
+member/enum fields first, then numeric fields in dependency order
+with bounds derived from invariant check forms."
   (let* ((entity (describe-entity entity-name))
          (fields (getf entity :fields))
+         (inv-constraints (extract-generation-constraints entity-name))
+         ;; Separate member fields from non-member fields
+         (member-fields (remove-if-not (lambda (f) (member-type-p (second f))) fields))
+         (other-fields (remove-if (lambda (f) (member-type-p (second f))) fields))
+         ;; Sort non-member fields by dependency order
+         (sorted-others (toposort-fields other-fields inv-constraints))
          (instance nil)
          (deferred nil))
-    ;; First pass: generate non-derived fields
-    (dolist (field (reverse fields))
+    ;; Phase 1: generate member/enum fields
+    (dolist (field member-fields)
       (let* ((fname (first field))
              (ftype (second field))
              (key (field-keyword fname))
-             (constraints (field-constraints field))
+             (override (assoc key overrides)))
+        (if override
+            (progn (push (cdr override) instance) (push key instance))
+            (progn (push (generate-value ftype) instance) (push key instance)))))
+    ;; Phase 2: generate non-member fields in dependency order
+    (dolist (field sorted-others)
+      (let* ((fname (first field))
+             (ftype (second field))
+             (key (field-keyword fname))
+             (fc (field-constraints field))
+             (ic (gethash key inv-constraints))
              (override (assoc key overrides)))
         (cond
           (override
-           (push (cdr override) instance)
-           (push key instance))
-          ((getf constraints :derived-from)
-           ;; Placeholder — will compute after other fields are set
-           (push nil instance)
-           (push key instance)
-           (push (list key (getf constraints :derived-from)) deferred))
+           (push (cdr override) instance) (push key instance))
+          ((getf fc :derived-from)
+           (push nil instance) (push key instance)
+           (push (list key (getf fc :derived-from)) deferred))
           (t
-           (push (generate-value ftype
-                                 :min (getf constraints :min)
-                                 :max (getf constraints :max))
-                 instance)
-           (push key instance)))))
-    ;; Second pass: compute derived fields using the instance as context
+           (let* ((bounds (resolve-field-bounds key ic fc instance))
+                  (eq-val (getf bounds :eq))
+                  (eff-min (getf bounds :min))
+                  (eff-max (getf bounds :max)))
+             ;; Sanity: if min > max, drop the tighter one
+             (when (and eff-min eff-max (> eff-min eff-max))
+               (setf eff-min nil eff-max nil))
+             (push (if eq-val eq-val
+                       (generate-value ftype :min eff-min :max eff-max))
+                   instance)
+             (push key instance))))))
+    ;; Phase 3: compute derived fields
     (when deferred
       (ensure-entity-accessors entity-name)
       (dolist (entry deferred)
@@ -132,11 +457,22 @@ Respects :min/:max constraints and computes :derived-from fields."
 (defun generate-instance (entity-name &optional overrides)
   "Generate a random instance of ENTITY-NAME as a plist.
 If a custom generator is registered via DEFGENERATOR, uses that.
-Otherwise falls back to default field-by-field generation."
+Otherwise uses constraint-aware default generation with a retry loop."
   (let ((custom (gethash (string-downcase (string entity-name)) *generators*)))
     (if custom
         (funcall custom overrides)
-        (default-generate-instance entity-name overrides))))
+        ;; Constraint-aware generation with retry
+        (let ((best nil)
+              (best-n most-positive-fixnum))
+          (dotimes (attempt 10)
+            (let* ((inst (default-generate-instance entity-name overrides))
+                   (violations (check-invariants entity-name inst))
+                   (n (length violations)))
+              (when (< n best-n)
+                (setf best inst best-n n))
+              (when (zerop n)
+                (return-from generate-instance inst))))
+          best))))
 
 (defmacro defgenerator (entity-name (overrides-var) &body body)
   "Register a custom instance generator for ENTITY-NAME.

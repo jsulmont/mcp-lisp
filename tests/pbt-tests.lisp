@@ -128,15 +128,19 @@
 (test run-pbt-detects-failures
   "run-pbt finds counterexamples for violable invariants"
   (with-fresh-specs
-    (mcp-lisp:defentity account ()
-      (balance number :required t))
-    ;; This will fail for negative balances (which generate-value produces)
-    (mcp-lisp:definvariant non-negative
-      :on account
-      :check (>= (account-balance account) 0))
+    ;; Use a cross-field invariant the constraint extractor can't solve:
+    ;; balance must equal quantity * price (a derived equality the extractor skips)
+    (mcp-lisp:defentity position ()
+      (balance number :required t)
+      (quantity number :required t)
+      (price number :required t))
+    (mcp-lisp:definvariant balance-matches
+      :on position
+      :check (= (position-balance position)
+                (* (position-quantity position) (position-price position))))
     (let ((results (mcp-lisp:run-pbt :trials 200)))
       (is (= 1 (length results)))
-      ;; With range [-1000, 1000], roughly half should fail
+      ;; Three independent random numbers almost never satisfy a = b * c
       (is (plusp (getf (first results) :failed)))
       (is (plusp (length (getf (first results) :failures)))))))
 
@@ -274,3 +278,126 @@
     (let ((inst (mcp-lisp:generate-instance "account")))
       ;; Should be random, not 42 every time
       (is (numberp (getf inst :balance))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Constraint extraction
+;;; ---------------------------------------------------------------------------
+
+(test extract-constraints-simple-bound
+  "Extracts lower bound from (>= field 0)"
+  (with-fresh-specs
+    (mcp-lisp:defentity account ()
+      (balance number :required t))
+    (mcp-lisp:definvariant non-negative
+      :on account
+      :check (>= (account-balance account) 0))
+    (mcp-lisp:ensure-entity-accessors "account")
+    (let ((constraints (mcp-lisp:extract-generation-constraints "account")))
+      (is (not (null (gethash :balance constraints))))
+      (let ((c (first (gethash :balance constraints))))
+        (is (= 0 (getf c :min)))))))
+
+(test extract-constraints-field-ordering
+  "Extracts field upper bound from (< field-a field-b)"
+  (with-fresh-specs
+    (mcp-lisp:defentity range ()
+      (lo number :required t)
+      (hi number :required t))
+    (mcp-lisp:definvariant lo-lt-hi
+      :on range
+      :check (< (range-lo range) (range-hi range)))
+    (mcp-lisp:ensure-entity-accessors "range")
+    (let* ((constraints (mcp-lisp:extract-generation-constraints "range"))
+           (lo-cs (gethash :lo constraints)))
+      (is (not (null lo-cs)))
+      (is (eq :hi (getf (first lo-cs) :max-field))))))
+
+(test extract-constraints-conditional
+  "Extracts conditional constraints from (if (eq state :x) constraint t)"
+  (with-fresh-specs
+    (mcp-lisp:defentity machine ()
+      (state (member :on :off) :default :off)
+      (output number :default 0))
+    (mcp-lisp:definvariant off-means-zero
+      :on machine
+      :check (if (not (eq (getf machine :state) :on))
+                 (= (getf machine :output) 0)
+                 t))
+    (let* ((constraints (mcp-lisp:extract-generation-constraints "machine"))
+           (out-cs (gethash :output constraints)))
+      (is (not (null out-cs)))
+      ;; Should have an :eq 0 with a :when condition
+      (let ((c (first out-cs)))
+        (is (= 0 (getf c :eq)))
+        (is (not (null (getf c :when))))))))
+
+(test extract-constraints-disjunction
+  "Extracts conditional constraints from or-of-and pattern"
+  (with-fresh-specs
+    (mcp-lisp:defentity valve ()
+      (state (member :open :closed) :default :closed)
+      (flow number :default 0))
+    (mcp-lisp:definvariant flow-matches-state
+      :on valve
+      :check (or (and (eq (getf valve :state) :open)
+                      (> (getf valve :flow) 0))
+                 (and (eq (getf valve :state) :closed)
+                      (= (getf valve :flow) 0))))
+    (let* ((constraints (mcp-lisp:extract-generation-constraints "valve"))
+           (flow-cs (gethash :flow constraints)))
+      ;; Should have two constraints: one for open (> 0), one for closed (= 0)
+      (is (= 2 (length flow-cs))))))
+
+(test constraint-aware-generation-simple
+  "Default generator uses invariant constraints — no custom generator needed"
+  (with-fresh-specs
+    (mcp-lisp:defentity account ()
+      (balance number :required t))
+    (mcp-lisp:definvariant non-negative
+      :on account
+      :check (>= (account-balance account) 0))
+    ;; Without constraint extraction, ~50% would fail.
+    ;; With extraction, all should pass.
+    (let ((results (mcp-lisp:run-pbt :trials 200)))
+      (is (= 0 (getf (first results) :failed))))))
+
+(test constraint-aware-generation-state-dependent
+  "Default generator handles state-dependent constraints"
+  (with-fresh-specs
+    (mcp-lisp:defentity machine ()
+      (state (member :on :off) :default :off)
+      (output number :default 0)
+      (min-output number :required t)
+      (max-output number :required t))
+    (mcp-lisp:definvariant off-means-zero
+      :on machine
+      :check (if (not (eq (getf machine :state) :on))
+                 (= (getf machine :output) 0)
+                 t))
+    (mcp-lisp:definvariant on-bounded
+      :on machine
+      :check (if (eq (getf machine :state) :on)
+                 (and (>= (getf machine :output) (getf machine :min-output))
+                      (<= (getf machine :output) (getf machine :max-output)))
+                 t))
+    (mcp-lisp:definvariant capacity-valid
+      :on machine
+      :check (and (> (getf machine :max-output) 0)
+                  (>= (getf machine :min-output) 0)
+                  (< (getf machine :min-output) (getf machine :max-output))))
+    (let ((results (mcp-lisp:run-pbt :trials 200)))
+      (is (= 0 (getf (first results) :failed))))))
+
+(test constraint-aware-generation-member-conditional
+  "Default generator handles member-conditional constraints"
+  (with-fresh-specs
+    (mcp-lisp:defentity vehicle ()
+      (fuel (member :electric :gas :diesel))
+      (emissions number :required t))
+    (mcp-lisp:definvariant emissions-by-fuel
+      :on vehicle
+      :check (if (member (getf vehicle :fuel) '(:electric))
+                 (= (getf vehicle :emissions) 0)
+                 (> (getf vehicle :emissions) 0)))
+    (let ((results (mcp-lisp:run-pbt :trials 200)))
+      (is (= 0 (getf (first results) :failed))))))

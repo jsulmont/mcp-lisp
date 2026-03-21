@@ -202,7 +202,8 @@
                 #:defgenerator
                 #:ensure-entity-accessors
                 #:check-invariants
-                #:run-pbt)
+                #:run-pbt
+                #:extract-generation-constraints)
   ;; Export everything
   (:export ;; Core
    #:+protocol-version+
@@ -376,6 +377,7 @@
    #:defgenerator
    #:ensure-entity-accessors
    #:check-invariants
-   #:run-pbt))
+   #:run-pbt
+   #:extract-generation-constraints))
 
 (in-package #:mcp-lisp/main)
