@@ -47,9 +47,24 @@ Generate random entity instances and check invariants automatically:
 
 This will generate random instances for every entity that has invariants, check all applicable invariants, and report counterexamples on failure. Use `(check-invariants "entity-name" instance)` for targeted checking and `(generate-instance "entity-name")` to produce test data.
 
+#### Invariant-aware generation
+
+The default generator automatically extracts constraints from invariant `:check` forms to produce valid instances. It handles:
+
+- **Constant bounds**: `(>= field 0)`, `(< field 100)` → narrows numeric range
+- **Field ordering**: `(< min-output max-output)` → generates in dependency order
+- **Scaled references**: `(>= min-output (* 0.5 max-output))` → computes bound from other field
+- **Conditional constraints**: `(if (eq state :online) (>= output min-output) t)` → applies bounds only when condition holds
+- **Member conditions**: `(if (member fuel '(:hydro :wind :solar)) (= emissions 0) (> emissions 0))`
+- **Disjunctive state patterns**: `(or (and (eq state :idle) (= rate 0)) (and (eq state :charging) (< rate 0)))` → per-state constraints
+
+Member/enum fields are generated first, then numeric fields in topologically sorted dependency order. A retry loop (10 attempts) catches constraints too complex for static extraction.
+
+Use `(extract-generation-constraints "entity-name")` to inspect what the extractor found.
+
 #### Custom generators
 
-The default generator picks each field independently, which can't satisfy cross-field invariants (e.g. "suspended implies margin < 0.5"). Use `defgenerator` to register a custom generator that enforces these dependencies:
+For constraints the extractor can't handle (complex arithmetic across multiple fields, iterative computations), use `defgenerator` as an escape hatch:
 
 ```lisp
 (defgenerator trader (overrides)
@@ -61,7 +76,7 @@ The default generator picks each field independently, which can't satisfy cross-
 ```
 
 - `defgenerator` registers a generator function for an entity. It receives `overrides` (an alist of `(keyword . value)` or NIL) and must return a plist.
-- `default-generate-instance` is the original field-by-field generator — use it as a base, then fix up cross-field dependencies.
+- `default-generate-instance` is the constraint-aware generator — use it as a base, then fix up remaining dependencies.
 - `generate-value` is available for generating individual typed values (e.g. `(generate-value 'number :min 0.0 :max 10.0)`).
 - `clear-specs` also clears registered generators.
 
