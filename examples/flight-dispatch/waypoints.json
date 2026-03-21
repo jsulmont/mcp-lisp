@@ -1,0 +1,732 @@
+{
+  "waypoints": [
+    {
+      "id": "AGARD",
+      "identifier": "AGARD",
+      "name": "AGARD",
+      "lat": 39.043581,
+      "lon": -76.069761,
+      "elevation": 0,
+      "type": "fix"
+    },
+    {
+      "id": "ATR",
+      "identifier": "ATR",
+      "name": "Waterloo VOR",
+      "lat": 38.809813,
+      "lon": -75.211326,
+      "elevation": 0,
+      "type": "navaid"
+    },
+    {
+      "id": "BROSS",
+      "identifier": "BROSS",
+      "name": "BROSS",
+      "lat": 39.191222,
+      "lon": -75.880522,
+      "elevation": 0,
+      "type": "fix"
+    },
+    {
+      "id": "BUZRD",
+      "identifier": "BUZRD",
+      "name": "BUZRD",
+      "lat": 41.546078,
+      "lon": -70.964081,
+      "elevation": 0,
+      "type": "fix"
+    },
+    {
+      "id": "CAM",
+      "identifier": "CAM",
+      "name": "Cambridge VOR",
+      "lat": 42.994289,
+      "lon": -73.344019,
+      "elevation": 0,
+      "type": "navaid"
+    },
+    {
+      "id": "CAMRN",
+      "identifier": "CAMRN",
+      "name": "CAMRN",
+      "lat": 40.017303,
+      "lon": -73.861058,
+      "elevation": 0,
+      "type": "fix"
+    },
+    {
+      "id": "COATE",
+      "identifier": "COATE",
+      "name": "COATE",
+      "lat": 41.136228,
+      "lon": -74.695167,
+      "elevation": 0,
+      "type": "fix"
+    },
+    {
+      "id": "DKK",
+      "identifier": "DKK",
+      "name": "Dunkirk VOR",
+      "lat": 42.490558,
+      "lon": -79.274098,
+      "elevation": 0,
+      "type": "navaid"
+    },
+    {
+      "id": "DONIL",
+      "identifier": "DONIL",
+      "name": "DONIL",
+      "lat": 39.076511,
+      "lon": -75.305256,
+      "elevation": 0,
+      "type": "fix"
+    },
+    {
+      "id": "DOXXY",
+      "identifier": "DOXXY",
+      "name": "DOXXY",
+      "lat": 42.1225,
+      "lon": -84.473611,
+      "elevation": 0,
+      "type": "fix"
+    },
+    {
+      "id": "DUFEE",
+      "identifier": "DUFEE",
+      "name": "DUFEE",
+      "lat": 42.112472,
+      "lon": -87.063333,
+      "elevation": 0,
+      "type": "fix"
+    },
+    {
+      "id": "EBAKE",
+      "identifier": "EBAKE",
+      "name": "EBAKE",
+      "lat": 42.279361,
+      "lon": -87.063333,
+      "elevation": 0,
+      "type": "fix"
+    },
+    {
+      "id": "ERAVE",
+      "identifier": "ERAVE",
+      "name": "ERAVE",
+      "lat": 46.909722,
+      "lon": -123.401667,
+      "elevation": 0,
+      "type": "fix"
+    },
+    {
+      "id": "ETCHY",
+      "identifier": "ETCHY",
+      "name": "ETCHY",
+      "lat": 39.091111,
+      "lon": -123.134722,
+      "elevation": 0,
+      "type": "fix"
+    },
+    {
+      "id": "FLASK",
+      "identifier": "FLASK",
+      "name": "FLASK",
+      "lat": 37.017756,
+      "lon": -80.316283,
+      "elevation": 0,
+      "type": "fix"
+    },
+    {
+      "id": "FNT",
+      "identifier": "FNT",
+      "name": "Flint VOR",
+      "lat": 42.966772,
+      "lon": -83.746968,
+      "elevation": 0,
+      "type": "navaid"
+    },
+    {
+      "id": "HAAKK",
+      "identifier": "HAAKK",
+      "name": "HAAKK",
+      "lat": 42.133333,
+      "lon": -85.033333,
+      "elevation": 0,
+      "type": "fix"
+    },
+    {
+      "id": "HONID",
+      "identifier": "HONID",
+      "name": "HONID",
+      "lat": 31.647308,
+      "lon": -84.395167,
+      "elevation": 0,
+      "type": "fix"
+    },
+    {
+      "id": "HYLND",
+      "identifier": "HYLND",
+      "name": "HYLND",
+      "lat": 42.780867,
+      "lon": -71.2753,
+      "elevation": 0,
+      "type": "fix"
+    },
+    {
+      "id": "JHW",
+      "identifier": "JHW",
+      "name": "Jamestown VOR",
+      "lat": 42.188609,
+      "lon": -79.121305,
+      "elevation": 0,
+      "type": "navaid"
+    },
+    {
+      "id": "KATL",
+      "identifier": "KATL",
+      "name": "Hartsfield-Jackson Atlanta Intl",
+      "lat": 33.6367,
+      "lon": -84.4281,
+      "elevation": 1026,
+      "type": "airport"
+    },
+    {
+      "id": "KAYYS",
+      "identifier": "KAYYS",
+      "name": "KAYYS",
+      "lat": 42.884433,
+      "lon": -84.580667,
+      "elevation": 0,
+      "type": "fix"
+    },
+    {
+      "id": "KBOS",
+      "identifier": "KBOS",
+      "name": "Boston Logan Intl",
+      "lat": 42.3631,
+      "lon": -71.0064,
+      "elevation": 20,
+      "type": "airport"
+    },
+    {
+      "id": "KDCA",
+      "identifier": "KDCA",
+      "name": "Reagan Washington National",
+      "lat": 38.8521,
+      "lon": -77.0377,
+      "elevation": 15,
+      "type": "airport"
+    },
+    {
+      "id": "KELLN",
+      "identifier": "KELLN",
+      "name": "KELLN",
+      "lat": 34.525894,
+      "lon": -82.171367,
+      "elevation": 0,
+      "type": "fix"
+    },
+    {
+      "id": "KIAD",
+      "identifier": "KIAD",
+      "name": "Washington Dulles Intl",
+      "lat": 38.9445,
+      "lon": -77.4558,
+      "elevation": 313,
+      "type": "airport"
+    },
+    {
+      "id": "KIWII",
+      "identifier": "KIWII",
+      "name": "KIWII",
+      "lat": 36.582475,
+      "lon": -78.667756,
+      "elevation": 0,
+      "type": "fix"
+    },
+    {
+      "id": "KJFK",
+      "identifier": "KJFK",
+      "name": "John F Kennedy Intl",
+      "lat": 40.6399,
+      "lon": -73.7787,
+      "elevation": 13,
+      "type": "airport"
+    },
+    {
+      "id": "KLAX",
+      "identifier": "KLAX",
+      "name": "Los Angeles Intl",
+      "lat": 33.9425,
+      "lon": -118.4081,
+      "elevation": 128,
+      "type": "airport"
+    },
+    {
+      "id": "KMIA",
+      "identifier": "KMIA",
+      "name": "Miami Intl",
+      "lat": 25.7959,
+      "lon": -80.287,
+      "elevation": 9,
+      "type": "airport"
+    },
+    {
+      "id": "KNUKK",
+      "identifier": "KNUKK",
+      "name": "KNUKK",
+      "lat": 38.896192,
+      "lon": -74.757403,
+      "elevation": 0,
+      "type": "fix"
+    },
+    {
+      "id": "KORD",
+      "identifier": "KORD",
+      "name": "Chicago O'Hare Intl",
+      "lat": 41.9742,
+      "lon": -87.9073,
+      "elevation": 672,
+      "type": "airport"
+    },
+    {
+      "id": "KSEA",
+      "identifier": "KSEA",
+      "name": "Seattle-Tacoma Intl",
+      "lat": 47.4502,
+      "lon": -122.3088,
+      "elevation": 433,
+      "type": "airport"
+    },
+    {
+      "id": "KSFO",
+      "identifier": "KSFO",
+      "name": "San Francisco Intl",
+      "lat": 37.6213,
+      "lon": -122.379,
+      "elevation": 13,
+      "type": "airport"
+    },
+    {
+      "id": "LAFLN",
+      "identifier": "LAFLN",
+      "name": "LAFLN",
+      "lat": 38.790944,
+      "lon": -75.513256,
+      "elevation": 0,
+      "type": "fix"
+    },
+    {
+      "id": "LAIRI",
+      "identifier": "LAIRI",
+      "name": "LAIRI",
+      "lat": 31.963406,
+      "lon": -82.552011,
+      "elevation": 0,
+      "type": "fix"
+    },
+    {
+      "id": "LARZZ",
+      "identifier": "LARZZ",
+      "name": "LARZZ",
+      "lat": 32.379742,
+      "lon": -82.978103,
+      "elevation": 0,
+      "type": "fix"
+    },
+    {
+      "id": "LOGGR",
+      "identifier": "LOGGR",
+      "name": "LOGGR",
+      "lat": 42.144325,
+      "lon": -86.111506,
+      "elevation": 0,
+      "type": "fix"
+    },
+    {
+      "id": "LUCKK",
+      "identifier": "LUCKK",
+      "name": "LUCKK",
+      "lat": 32.300347,
+      "lon": -84.408139,
+      "elevation": 0,
+      "type": "fix"
+    },
+    {
+      "id": "MERIT",
+      "identifier": "MERIT",
+      "name": "MERIT",
+      "lat": 41.38195,
+      "lon": -73.137431,
+      "elevation": 0,
+      "type": "fix"
+    },
+    {
+      "id": "MLBEC",
+      "identifier": "MLBEC",
+      "name": "MLBEC",
+      "lat": 38.874772,
+      "lon": -122.958989,
+      "elevation": 0,
+      "type": "fix"
+    },
+    {
+      "id": "PADDE",
+      "identifier": "PADDE",
+      "name": "PADDE",
+      "lat": 42.285833,
+      "lon": -84.474444,
+      "elevation": 0,
+      "type": "fix"
+    },
+    {
+      "id": "PANZE",
+      "identifier": "PANZE",
+      "name": "PANZE",
+      "lat": 39.675994,
+      "lon": -74.168181,
+      "elevation": 0,
+      "type": "fix"
+    },
+    {
+      "id": "PONCT",
+      "identifier": "PONCT",
+      "name": "PONCT",
+      "lat": 42.746897,
+      "lon": -73.813353,
+      "elevation": 0,
+      "type": "fix"
+    },
+    {
+      "id": "POSTS",
+      "identifier": "POSTS",
+      "name": "POSTS",
+      "lat": 42.3,
+      "lon": -85.033333,
+      "elevation": 0,
+      "type": "fix"
+    },
+    {
+      "id": "RBV",
+      "identifier": "RBV",
+      "name": "Robbinsville VOR",
+      "lat": 40.202402,
+      "lon": -74.495026,
+      "elevation": 0,
+      "type": "navaid"
+    },
+    {
+      "id": "SADDE",
+      "identifier": "SADDE",
+      "name": "SADDE",
+      "lat": 34.038994,
+      "lon": -118.764633,
+      "elevation": 0,
+      "type": "fix"
+    },
+    {
+      "id": "SEY",
+      "identifier": "SEY",
+      "name": "Sandy Point VOR",
+      "lat": 41.167436,
+      "lon": -71.576086,
+      "elevation": 0,
+      "type": "navaid"
+    },
+    {
+      "id": "SHRKS",
+      "identifier": "SHRKS",
+      "name": "SHRKS",
+      "lat": 30.623119,
+      "lon": -81.766425,
+      "elevation": 0,
+      "type": "fix"
+    },
+    {
+      "id": "SOSIC",
+      "identifier": "SOSIC",
+      "name": "SOSIC",
+      "lat": 42.229753,
+      "lon": -83.490828,
+      "elevation": 0,
+      "type": "fix"
+    },
+    {
+      "id": "SSOXS",
+      "identifier": "SSOXS",
+      "name": "SSOXS",
+      "lat": 41.836839,
+      "lon": -70.746183,
+      "elevation": 0,
+      "type": "fix"
+    },
+    {
+      "id": "STYMY",
+      "identifier": "STYMY",
+      "name": "STYMY",
+      "lat": 28.036736,
+      "lon": -81.151519,
+      "elevation": 0,
+      "type": "fix"
+    },
+    {
+      "id": "SVM",
+      "identifier": "SVM",
+      "name": "Salem VOR",
+      "lat": 42.408869,
+      "lon": -83.594188,
+      "elevation": 0,
+      "type": "navaid"
+    },
+    {
+      "id": "SWANN",
+      "identifier": "SWANN",
+      "name": "SWANN",
+      "lat": 39.151467,
+      "lon": -76.228872,
+      "elevation": 0,
+      "type": "fix"
+    },
+    {
+      "id": "VTU",
+      "identifier": "VTU",
+      "name": "Ventura VOR",
+      "lat": 34.115059,
+      "lon": -119.049493,
+      "elevation": 0,
+      "type": "navaid"
+    },
+    {
+      "id": "WAVES",
+      "identifier": "WAVES",
+      "name": "WAVES",
+      "lat": 37.587094,
+      "lon": -77.447786,
+      "elevation": 0,
+      "type": "fix"
+    },
+    {
+      "id": "WISMO",
+      "identifier": "WISMO",
+      "name": "WISMO",
+      "lat": 42.315628,
+      "lon": -86.095283,
+      "elevation": 0,
+      "type": "fix"
+    },
+    {
+      "id": "WLKES",
+      "identifier": "WLKES",
+      "name": "WLKES",
+      "lat": 41.272936,
+      "lon": -75.689333,
+      "elevation": 0,
+      "type": "fix"
+    },
+    {
+      "id": "ZIZZI",
+      "identifier": "ZIZZI",
+      "name": "ZIZZI",
+      "lat": 38.940683,
+      "lon": -74.528967,
+      "elevation": 0,
+      "type": "fix"
+    }
+  ],
+  "routes": [
+    {
+      "id": "R01",
+      "from": "KJFK",
+      "to": "KBOS",
+      "waypoints": [
+        "KJFK",
+        "MERIT",
+        "KBOS"
+      ]
+    },
+    {
+      "id": "R02",
+      "from": "KBOS",
+      "to": "KJFK",
+      "waypoints": [
+        "KBOS",
+        "SSOXS",
+        "BUZRD",
+        "SEY",
+        "KJFK"
+      ]
+    },
+    {
+      "id": "R03",
+      "from": "KJFK",
+      "to": "KORD",
+      "waypoints": [
+        "KJFK",
+        "COATE",
+        "KAYYS",
+        "KORD"
+      ]
+    },
+    {
+      "id": "R04",
+      "from": "KORD",
+      "to": "KJFK",
+      "waypoints": [
+        "KORD",
+        "DUFEE",
+        "LOGGR",
+        "HAAKK",
+        "DOXXY",
+        "SOSIC",
+        "JHW",
+        "WLKES",
+        "KJFK"
+      ]
+    },
+    {
+      "id": "R05",
+      "from": "KJFK",
+      "to": "KIAD",
+      "waypoints": [
+        "KJFK",
+        "RBV",
+        "KIAD"
+      ]
+    },
+    {
+      "id": "R06",
+      "from": "KIAD",
+      "to": "KJFK",
+      "waypoints": [
+        "KIAD",
+        "AGARD",
+        "DONIL",
+        "PANZE",
+        "CAMRN",
+        "KJFK"
+      ]
+    },
+    {
+      "id": "R07",
+      "from": "KBOS",
+      "to": "KDCA",
+      "waypoints": [
+        "KBOS",
+        "SSOXS",
+        "ZIZZI",
+        "KNUKK",
+        "ATR",
+        "LAFLN",
+        "KDCA"
+      ]
+    },
+    {
+      "id": "R08",
+      "from": "KDCA",
+      "to": "KBOS",
+      "waypoints": [
+        "KDCA",
+        "SWANN",
+        "BROSS",
+        "KJFK",
+        "KBOS"
+      ]
+    },
+    {
+      "id": "R09",
+      "from": "KBOS",
+      "to": "KORD",
+      "waypoints": [
+        "KBOS",
+        "HYLND",
+        "CAM",
+        "FNT",
+        "KORD"
+      ]
+    },
+    {
+      "id": "R10",
+      "from": "KORD",
+      "to": "KBOS",
+      "waypoints": [
+        "KORD",
+        "EBAKE",
+        "WISMO",
+        "POSTS",
+        "PADDE",
+        "SVM",
+        "DKK",
+        "PONCT",
+        "KBOS"
+      ]
+    },
+    {
+      "id": "R11",
+      "from": "KDCA",
+      "to": "KATL",
+      "waypoints": [
+        "KDCA",
+        "FLASK",
+        "KATL"
+      ]
+    },
+    {
+      "id": "R12",
+      "from": "KATL",
+      "to": "KDCA",
+      "waypoints": [
+        "KATL",
+        "KELLN",
+        "KIWII",
+        "WAVES",
+        "KDCA"
+      ]
+    },
+    {
+      "id": "R13",
+      "from": "KATL",
+      "to": "KMIA",
+      "waypoints": [
+        "KATL",
+        "LUCKK",
+        "HONID",
+        "KMIA"
+      ]
+    },
+    {
+      "id": "R14",
+      "from": "KMIA",
+      "to": "KATL",
+      "waypoints": [
+        "KMIA",
+        "STYMY",
+        "SHRKS",
+        "LAIRI",
+        "LARZZ",
+        "KATL"
+      ]
+    },
+    {
+      "id": "R15",
+      "from": "KSEA",
+      "to": "KSFO",
+      "waypoints": [
+        "KSEA",
+        "ERAVE",
+        "ETCHY",
+        "MLBEC",
+        "KSFO"
+      ]
+    },
+    {
+      "id": "R16",
+      "from": "KSFO",
+      "to": "KLAX",
+      "waypoints": [
+        "KSFO",
+        "VTU",
+        "SADDE",
+        "KLAX"
+      ]
+    }
+  ]
+}
