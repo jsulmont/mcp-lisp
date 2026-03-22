@@ -438,6 +438,12 @@ Returns NIL if SYM is not a recognized accessor."
                         (when (third spec) (walk (third spec))))
                       (dolist (body-form (cddr f))
                         (walk body-form)))
+                     ;; (cond (test body...)...) — walk all test and body forms
+                     ((eq head 'cond)
+                      (dolist (clause (cdr f))
+                        (when (consp clause)
+                          (dolist (form clause)
+                            (walk form)))))
                      (t
                       (when (symbolp head)
                         (pushnew head syms :test #'eq))
@@ -503,6 +509,12 @@ Handles QUOTE, LAMBDA, LET, LET* binding forms."
                          (when (third spec) (walk (third spec) (cons var env)))
                          (dolist (body-form (cddr f))
                            (walk body-form (cons var env)))))
+                      ;; (cond (test body...)...) — walk all test and body forms
+                      ((eq head 'cond)
+                       (dolist (clause (cdr f))
+                         (when (consp clause)
+                           (dolist (form clause)
+                             (walk form env)))))
                       (t
                        ;; head is function position — skip it, walk args
                        (dolist (arg (cdr f))
@@ -860,12 +872,13 @@ if, member, lambda, let, call."
           (intern (string-upcase (gethash "name" ast))))
 
          ((string= node "field")
-          (let ((obj (ast-to-form (gethash "object" ast)))
-                (field (gethash "field" ast)))
-            (if (symbolp obj)
-                (list (intern (format nil "~A-~A"
-                                      (symbol-name obj) (string-upcase field)))
-                      obj)
+          (let* ((obj (ast-to-form (gethash "object" ast)))
+                 (field (gethash "field" ast))
+                 (accessor (when (symbolp obj)
+                             (intern (format nil "~A-~A"
+                                             (symbol-name obj) (string-upcase field))))))
+            (if (and accessor (entity-accessor-p accessor))
+                (list accessor obj)
                 (list 'getf obj (intern (string-upcase field) :keyword)))))
 
          ((string= node "compare")

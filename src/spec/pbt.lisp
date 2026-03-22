@@ -777,8 +777,10 @@ OVERRIDES is a plist mapping binding keywords to pre-built instances."
                 ;; Generate N instances (no parent)
                 (let ((n (if (= emin emax) emin
                              (+ emin (random (1+ (- emax emin)))))))
-                  (if (= n 1)
+                  (if (and (= n 1) (= emin emax))
+                      ;; Singleton: cardinality spec is exactly 1
                       (setf (getf result binding) (generate-instance entity-name))
+                      ;; Plural: always a list, even if n happens to be 1
                       (let ((instances nil))
                         (dotimes (i n)
                           (push (generate-instance entity-name) instances))
