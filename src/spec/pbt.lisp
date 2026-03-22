@@ -68,11 +68,13 @@ Optional MIN and MAX constrain numeric types."
     ((eq type-spec 'number)
      (let ((lo (or min -1000.0))
            (hi (or max 1000.0)))
-       (+ lo (random (- hi lo)))))
+       (if (<= hi lo) lo
+           (+ lo (random (- hi lo))))))
     ((eq type-spec 'integer)
      (let ((lo (or (and min (ceiling min)) -100))
            (hi (or (and max (floor max)) 100)))
-       (+ lo (random (1+ (- hi lo))))))
+       (if (> lo hi) lo
+           (+ lo (random (1+ (- hi lo)))))))
     ((and (consp type-spec) (eq (car type-spec) 'member))
      (let ((choices (cdr type-spec)))
        (nth (random (length choices)) choices)))

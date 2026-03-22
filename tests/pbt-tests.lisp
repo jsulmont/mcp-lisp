@@ -184,6 +184,19 @@
       (is (>= v 5))
       (is (<= v 20)))))
 
+(test generate-value-degenerate-number-range
+  "generate-value with min=max does not crash (was: random 0.0 error)"
+  (dotimes (i 100)
+    (let ((v (mcp-lisp:generate-value 'number :min 5.0 :max 5.0)))
+      (is (= v 5.0)))))
+
+(test generate-value-degenerate-integer-range
+  "generate-value with ceiling(min) > floor(max) does not crash"
+  (dotimes (i 100)
+    (let ((v (mcp-lisp:generate-value 'integer :min 1.5 :max 1.9)))
+      (is (integerp v))
+      (is (= v 2)))))
+
 (test generate-instance-uses-field-constraints
   "generate-instance respects :min/:max on fields"
   (with-fresh-specs
