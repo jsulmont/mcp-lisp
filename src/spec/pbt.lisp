@@ -9,11 +9,13 @@
                 #:*entities*
                 #:*invariants*
                 #:*generators*
+                #:*generator-sources*
                 #:*variants*
                 #:*config*
                 #:*current-config*
                 #:*scenarios*
                 #:*scenario-generators*
+                #:*scenario-generator-sources*
                 #:config
                 #:describe-entity
                 #:list-entities
@@ -588,6 +590,8 @@ are available within the body for building instances.
        (setf (gethash ,key *generators*)
              (lambda (,overrides-var)
                ,@body))
+       (setf (gethash ,key *generator-sources*)
+             '(defgenerator ,entity-name (,overrides-var) ,@body))
        ',entity-name)))
 
 ;;; ---------------------------------------------------------------------------
@@ -804,6 +808,8 @@ mapping binding keywords to instances (or lists of instances)."
        (setf (gethash ,key *scenario-generators*)
              (lambda (,overrides-var)
                ,@body))
+       (setf (gethash ,key *scenario-generator-sources*)
+             '(defscenario-generator ,scenario-name (,overrides-var) ,@body))
        ',scenario-name)))
 
 ;;; ---------------------------------------------------------------------------

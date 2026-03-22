@@ -15,6 +15,7 @@
            #:*rules*
            #:*invariants*
            #:*generators*
+           #:*generator-sources*
            #:*variants*
            #:*config*
            #:*current-config*
@@ -42,6 +43,7 @@
            ;; Scenarios
            #:*scenarios*
            #:*scenario-generators*
+           #:*scenario-generator-sources*
            #:defscenario
            #:list-scenarios
            #:describe-scenario
@@ -66,6 +68,7 @@
 (defvar *rules* (make-hash-table :test #'equal))
 (defvar *invariants* (make-hash-table :test #'equal))
 (defvar *generators* (make-hash-table :test #'equal))
+(defvar *generator-sources* (make-hash-table :test #'equal))
 (defvar *variants* (make-hash-table :test #'equal))
 (defvar *config* nil
   "Config field specs — a list of (NAME TYPE &key ...) forms set by DEFCONFIG.")
@@ -73,6 +76,7 @@
   "Currently active config plist, bound dynamically during PBT.")
 (defvar *scenarios* (make-hash-table :test #'equal))
 (defvar *scenario-generators* (make-hash-table :test #'equal))
+(defvar *scenario-generator-sources* (make-hash-table :test #'equal))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Known keywords for validation at macroexpand time
@@ -340,9 +344,11 @@ Bound dynamically during PBT via *CURRENT-CONFIG*."
   (clrhash *rules*)
   (clrhash *invariants*)
   (clrhash *generators*)
+  (clrhash *generator-sources*)
   (clrhash *variants*)
   (clrhash *scenarios*)
   (clrhash *scenario-generators*)
+  (clrhash *scenario-generator-sources*)
   (setf *config* nil)
   (setf *current-config* nil)
   (values))
@@ -799,7 +805,7 @@ if, member, lambda, let, call."
                                         (third form)))))
          ;; (let/let* ((var init)...) body)
          ((member head '(let let*))
-          (dict "node" "let"
+          (dict "node" (if (eq head 'let*) "let*" "let")
                 "bindings" (coerce
                             (mapcar (lambda (b)
                                       (if (consp b)
@@ -917,8 +923,8 @@ if, member, lambda, let, call."
                      (gethash "params" ast))
                 (ast-to-form (gethash "body" ast))))
 
-         ((string= node "let")
-          (list 'let
+         ((or (string= node "let") (string= node "let*"))
+          (list (if (string= node "let*") 'let* 'let)
                 (map 'list (lambda (b)
                              (list (intern (string-upcase (gethash "name" b)))
                                    (ast-to-form (gethash "value" b))))
@@ -1032,18 +1038,40 @@ if, member, lambda, let, call."
                                    (getf plist :entities))
                            'vector)))
 
+(defun form-to-compact-string (form)
+  "Serialize a Lisp form to a minimal string with no extra whitespace."
+  (let ((*print-pretty* nil)
+        (*print-right-margin* most-positive-fixnum)
+        (*print-case* :downcase))
+    (prin1-to-string form)))
+
 (defun specs-to-json ()
-  "Serialize all spec registries to a JSON string."
+  "Serialize all spec registries to a JSON string.
+Includes generator source forms as compact s-expression strings."
   (let ((entities (dict))
         (rules (dict))
         (invariants (dict))
         (variants (dict))
-        (scenarios (dict)))
+        (scenarios (dict))
+        (generators (dict))
+        (scenario-generators (dict)))
     (maphash (lambda (k v) (setf (gethash k entities) (entity-to-ht v))) *entities*)
     (maphash (lambda (k v) (setf (gethash k rules) (rule-to-ht v))) *rules*)
     (maphash (lambda (k v) (setf (gethash k invariants) (invariant-to-ht v))) *invariants*)
     (maphash (lambda (k v) (setf (gethash k variants) (variant-to-ht v))) *variants*)
     (maphash (lambda (k v) (setf (gethash k scenarios) (scenario-to-ht v))) *scenarios*)
+    (maphash (lambda (k v)
+               (declare (ignore v))
+               (let ((src (gethash k *generator-sources*)))
+                 (when src
+                   (setf (gethash k generators) (form-to-compact-string src)))))
+             *generators*)
+    (maphash (lambda (k v)
+               (declare (ignore v))
+               (let ((src (gethash k *scenario-generator-sources*)))
+                 (when src
+                   (setf (gethash k scenario-generators) (form-to-compact-string src)))))
+             *scenario-generators*)
     (let ((result (dict "entities" entities
                         "rules" rules
                         "invariants" invariants
@@ -1052,6 +1080,10 @@ if, member, lambda, let, call."
       (when *config*
         (setf (gethash "config" result)
               (dict "fields" (coerce (mapcar #'field-to-ht *config*) 'vector))))
+      (when (plusp (hash-table-count generators))
+        (setf (gethash "generators" result) generators))
+      (when (plusp (hash-table-count scenario-generators))
+        (setf (gethash "scenario-generators" result) scenario-generators))
       (encode-json result))))
 
 ;;; ---------------------------------------------------------------------------
@@ -1178,6 +1210,19 @@ Merges with existing specs — call CLEAR-SPECS first for a clean import."
                                              (intern (string-upcase per) :keyword)))))
                             (or (gethash "entities" ht) #())))))
          scenarios)))
+    ;; Generators — eval stringified source forms
+    (let ((gens (gethash "generators" data)))
+      (when gens
+        (maphash (lambda (key src-string)
+                   (declare (ignore key))
+                   (eval (read-from-string src-string)))
+                 gens)))
+    (let ((sgens (gethash "scenario-generators" data)))
+      (when sgens
+        (maphash (lambda (key src-string)
+                   (declare (ignore key))
+                   (eval (read-from-string src-string)))
+                 sgens)))
     (values)))
 
 ;;; ---------------------------------------------------------------------------
