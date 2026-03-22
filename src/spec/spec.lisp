@@ -419,8 +419,23 @@ Returns NIL if SYM is not a recognized accessor."
                    (cond
                      ;; (quote ...) — skip entirely
                      ((eq head 'quote) nil)
+                     ;; #'fn / (function fn) — not a call
+                     ((eq head 'function) nil)
                      ;; (lambda ...) — walk body, skip params
                      ((eq head 'lambda)
+                      (dolist (body-form (cddr f))
+                        (walk body-form)))
+                     ;; (let/let* ((var init)...) body) — walk inits and body, skip var names
+                     ((member head '(let let*))
+                      (dolist (b (second f))
+                        (when (consp b) (walk (second b))))
+                      (dolist (body-form (cddr f))
+                        (walk body-form)))
+                     ;; (dolist (var list [result]) body...) — walk list, result, body
+                     ((eq head 'dolist)
+                      (let ((spec (second f)))
+                        (walk (second spec))
+                        (when (third spec) (walk (third spec))))
                       (dolist (body-form (cddr f))
                         (walk body-form)))
                      (t
@@ -461,6 +476,8 @@ Handles QUOTE, LAMBDA, LET, LET* binding forms."
                   (let ((head (car f)))
                     (cond
                       ((eq head 'quote) nil)
+                      ;; #'fn / (function fn) — not a variable reference
+                      ((eq head 'function) nil)
                       ((eq head 'lambda)
                        ;; bind params, walk body
                        (let ((params (remove-if (lambda (s) (member s '(&optional &rest &key &body)))
@@ -478,6 +495,14 @@ Handles QUOTE, LAMBDA, LET, LET* binding forms."
                              (push var new-env)))
                          (dolist (body-form (cddr f))
                            (walk body-form new-env))))
+                      ;; (dolist (var list [result]) body...) — bind loop var
+                      ((eq head 'dolist)
+                       (let* ((spec (second f))
+                              (var (first spec)))
+                         (walk (second spec) env)
+                         (when (third spec) (walk (third spec) (cons var env)))
+                         (dolist (body-form (cddr f))
+                           (walk body-form (cons var env)))))
                       (t
                        ;; head is function position — skip it, walk args
                        (dolist (arg (cdr f))
@@ -775,6 +800,30 @@ if, member, lambda, let, call."
                 "body" (form-to-ast (if (cdddr form)
                                         `(progn ,@(cddr form))
                                         (third form)))))
+         ;; (cond (test1 body1) ... [(t else)]) → nested if
+         ((eq head 'cond)
+          (labels ((cond-to-if (clauses)
+                     (cond
+                       ((null clauses) (form-to-ast nil))
+                       ((eq (caar clauses) t)
+                        (form-to-ast (if (cddar clauses)
+                                         `(progn ,@(cdar clauses))
+                                         (cadar clauses))))
+                       ((null (cdr clauses))
+                        (dict "node" "if"
+                              "test" (form-to-ast (caar clauses))
+                              "then" (form-to-ast (if (cddar clauses)
+                                                      `(progn ,@(cdar clauses))
+                                                      (cadar clauses)))
+                              "else" (form-to-ast nil)))
+                       (t
+                        (dict "node" "if"
+                              "test" (form-to-ast (caar clauses))
+                              "then" (form-to-ast (if (cddar clauses)
+                                                      `(progn ,@(cdar clauses))
+                                                      (cadar clauses)))
+                              "else" (cond-to-if (cdr clauses)))))))
+            (cond-to-if (cdr form))))
          ;; entity accessor: (entity-field entity) → field node
          ((and (symbolp head) (= (length form) 2) (decompose-accessor head))
           (multiple-value-bind (entity-key field-name) (decompose-accessor head)
