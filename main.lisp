@@ -196,6 +196,15 @@
                 #:specs-to-json
                 #:json-to-specs
                 #:spec-json-schema)
+  ;; Spec transitions
+  (:import-from #:mcp-lisp/src/spec/transitions
+                #:detect-state-fields
+                #:extract-transitions
+                #:unreachable-states
+                #:terminal-states
+                #:dead-end-states
+                #:analyze-state-machine
+                #:validate-transitions)
   ;; Spec PBT
   (:import-from #:mcp-lisp/src/spec/pbt
                 #:generate-value
@@ -374,6 +383,14 @@
    #:specs-to-json
    #:json-to-specs
    #:spec-json-schema
+   ;; Spec transitions
+   #:detect-state-fields
+   #:extract-transitions
+   #:unreachable-states
+   #:terminal-states
+   #:dead-end-states
+   #:analyze-state-machine
+   #:validate-transitions
    ;; Spec PBT
    #:generate-value
    #:generate-instance
