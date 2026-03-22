@@ -195,13 +195,22 @@ Example: `(zones (1 3) grid-zone)` → `zones` is always a list; use `(every (la
 
 1. User describes domain in natural language
 2. Define entities, variants, config, rules, invariants via `eval_lisp`
-3. Define scenarios with `defscenario` for cross-entity invariants
-4. **Write `defscenario-generator` when cross-entity invariants require correlated data.** If any scenario invariant computes aggregates across bindings (e.g. "sum of generator outputs = interval total", "zone transfers net to zero"), random independent generation will always fail. Write a custom scenario generator that constructs instances top-down so derived/aggregate fields are consistent. See [Custom scenario generators](#custom-scenario-generators).
-5. Run `(validate-specs)` to catch dangling references, non-exhaustive variant handling, and invalid scenario bindings
-6. Run `(validate-transitions)` to check state machines for unreachable/dead-end states
-7. Run `(run-pbt)` to test per-entity invariants against random data (and random configs)
-8. Run `(run-pbt :scenario "name")` to test cross-entity invariants
-9. Generate code artifacts (SQL, API routes, types, validation) from the spec
-10. Export with `(specs-to-json)` and save to a file
+3. **Inspect state machines.** For any entity with `(member ...)` state fields and rules, run `(analyze-state-machine "entity")`. Check for:
+   - **Dead-end states**: non-terminal states with no outgoing transitions — usually a missing rule.
+   - **Unreachable states**: states no transition leads to — either the state is unused or an inbound rule is missing.
+   - **Missing terminal states**: if every real-world process has an end state, the machine should have at least one terminal state.
+   - Fix gaps in rules/states before proceeding — the state graph shapes what invariants and scenarios are needed.
+4. **Audit for missing cross-entity invariants.** After per-entity invariants are defined, check for gaps:
+   - **Bounding fields**: Any field whose purpose is to constrain another entity (e.g. `max-notional` on a risk-limit that should bound a trader's positions, `capacity` on a warehouse that should bound stored items) MUST have a cross-entity scenario testing that relationship. A per-entity invariant on such a field (e.g. "max-notional > 0") is necessary but not sufficient — the aggregate constraint is the one that matters.
+   - **Relations as signals**: For every `has-many` relation, ask: does the parent entity have fields that should bound aggregate properties of the children (count, sum, max)? If yes, that's a scenario.
+   - **Rules that reach across entities**: If a rule's `:requires` or `:let` accesses fields from related entities, the constraint it checks likely has a corresponding aggregate invariant that should hold at rest, not just at transition time.
+   - If this audit finds gaps, define the scenarios before proceeding.
+5. Define scenarios with `defscenario` for cross-entity invariants
+6. **Write `defscenario-generator` when cross-entity invariants require correlated data.** If any scenario invariant computes aggregates across bindings (e.g. "sum of generator outputs = interval total", "transfers net to zero"), random independent generation will always fail. Write a custom scenario generator that constructs instances top-down so derived/aggregate fields are consistent. See [Custom scenario generators](#custom-scenario-generators).
+7. Run `(validate-specs)` to catch dangling references, non-exhaustive variant handling, and invalid scenario bindings
+8. Run `(run-pbt)` to test per-entity invariants against random data (and random configs)
+9. Run `(run-pbt :scenario "name")` to test cross-entity invariants
+10. Generate code artifacts (SQL, API routes, types, validation) from the spec
+11. Export with `(specs-to-json)` and save to a file
 
 Always spec first, code second.
