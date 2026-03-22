@@ -20,7 +20,7 @@
   (let ((registry (make-hash-table :test #'equal)))
     (mcp-lisp/src/primitives/tools/registry:register-tool
      "test-tool" "Test tool description"
-     (mcp-lisp:make-ht) (lambda (s sess args) "result")
+     (mcp-lisp:make-ht) (lambda (s sess args) (declare (ignore s sess args)) "result")
      :registry registry)
     (let* ((result (mcp-lisp/src/server/dispatcher:handle-tools-list-result registry))
            (tools (gethash "tools" result)))
@@ -72,6 +72,7 @@
      "echo" "Echoes input"
      (mcp-lisp:make-ht)
      (lambda (server session args)
+       (declare (ignore server session))
        (mcp-lisp:content-vector (format nil "Echo: ~a" (gethash "message" args))))
      :registry registry)
     (let* ((params (mcp-lisp:make-ht "name" "echo"
@@ -141,7 +142,7 @@
         (session (mcp-lisp/src/server/state:make-session)))
     (mcp-lisp/src/primitives/resources/registry:register-resource
      "test://data" "Test Resource" "A test resource"
-     (lambda (server session) "test content")
+     (lambda (server session) (declare (ignore server session)) "test content")
      :mime-type "application/json"
      :registry registry)
     (let* ((params (mcp-lisp:make-ht "uri" "test://data"))
@@ -160,6 +161,7 @@
     (mcp-lisp/src/primitives/resources/registry:register-resource-template
      "data://{id}" "Data Resource" "A data resource"
      (lambda (server session params)
+       (declare (ignore server session))
        (format nil "data for ~a" (cdr (assoc "id" params :test #'string=))))
      :mime-type "text/plain"
      :registry registry)
@@ -178,7 +180,7 @@
         (session (mcp-lisp/src/server/state:make-session)))
     (mcp-lisp/src/primitives/resources/registry:register-resource
      "test://plain" "Plain Resource" "A plain resource"
-     (lambda (server session) "plain content")
+     (lambda (server session) (declare (ignore server session)) "plain content")
      :registry registry)  ; No :mime-type
     (let* ((params (mcp-lisp:make-ht "uri" "test://plain"))
            (result (mcp-lisp/src/server/dispatcher:handle-resources-read-result

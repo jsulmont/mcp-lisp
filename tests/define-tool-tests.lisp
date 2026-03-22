@@ -68,6 +68,7 @@
                     "optional_arg" (mcp-lisp:make-ht "type" "string"))
       "required" #("required_arg"))
      (lambda (server session args)
+       (declare (ignore server session))
        ;; This handler uses multiple-value-bind pattern
        (multiple-value-bind (req-val req-present)
            (gethash "required_arg" args)
