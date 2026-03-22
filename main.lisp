@@ -178,9 +178,15 @@
                 #:*entities*
                 #:*rules*
                 #:*invariants*
+                #:*variants*
+                #:*config*
+                #:*current-config*
                 #:defentity
                 #:defrule
                 #:definvariant
+                #:defvariant
+                #:defconfig
+                #:config
                 #:list-entities
                 #:describe-entity
                 #:entity-fields
@@ -189,6 +195,11 @@
                 #:describe-rule
                 #:list-invariants
                 #:describe-invariant
+                #:list-variants
+                #:describe-variant
+                #:entity-variants
+                #:describe-config
+                #:config-fields
                 #:clear-specs
                 #:validate-specs
                 #:form-to-ast
@@ -212,6 +223,8 @@
                 #:default-generate-instance
                 #:defgenerator
                 #:ensure-entity-accessors
+                #:ensure-variant-accessors
+                #:generate-config
                 #:check-invariants
                 #:run-pbt
                 #:extract-generation-constraints)
@@ -365,9 +378,15 @@
    #:*entities*
    #:*rules*
    #:*invariants*
+   #:*variants*
+   #:*config*
+   #:*current-config*
    #:defentity
    #:defrule
    #:definvariant
+   #:defvariant
+   #:defconfig
+   #:config
    #:list-entities
    #:describe-entity
    #:entity-fields
@@ -376,6 +395,11 @@
    #:describe-rule
    #:list-invariants
    #:describe-invariant
+   #:list-variants
+   #:describe-variant
+   #:entity-variants
+   #:describe-config
+   #:config-fields
    #:clear-specs
    #:validate-specs
    #:form-to-ast
@@ -397,6 +421,8 @@
    #:default-generate-instance
    #:defgenerator
    #:ensure-entity-accessors
+   #:ensure-variant-accessors
+   #:generate-config
    #:check-invariants
    #:run-pbt
    #:extract-generation-constraints))

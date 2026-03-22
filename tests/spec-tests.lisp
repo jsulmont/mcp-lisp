@@ -13,7 +13,10 @@
 (defmacro with-fresh-specs (&body body)
   `(let ((mcp-lisp/src/spec/spec::*entities* (make-hash-table :test #'equal))
          (mcp-lisp/src/spec/spec::*rules* (make-hash-table :test #'equal))
-         (mcp-lisp/src/spec/spec::*invariants* (make-hash-table :test #'equal)))
+         (mcp-lisp/src/spec/spec::*invariants* (make-hash-table :test #'equal))
+         (mcp-lisp/src/spec/spec::*variants* (make-hash-table :test #'equal))
+         (mcp-lisp/src/spec/spec::*config* nil)
+         (mcp-lisp/src/spec/spec::*current-config* nil))
      ,@body))
 
 ;;; ---------------------------------------------------------------------------
@@ -331,6 +334,174 @@
     (is (null (mcp-lisp:validate-specs)))))
 
 ;;; ---------------------------------------------------------------------------
+;;; defvariant
+;;; ---------------------------------------------------------------------------
+
+(test defvariant-stores-metadata
+  "defvariant stores parent, discriminator, value, and fields"
+  (with-fresh-specs
+    (mcp-lisp:defentity node ()
+      (id string :required t)
+      (kind (member :branch :leaf)))
+    (mcp-lisp:defvariant branch (node :kind :branch)
+      (children list :required t))
+    (let ((v (mcp-lisp:describe-variant "branch")))
+      (is (not (null v)))
+      (is (eq 'branch (getf v :name)))
+      (is (string= "node" (getf v :parent)))
+      (is (eq :kind (getf v :discriminator)))
+      (is (eq :branch (getf v :value)))
+      (is (= 1 (length (getf v :fields))))
+      (is (equal '(children list :required t) (first (getf v :fields)))))))
+
+(test defvariant-return-value
+  "defvariant returns the variant name symbol"
+  (with-fresh-specs
+    (is (eq 'leaf (mcp-lisp:defvariant leaf (node :kind :leaf)
+                    (data list :required t))))))
+
+(test list-variants-populated
+  "list-variants returns names of all registered variants"
+  (with-fresh-specs
+    (mcp-lisp:defvariant branch (node :kind :branch)
+      (children list))
+    (mcp-lisp:defvariant leaf (node :kind :leaf)
+      (data list))
+    (let ((vs (mcp-lisp:list-variants)))
+      (is (= 2 (length vs)))
+      (is (member "branch" vs :test #'string=))
+      (is (member "leaf" vs :test #'string=)))))
+
+(test entity-variants-returns-children
+  "entity-variants returns variant keys for a given entity"
+  (with-fresh-specs
+    (mcp-lisp:defentity node ()
+      (id string)
+      (kind (member :branch :leaf)))
+    (mcp-lisp:defvariant branch (node :kind :branch)
+      (children list))
+    (mcp-lisp:defvariant leaf (node :kind :leaf)
+      (data list))
+    (let ((vs (mcp-lisp:entity-variants "node")))
+      (is (= 2 (length vs)))
+      (is (member "branch" vs :test #'string=))
+      (is (member "leaf" vs :test #'string=)))))
+
+(test entity-variants-empty-for-non-variant-entity
+  "entity-variants returns nil for entity without variants"
+  (with-fresh-specs
+    (mcp-lisp:defentity user () (id string))
+    (is (null (mcp-lisp:entity-variants "user")))))
+
+(test clear-specs-clears-variants
+  "clear-specs removes variants"
+  (with-fresh-specs
+    (mcp-lisp:defvariant branch (node :kind :branch)
+      (children list))
+    (is (= 1 (length (mcp-lisp:list-variants))))
+    (mcp-lisp:clear-specs)
+    (is (null (mcp-lisp:list-variants)))))
+
+(test validate-specs-variant-invariant-ok
+  "validate-specs accepts invariants whose :on is a variant name"
+  (with-fresh-specs
+    (mcp-lisp:defentity node ()
+      (id string)
+      (kind (member :branch :leaf)))
+    (mcp-lisp:defvariant branch (node :kind :branch)
+      (children list :required t))
+    (mcp-lisp:definvariant branch-has-children
+      :on branch
+      :check (> (length (branch-children branch)) 0))
+    (is (null (mcp-lisp:validate-specs)))))
+
+(test validate-specs-exhaustiveness-warning
+  "validate-specs warns when rules handle some but not all variants"
+  (with-fresh-specs
+    (mcp-lisp:defentity node ()
+      (id string)
+      (kind (member :branch :leaf)))
+    (mcp-lisp:defvariant branch (node :kind :branch)
+      (children list))
+    (mcp-lisp:defvariant leaf (node :kind :leaf)
+      (data list))
+    ;; Rule handles :branch but not :leaf
+    (mcp-lisp:defrule process-branch
+      :when (node :kind :branch)
+      :ensures ((not (null (node-id node)))))
+    (let ((warnings (mcp-lisp:validate-specs)))
+      (is (= 1 (length warnings)))
+      (is (search "LEAF" (first warnings))))))
+
+(test validate-specs-exhaustiveness-no-warning-when-all-handled
+  "validate-specs does not warn when all variants are handled"
+  (with-fresh-specs
+    (mcp-lisp:defentity node ()
+      (id string)
+      (kind (member :branch :leaf)))
+    (mcp-lisp:defvariant branch (node :kind :branch)
+      (children list))
+    (mcp-lisp:defvariant leaf (node :kind :leaf)
+      (data list))
+    (mcp-lisp:defrule process-branch
+      :when (node :kind :branch)
+      :ensures ((not (null (node-id node)))))
+    (mcp-lisp:defrule process-leaf
+      :when (node :kind :leaf)
+      :ensures ((not (null (node-id node)))))
+    (is (null (mcp-lisp:validate-specs)))))
+
+;;; ---------------------------------------------------------------------------
+;;; defconfig
+;;; ---------------------------------------------------------------------------
+
+(test defconfig-stores-fields
+  "defconfig stores field specs in *config*"
+  (with-fresh-specs
+    (mcp-lisp:defconfig
+      (max-leverage number :default 10.0 :min 1.0 :max 100.0)
+      (margin-call-threshold number :default 0.5 :min 0.0 :max 1.0)
+      (allow-short-selling boolean :default t))
+    (let ((fields (mcp-lisp:config-fields)))
+      (is (= 3 (length fields)))
+      (is (eq 'max-leverage (first (first fields))))
+      (is (eq 'number (second (first fields))))
+      (is (= 10.0 (getf (cddr (first fields)) :default))))))
+
+(test describe-config-returns-fields
+  "describe-config returns config field specs"
+  (with-fresh-specs
+    (mcp-lisp:defconfig
+      (max-retries integer :default 3 :min 1 :max 10))
+    (is (= 1 (length (mcp-lisp:describe-config))))
+    (is (eq 'integer (second (first (mcp-lisp:describe-config)))))))
+
+(test defconfig-nil-when-not-defined
+  "describe-config returns NIL when no config defined"
+  (with-fresh-specs
+    (is (null (mcp-lisp:describe-config)))))
+
+(test clear-specs-clears-config
+  "clear-specs resets config"
+  (with-fresh-specs
+    (mcp-lisp:defconfig (x number :default 1.0))
+    (is (not (null (mcp-lisp:config-fields))))
+    (mcp-lisp:clear-specs)
+    (is (null (mcp-lisp:config-fields)))))
+
+(test validate-specs-config-accessor-ok
+  "validate-specs does not warn about (config :key) in invariant :check"
+  (with-fresh-specs
+    (mcp-lisp:defentity position ()
+      (leverage number :required t))
+    (mcp-lisp:defconfig
+      (max-leverage number :default 10.0 :min 1.0 :max 100.0))
+    (mcp-lisp:definvariant leverage-limit
+      :on position
+      :check (<= (position-leverage position) (mcp-lisp:config :max-leverage)))
+    (is (null (mcp-lisp:validate-specs)))))
+
+;;; ---------------------------------------------------------------------------
 ;;; JSON export
 ;;; ---------------------------------------------------------------------------
 
@@ -501,6 +672,88 @@
       (mcp-lisp:json-to-specs json)
       (is (equal '(user) (getf (mcp-lisp:describe-entity "admin") :supers))))))
 
+(test json-round-trip-variants
+  "json-to-specs restores variants from exported JSON"
+  (with-fresh-specs
+    (mcp-lisp:defentity node ()
+      (id string :required t)
+      (kind (member :branch :leaf)))
+    (mcp-lisp:defvariant branch (node :kind :branch)
+      (children list :required t))
+    (mcp-lisp:defvariant leaf (node :kind :leaf)
+      (data list))
+    (let ((json (mcp-lisp:specs-to-json)))
+      (mcp-lisp:clear-specs)
+      (is (null (mcp-lisp:list-variants)))
+      (mcp-lisp:json-to-specs json)
+      ;; Variants restored
+      (is (= 2 (length (mcp-lisp:list-variants))))
+      (let ((branch (mcp-lisp:describe-variant "branch")))
+        (is (not (null branch)))
+        (is (string= "node" (getf branch :parent)))
+        (is (eq :kind (getf branch :discriminator)))
+        (is (eq :branch (getf branch :value)))
+        (is (= 1 (length (getf branch :fields))))
+        (is (eq 'children (first (first (getf branch :fields)))))))))
+
+(test specs-to-json-variants
+  "specs-to-json serializes variants"
+  (with-fresh-specs
+    (mcp-lisp:defvariant branch (node :kind :branch)
+      (children list :required t))
+    (let* ((json (mcp-lisp:specs-to-json))
+           (data (mcp-lisp:decode-json json))
+           (variants (gethash "variants" data))
+           (branch (gethash "branch" variants)))
+      (is (string= "branch" (gethash "name" branch)))
+      (is (string= "node" (gethash "parent" branch)))
+      (is (string= "kind" (gethash "discriminator" branch)))
+      (is (string= "branch" (gethash "value" branch)))
+      (let ((fields (gethash "fields" branch)))
+        (is (= 1 (length fields)))
+        (is (string= "children" (gethash "name" (aref fields 0))))))))
+
+(test json-round-trip-config
+  "json-to-specs restores config from exported JSON"
+  (with-fresh-specs
+    (mcp-lisp:defconfig
+      (max-leverage number :default 10.0 :min 1.0 :max 100.0)
+      (allow-short boolean :default t))
+    (let ((json (mcp-lisp:specs-to-json)))
+      (mcp-lisp:clear-specs)
+      (is (null (mcp-lisp:config-fields)))
+      (mcp-lisp:json-to-specs json)
+      (is (= 2 (length (mcp-lisp:config-fields))))
+      (let ((first-field (first (mcp-lisp:config-fields))))
+        (is (eq 'max-leverage (first first-field)))
+        (is (eq 'number (second first-field)))
+        (is (= 1.0 (getf (cddr first-field) :min)))
+        (is (= 100.0 (getf (cddr first-field) :max)))))))
+
+(test specs-to-json-config
+  "specs-to-json serializes config fields"
+  (with-fresh-specs
+    (mcp-lisp:defconfig
+      (max-leverage number :default 10.0 :min 1.0 :max 100.0))
+    (let* ((json (mcp-lisp:specs-to-json))
+           (data (mcp-lisp:decode-json json))
+           (config (gethash "config" data))
+           (fields (gethash "fields" config)))
+      (is (= 1 (length fields)))
+      (let ((f (aref fields 0)))
+        (is (string= "max-leverage" (gethash "name" f)))
+        (is (string= "number" (gethash "type" f)))
+        (is (= 1.0 (gethash "min" f)))
+        (is (= 100.0 (gethash "max" f)))))))
+
+(test specs-to-json-no-config-key-when-empty
+  "specs-to-json omits config key when no config defined"
+  (with-fresh-specs
+    (mcp-lisp:defentity user () (id string))
+    (let* ((json (mcp-lisp:specs-to-json))
+           (data (mcp-lisp:decode-json json)))
+      (is (null (gethash "config" data))))))
+
 ;;; ---------------------------------------------------------------------------
 ;;; JSON Schema
 ;;; ---------------------------------------------------------------------------
@@ -515,7 +768,9 @@
     (let ((props (gethash "properties" schema)))
       (is (hash-table-p (gethash "entities" props)))
       (is (hash-table-p (gethash "rules" props)))
-      (is (hash-table-p (gethash "invariants" props))))
+      (is (hash-table-p (gethash "invariants" props)))
+      (is (hash-table-p (gethash "variants" props)))
+      (is (hash-table-p (gethash "config" props))))
     ;; $defs contains expr and binding schemas
     (let ((defs (gethash "$defs" schema)))
       (is (hash-table-p defs))

@@ -15,10 +15,15 @@
            #:*rules*
            #:*invariants*
            #:*generators*
+           #:*variants*
+           #:*config*
+           #:*current-config*
            ;; Macros
            #:defentity
            #:defrule
            #:definvariant
+           #:defvariant
+           #:defconfig
            ;; Introspection
            #:list-entities
            #:describe-entity
@@ -28,6 +33,12 @@
            #:describe-rule
            #:list-invariants
            #:describe-invariant
+           #:list-variants
+           #:describe-variant
+           #:entity-variants
+           #:describe-config
+           #:config-fields
+           #:config
            ;; Utilities
            #:clear-specs
            #:validate-specs
@@ -49,6 +60,11 @@
 (defvar *rules* (make-hash-table :test #'equal))
 (defvar *invariants* (make-hash-table :test #'equal))
 (defvar *generators* (make-hash-table :test #'equal))
+(defvar *variants* (make-hash-table :test #'equal))
+(defvar *config* nil
+  "Config field specs — a list of (NAME TYPE &key ...) forms set by DEFCONFIG.")
+(defvar *current-config* nil
+  "Currently active config plist, bound dynamically during PBT.")
 
 ;;; ---------------------------------------------------------------------------
 ;;; Known keywords for validation at macroexpand time
@@ -145,6 +161,62 @@ Returns (values fields relations derived)."
        ',name)))
 
 ;;; ---------------------------------------------------------------------------
+;;; defvariant
+;;; ---------------------------------------------------------------------------
+
+(defmacro defvariant (name (parent discriminator value) &body fields)
+  "Define a variant of an entity (sum type arm). Stores metadata in *variants*.
+
+  (defvariant branch (node :kind :branch)
+    (children list :required t))"
+  (let ((key (string-downcase (string name)))
+        (parent-key (string-downcase (string parent))))
+    ;; Validate field keywords at macroexpand time
+    (dolist (field fields)
+      (let ((kwargs (cddr field)))
+        (loop for (k) on kwargs by #'cddr
+              unless (member k +known-field-keys+)
+                do (error "defvariant: unknown field keyword ~S in field ~S" k field))))
+    `(progn
+       (setf (gethash ,key *variants*)
+             (list :name ',name
+                   :parent ,parent-key
+                   :discriminator ',discriminator
+                   :value ',value
+                   :fields ',fields))
+       ',name)))
+
+;;; ---------------------------------------------------------------------------
+;;; defconfig
+;;; ---------------------------------------------------------------------------
+
+(defmacro defconfig (&body fields)
+  "Define a global typed configuration. Single config per spec set.
+
+  (defconfig
+    (max-leverage number :default 10.0 :min 1.0 :max 100.0)
+    (margin-call-threshold number :default 0.5 :min 0.0 :max 1.0)
+    (allow-short-selling boolean :default t))"
+  ;; Validate field keywords at macroexpand time
+  (dolist (field fields)
+    (let ((kwargs (cddr field)))
+      (loop for (k) on kwargs by #'cddr
+            unless (member k +known-field-keys+)
+              do (error "defconfig: unknown field keyword ~S in field ~S" k field))))
+  `(progn
+     (setf *config* ',fields)
+     (values)))
+
+;;; ---------------------------------------------------------------------------
+;;; Config accessor
+;;; ---------------------------------------------------------------------------
+
+(defun config (key)
+  "Read config parameter KEY from the current config instance.
+Bound dynamically during PBT via *CURRENT-CONFIG*."
+  (getf *current-config* key))
+
+;;; ---------------------------------------------------------------------------
 ;;; Introspection
 ;;; ---------------------------------------------------------------------------
 
@@ -180,6 +252,32 @@ Returns (values fields relations derived)."
   "Return the plist for invariant NAME (string-downcased), or NIL."
   (gethash (string-downcase (string name)) *invariants*))
 
+(defun list-variants ()
+  "Return a list of registered variant name strings."
+  (loop for k being the hash-keys of *variants* collect k))
+
+(defun describe-variant (name)
+  "Return the plist for variant NAME (string-downcased), or NIL."
+  (gethash (string-downcase (string name)) *variants*))
+
+(defun entity-variants (entity-name)
+  "Return variant name strings for entity ENTITY-NAME."
+  (let ((key (string-downcase (string entity-name)))
+        (result nil))
+    (maphash (lambda (vkey vplist)
+               (when (string= key (getf vplist :parent))
+                 (push vkey result)))
+             *variants*)
+    (nreverse result)))
+
+(defun describe-config ()
+  "Return the config field specs, or NIL if no config defined."
+  *config*)
+
+(defun config-fields ()
+  "Return the config field specs (alias for DESCRIBE-CONFIG)."
+  *config*)
+
 ;;; ---------------------------------------------------------------------------
 ;;; Utilities
 ;;; ---------------------------------------------------------------------------
@@ -190,6 +288,9 @@ Returns (values fields relations derived)."
   (clrhash *rules*)
   (clrhash *invariants*)
   (clrhash *generators*)
+  (clrhash *variants*)
+  (setf *config* nil)
+  (setf *current-config* nil)
   (values))
 
 (defun entity-accessor-p (sym)
@@ -210,6 +311,26 @@ Returns (values fields relations derived)."
                                      (getf plist :relations)))
                        (return-from entity-accessor-p t))))))
              *entities*)
+    nil))
+
+(defun config-accessor-p (sym)
+  "Return T if SYM is the CONFIG accessor function (any package)."
+  (string-equal (symbol-name sym) "CONFIG"))
+
+(defun variant-accessor-p (sym)
+  "Return T if SYM looks like a variant accessor (VARIANT-FIELD)."
+  (let ((name (string-downcase (symbol-name sym))))
+    (maphash (lambda (vkey vplist)
+               (let ((prefix (concatenate 'string vkey "-")))
+                 (when (and (> (length name) (length prefix))
+                            (string= prefix name :end2 (length prefix)))
+                   (let ((suffix (subseq name (length prefix))))
+                     (when (some (lambda (f)
+                                   (string= suffix
+                                            (string-downcase (symbol-name (first f)))))
+                                 (getf vplist :fields))
+                       (return-from variant-accessor-p t))))))
+             *variants*)
     nil))
 
 (defun decompose-accessor (sym)
@@ -263,6 +384,8 @@ Returns NIL if SYM is not a recognized accessor."
                 (macro-function sym)
                 (fboundp sym)
                 (entity-accessor-p sym)
+                (variant-accessor-p sym)
+                (config-accessor-p sym)
                 (keywordp sym))
       (push (format nil "~A: undefined function ~A" context-label sym)
             warnings)))
@@ -317,13 +440,17 @@ Handles QUOTE, LAMBDA, LET, LET* binding forms."
   warnings)
 
 (defun validate-specs ()
-  "Check that all rules/invariants reference known entities and that
+  "Check that all rules/invariants reference known entities (or variants) and that
 forms in :check/:requires/:ensures/:let use resolvable symbols.
+Also warns about non-exhaustive variant handling in rules.
 Returns a list of warning strings. Empty list = all clear."
   (let ((entity-keys (loop for k being the hash-keys of *entities* collect k))
+        (variant-keys (loop for k being the hash-keys of *variants* collect k))
         (warnings nil))
     (flet ((known-entity-p (sym)
-             (member (string-downcase (string sym)) entity-keys :test #'string=)))
+             (member (string-downcase (string sym)) entity-keys :test #'string=))
+           (known-variant-p (sym)
+             (member (string-downcase (string sym)) variant-keys :test #'string=)))
       ;; Check rules — :when car should name an entity
       (maphash (lambda (key plist)
                  (let ((when-clause (getf plist :when)))
@@ -333,11 +460,11 @@ Returns a list of warning strings. Empty list = all clear."
                                      key (car when-clause))
                              warnings)))))
                *rules*)
-      ;; Check invariants — :on should name an entity
+      ;; Check invariants — :on should name an entity or variant
       (maphash (lambda (key plist)
                  (let ((on (getf plist :on)))
                    (when on
-                     (unless (known-entity-p on)
+                     (unless (or (known-entity-p on) (known-variant-p on))
                        (push (format nil "invariant ~A: :on references unknown entity ~A"
                                      key on)
                              warnings)))))
@@ -384,7 +511,46 @@ Returns a list of warning strings. Empty list = all clear."
                            (check-form-symbols (second binding)
                                                (format nil "rule ~A :let" key)
                                                warnings)))))
-               *rules*))
+               *rules*)
+      ;; Check variant exhaustiveness in rules
+      ;; Build map: entity-key → (discriminator . list-of-variant-values)
+      (let ((entity-disc (make-hash-table :test #'equal)))
+        (maphash (lambda (vkey vplist)
+                   (declare (ignore vkey))
+                   (let* ((parent (getf vplist :parent))
+                          (disc (getf vplist :discriminator))
+                          (val (getf vplist :value))
+                          (entry (gethash parent entity-disc)))
+                     (if entry
+                         (push val (cdr entry))
+                         (setf (gethash parent entity-disc)
+                               (cons disc (list val))))))
+                 *variants*)
+        (maphash (lambda (ekey disc-entry)
+                   (let ((disc-field (car disc-entry))
+                         (all-values (cdr disc-entry))
+                         (handled-values nil))
+                     ;; Find rules referencing this entity's discriminator
+                     (maphash (lambda (rkey rplist)
+                                (declare (ignore rkey))
+                                (let ((when-clause (getf rplist :when)))
+                                  (when (and when-clause (consp when-clause)
+                                             (symbolp (car when-clause))
+                                             (string= (string-downcase
+                                                        (symbol-name (car when-clause)))
+                                                       ekey))
+                                    (let ((disc-val (getf (cdr when-clause) disc-field)))
+                                      (when disc-val
+                                        (pushnew disc-val handled-values :test #'eq))))))
+                              *rules*)
+                     ;; Warn only if at least one variant is handled
+                     (when handled-values
+                       (dolist (val all-values)
+                         (unless (member val handled-values :test #'eq)
+                           (push (format nil "rule exhaustiveness: entity ~A variant ~A (~A = ~A) not handled by any rule"
+                                         ekey val disc-field val)
+                                 warnings))))))
+                 entity-disc)))
     (nreverse warnings)))
 
 ;;; ---------------------------------------------------------------------------
@@ -693,17 +859,32 @@ if, member, lambda, let, call."
       (setf (gethash "check" ht) (form-to-ast (getf plist :check))))
     ht))
 
+(defun variant-to-ht (plist)
+  "Convert a variant plist to a hash table for JSON serialization."
+  (dict "name" (string-downcase (symbol-name (getf plist :name)))
+        "parent" (getf plist :parent)
+        "discriminator" (string-downcase (symbol-name (getf plist :discriminator)))
+        "value" (string-downcase (symbol-name (getf plist :value)))
+        "fields" (coerce (mapcar #'field-to-ht (getf plist :fields)) 'vector)))
+
 (defun specs-to-json ()
   "Serialize all spec registries to a JSON string."
   (let ((entities (dict))
         (rules (dict))
-        (invariants (dict)))
+        (invariants (dict))
+        (variants (dict)))
     (maphash (lambda (k v) (setf (gethash k entities) (entity-to-ht v))) *entities*)
     (maphash (lambda (k v) (setf (gethash k rules) (rule-to-ht v))) *rules*)
     (maphash (lambda (k v) (setf (gethash k invariants) (invariant-to-ht v))) *invariants*)
-    (encode-json (dict "entities" entities
-                       "rules" rules
-                       "invariants" invariants))))
+    (maphash (lambda (k v) (setf (gethash k variants) (variant-to-ht v))) *variants*)
+    (let ((result (dict "entities" entities
+                        "rules" rules
+                        "invariants" invariants
+                        "variants" variants)))
+      (when *config*
+        (setf (gethash "config" result)
+              (dict "fields" (coerce (mapcar #'field-to-ht *config*) 'vector))))
+      (encode-json result))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; JSON deserialization
@@ -789,6 +970,26 @@ Merges with existing specs — call CLEAR-SPECS first for a clean import."
                        :check (when (gethash "check" ht)
                                 (ast-to-form (gethash "check" ht))))))
          invariants)))
+    ;; Variants
+    (let ((variants (gethash "variants" data)))
+      (when variants
+        (maphash
+         (lambda (key ht)
+           (setf (gethash key *variants*)
+                 (list :name (intern (string-upcase (gethash "name" ht)))
+                       :parent (gethash "parent" ht)
+                       :discriminator (intern (string-upcase (gethash "discriminator" ht))
+                                              :keyword)
+                       :value (intern (string-upcase (gethash "value" ht)) :keyword)
+                       :fields (map 'list #'ht-to-field
+                                    (or (gethash "fields" ht) #())))))
+         variants)))
+    ;; Config
+    (let ((config-ht (gethash "config" data)))
+      (when config-ht
+        (setf *config*
+              (map 'list #'ht-to-field
+                   (or (gethash "fields" config-ht) #())))))
     (values)))
 
 ;;; ---------------------------------------------------------------------------
@@ -994,4 +1195,22 @@ Merges with existing specs — call CLEAR-SPECS first for a clean import."
                         "on" (dict "type" "string"
                                    "description" "Entity this invariant applies to")
                         "check" (dict "$ref" "#/$defs/expr"
-                                      "description" "Predicate expression"))))))))
+                                      "description" "Predicate expression"))))
+      "variants"
+      (dict "type" "object"
+            "additionalProperties"
+            (dict "type" "object"
+                  "required" (vector "name" "parent" "discriminator" "value")
+                  "properties"
+                  (dict "name" (dict "type" "string")
+                        "parent" (dict "type" "string"
+                                       "description" "Parent entity name")
+                        "discriminator" (dict "type" "string"
+                                              "description" "Field that selects this variant")
+                        "value" (dict "type" "string"
+                                      "description" "Discriminator value for this variant")
+                        "fields" (dict "type" "array" "items" field-schema))))
+      "config"
+      (dict "type" "object"
+            "properties"
+            (dict "fields" (dict "type" "array" "items" field-schema)))))))

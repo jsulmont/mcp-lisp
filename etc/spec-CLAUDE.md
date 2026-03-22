@@ -15,6 +15,23 @@ All macros are available in the sandbox with no imports:
   (:has-many orders :of order)
   (:derived display-name (lambda (u) (or (name u) (email u)))))
 
+;; Variants — discriminated unions (sum types)
+(defentity node ()
+  (id string :required t)
+  (kind (member :branch :leaf)))
+
+(defvariant branch (node :kind :branch)
+  (children list :required t))
+
+(defvariant leaf (node :kind :leaf)
+  (data list :required t))
+
+;; Config — typed configuration with defaults and ranges
+(defconfig
+  (max-leverage number :default 10.0 :min 1.0 :max 100.0)
+  (margin-call-threshold number :default 0.5 :min 0.0 :max 1.0)
+  (allow-short-selling boolean :default t))
+
 ;; Rules — state transition metadata (when/requires/ensures)
 (defrule place-order
   :when (order :state :draft)
@@ -27,6 +44,16 @@ All macros are available in the sandbox with no imports:
 (definvariant non-negative-balance
   :on account
   :check (>= (account-balance account) 0))
+
+;; Invariants can reference config via (config :key)
+(definvariant leverage-limit
+  :on position
+  :check (<= (position-leverage position) (config :max-leverage)))
+
+;; Invariants can target a specific variant
+(definvariant branch-has-children
+  :on branch
+  :check (> (length (branch-children branch)) 0))
 ```
 
 ### Querying specs
@@ -34,7 +61,9 @@ All macros are available in the sandbox with no imports:
 - `(list-entities)`, `(describe-entity name)`, `(entity-fields name)`, `(entity-relations name)`
 - `(list-rules)`, `(describe-rule name)`
 - `(list-invariants)`, `(describe-invariant name)`
-- `(validate-specs)` — catches dangling entity references in rules, invariants, and relations
+- `(list-variants)`, `(describe-variant name)`, `(entity-variants entity-name)`
+- `(describe-config)`, `(config-fields)`
+- `(validate-specs)` — catches dangling entity references, undefined functions, free variables, and non-exhaustive variant handling in rules
 - `(clear-specs)` — reset all registries
 
 ### Property-based testing
@@ -43,9 +72,16 @@ Generate random entity instances and check invariants automatically:
 
 ```lisp
 (run-pbt :trials 200)
+
+;; With config: test across random configuration space
+(run-pbt :trials 100 :config-trials 5)
 ```
 
-This will generate random instances for every entity that has invariants, check all applicable invariants, and report counterexamples on failure. Use `(check-invariants "entity-name" instance)` for targeted checking and `(generate-instance "entity-name")` to produce test data.
+This generates random instances for every entity that has invariants, checks all applicable invariants (including variant-specific ones), and reports counterexamples on failure. When `defconfig` is defined, `:config-trials` (default 5) generates random configs within declared bounds — catching specs that only hold for the default config.
+
+For entities with variants, `generate-instance` picks a random variant, sets the discriminator, and generates variant-specific fields. Invariants on the base entity apply to all variants; invariants on a variant name apply only when the discriminator matches.
+
+Use `(check-invariants "entity-name" instance)` for targeted checking and `(generate-instance "entity-name")` to produce test data.
 
 #### Invariant-aware generation
 
@@ -57,6 +93,7 @@ The default generator automatically extracts constraints from invariant `:check`
 - **Conditional constraints**: `(if (eq state :online) (>= output min-output) t)` → applies bounds only when condition holds
 - **Member conditions**: `(if (member fuel '(:hydro :wind :solar)) (= emissions 0) (> emissions 0))`
 - **Disjunctive state patterns**: `(or (and (eq state :idle) (= rate 0)) (and (eq state :charging) (< rate 0)))` → per-state constraints
+- **Config references**: `(<= (position-leverage position) (config :max-leverage))` → resolves bound from current config at generation time
 
 Member/enum fields are generated first, then numeric fields in topologically sorted dependency order. A retry loop (10 attempts) catches constraints too complex for static extraction.
 
@@ -80,6 +117,27 @@ For constraints the extractor can't handle (complex arithmetic across multiple f
 - `generate-value` is available for generating individual typed values (e.g. `(generate-value 'number :min 0.0 :max 10.0)`).
 - `clear-specs` also clears registered generators.
 
+### State machine analysis
+
+Rules with `:when`/`:ensures` patterns implicitly define state machines. The transitions module extracts and validates them:
+
+```lisp
+;; Auto-detect state fields and extract the transition graph
+(detect-state-fields "order")        ; → (:STATE)
+(extract-transitions "order")        ; → ((:from :draft :to :placed :via PLACE-ORDER :guards (...)) ...)
+
+;; Static analysis
+(analyze-state-machine "order")      ; → full analysis: states, initial, terminal, unreachable, dead-ends
+(terminal-states "order")            ; → (:filled :cancelled) — no outgoing edges
+(unreachable-states "order")         ; → states with no incoming edge (minus initial)
+(dead-end-states "order")            ; → non-terminal states stuck in a cycle
+
+;; Validation — warns about unreachable states and dead ends
+(validate-transitions)
+```
+
+A state field is a `(member ...)` field that appears as a source in at least one rule's `:when` AND as a target in at least one rule's `:ensures`. The analysis checks all entities automatically.
+
 ### JSON persistence
 
 - `(specs-to-json)` — export all specs as a JSON string (conforms to JSON Schema 2020-12)
@@ -91,10 +149,11 @@ Save specs to a file for persistence across sessions. Load them at the start of 
 ### Workflow
 
 1. User describes domain in natural language
-2. Define entities, rules, invariants via `eval_lisp`
-3. Run `(validate-specs)` to catch dangling references
-4. Run `(run-pbt)` to test invariants against random data
-5. Generate code artifacts (SQL, API routes, types, validation) from the spec
-6. Export with `(specs-to-json)` and save to a file
+2. Define entities, variants, config, rules, invariants via `eval_lisp`
+3. Run `(validate-specs)` to catch dangling references and non-exhaustive variant handling
+4. Run `(validate-transitions)` to check state machines for unreachable/dead-end states
+5. Run `(run-pbt)` to test invariants against random data (and random configs)
+6. Generate code artifacts (SQL, API routes, types, validation) from the spec
+7. Export with `(specs-to-json)` and save to a file
 
 Always spec first, code second.

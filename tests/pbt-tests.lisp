@@ -12,7 +12,10 @@
   `(let ((mcp-lisp/src/spec/spec::*entities* (make-hash-table :test #'equal))
          (mcp-lisp/src/spec/spec::*rules* (make-hash-table :test #'equal))
          (mcp-lisp/src/spec/spec::*invariants* (make-hash-table :test #'equal))
-         (mcp-lisp/src/spec/spec::*generators* (make-hash-table :test #'equal)))
+         (mcp-lisp/src/spec/spec::*generators* (make-hash-table :test #'equal))
+         (mcp-lisp/src/spec/spec::*variants* (make-hash-table :test #'equal))
+         (mcp-lisp/src/spec/spec::*config* nil)
+         (mcp-lisp/src/spec/spec::*current-config* nil))
      ,@body))
 
 ;;; ---------------------------------------------------------------------------
@@ -400,4 +403,141 @@
                  (= (getf vehicle :emissions) 0)
                  (> (getf vehicle :emissions) 0)))
     (let ((results (mcp-lisp:run-pbt :trials 200)))
+      (is (= 0 (getf (first results) :failed))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Variant generation
+;;; ---------------------------------------------------------------------------
+
+(test generate-instance-picks-variant
+  "generate-instance for entity with variants sets discriminator and adds variant fields"
+  (with-fresh-specs
+    (mcp-lisp:defentity node ()
+      (id string :required t)
+      (kind (member :branch :leaf)))
+    (mcp-lisp:defvariant branch (node :kind :branch)
+      (children list :required t))
+    (mcp-lisp:defvariant leaf (node :kind :leaf)
+      (data list :required t))
+    (mcp-lisp:ensure-entity-accessors "node")
+    (mcp-lisp:ensure-variant-accessors "branch")
+    (mcp-lisp:ensure-variant-accessors "leaf")
+    (dotimes (i 50)
+      (let ((inst (mcp-lisp:generate-instance "node")))
+        ;; Must have base fields
+        (is (stringp (getf inst :id)))
+        (is (member (getf inst :kind) '(:branch :leaf)))
+        ;; Must have variant-specific fields
+        (cond
+          ((eq (getf inst :kind) :branch)
+           (is (not (null (member :children inst)))))
+          ((eq (getf inst :kind) :leaf)
+           (is (not (null (member :data inst))))))))))
+
+(test variant-invariant-checking
+  "check-invariants applies variant-specific invariants"
+  (with-fresh-specs
+    (mcp-lisp:defentity node ()
+      (id string :required t)
+      (kind (member :branch :leaf)))
+    (mcp-lisp:defvariant branch (node :kind :branch)
+      (count integer :required t))
+    (mcp-lisp:definvariant branch-positive-count
+      :on branch
+      :check (> (branch-count branch) 0))
+    (mcp-lisp:ensure-entity-accessors "node")
+    (mcp-lisp:ensure-variant-accessors "branch")
+    ;; Branch with positive count — should pass
+    (is (null (mcp-lisp:check-invariants "node"
+               '(:id "x" :kind :branch :count 5))))
+    ;; Branch with zero count — should fail
+    (let ((violations (mcp-lisp:check-invariants "node"
+                        '(:id "x" :kind :branch :count 0))))
+      (is (= 1 (length violations)))
+      (is (string= "branch-positive-count" (first violations))))
+    ;; Leaf — variant invariant should not apply
+    (is (null (mcp-lisp:check-invariants "node"
+               '(:id "x" :kind :leaf))))))
+
+(test variant-pbt-all-pass
+  "PBT with variants and variant invariants passes when generation is correct"
+  (with-fresh-specs
+    (mcp-lisp:defentity node ()
+      (id string :required t)
+      (kind (member :branch :leaf)))
+    (mcp-lisp:defvariant branch (node :kind :branch)
+      (depth integer :required t :min 0 :max 10))
+    (mcp-lisp:defvariant leaf (node :kind :leaf)
+      (value number :required t :min 0.0 :max 100.0))
+    ;; Base invariant: id is non-empty
+    (mcp-lisp:definvariant node-has-id
+      :on node
+      :check (> (length (node-id node)) 0))
+    ;; Variant invariant: branch depth >= 0
+    (mcp-lisp:definvariant branch-depth-valid
+      :on branch
+      :check (>= (branch-depth branch) 0))
+    ;; Variant invariant: leaf value >= 0
+    (mcp-lisp:definvariant leaf-value-valid
+      :on leaf
+      :check (>= (leaf-value leaf) 0))
+    (let ((results (mcp-lisp:run-pbt :trials 200)))
+      (is (= 1 (length results)))
+      (is (= 0 (getf (first results) :failed))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Config generation
+;;; ---------------------------------------------------------------------------
+
+(test generate-config-produces-plist
+  "generate-config returns a plist with all config fields"
+  (with-fresh-specs
+    (mcp-lisp:defconfig
+      (max-leverage number :min 1.0 :max 100.0)
+      (max-positions integer :min 1 :max 1000)
+      (allow-short boolean))
+    (dotimes (i 20)
+      (let ((cfg (mcp-lisp:generate-config)))
+        (is (numberp (getf cfg :max-leverage)))
+        (is (>= (getf cfg :max-leverage) 1.0))
+        (is (< (getf cfg :max-leverage) 100.0))
+        (is (integerp (getf cfg :max-positions)))
+        (is (>= (getf cfg :max-positions) 1))
+        (is (<= (getf cfg :max-positions) 1000))))))
+
+(test config-accessor-reads-current-config
+  "config function reads from *current-config*"
+  (with-fresh-specs
+    (let ((mcp-lisp/src/spec/spec::*current-config*
+            '(:max-leverage 25.0 :margin 0.5)))
+      (is (= 25.0 (mcp-lisp:config :max-leverage)))
+      (is (= 0.5 (mcp-lisp:config :margin)))
+      (is (null (mcp-lisp:config :nonexistent))))))
+
+(test config-aware-pbt-all-pass
+  "PBT with config generates random configs and checks invariants across config space"
+  (with-fresh-specs
+    (mcp-lisp:defentity position ()
+      (leverage number :required t :min 0.0 :max 200.0))
+    (mcp-lisp:defconfig
+      (max-leverage number :default 10.0 :min 1.0 :max 100.0))
+    (mcp-lisp:definvariant leverage-bounded
+      :on position
+      :check (<= (position-leverage position) (mcp-lisp:config :max-leverage)))
+    (let ((results (mcp-lisp:run-pbt :trials 50 :config-trials 5)))
+      (is (= 1 (length results)))
+      (is (= 0 (getf (first results) :failed))))))
+
+(test config-aware-pbt-no-config-still-works
+  "run-pbt with :config-trials works normally when no config is defined"
+  (with-fresh-specs
+    (mcp-lisp:defentity account ()
+      (balance number :required t :min 0.0 :max 1000.0))
+    (mcp-lisp:definvariant non-negative
+      :on account
+      :check (>= (account-balance account) 0))
+    (let ((results (mcp-lisp:run-pbt :trials 50 :config-trials 3)))
+      (is (= 1 (length results)))
+      ;; Without config, only one round of trials
+      (is (= 50 (getf (first results) :trials)))
       (is (= 0 (getf (first results) :failed))))))

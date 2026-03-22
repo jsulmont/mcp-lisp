@@ -9,10 +9,17 @@
                 #:*entities*
                 #:*invariants*
                 #:*generators*
+                #:*variants*
+                #:*config*
+                #:*current-config*
+                #:config
                 #:describe-entity
                 #:list-entities
                 #:describe-invariant
                 #:list-invariants
+                #:describe-variant
+                #:entity-variants
+                #:list-variants
                 #:entity-fields
                 #:entity-relations)
   (:export #:generate-value
@@ -20,6 +27,8 @@
            #:default-generate-instance
            #:defgenerator
            #:ensure-entity-accessors
+           #:ensure-variant-accessors
+           #:generate-config
            #:check-invariants
            #:run-pbt
            #:extract-generation-constraints))
@@ -127,6 +136,14 @@ Returns (:field KEYWORD :factor NUMBER) or NIL."
         ((and (numberp b) (getf-field-p a entity-var))
          (list :field (getf-field-p a entity-var) :factor b))))))
 
+(defun config-ref-p (form)
+  "If FORM is (CONFIG :KEY), return the config key. Otherwise NIL."
+  (when (and (consp form) (= (length form) 2)
+             (symbolp (first form))
+             (string-equal (symbol-name (first form)) "CONFIG")
+             (keywordp (second form)))
+    (second form)))
+
 (defun extract-comparison (form entity-var)
   "Extract constraint(s) from a comparison form (OP LHS RHS).
 Returns a list of constraint plists or NIL."
@@ -163,6 +180,24 @@ Returns a list of constraint plists or NIL."
                  (<  (list :field lf :max-field rf :exclusive t))
                  (<= (list :field lf :max-field rf))
                  (=  (list :field lf :eq-field rf)))))
+        ;; (op (getf e :f) (config :key))
+        ((and lf (config-ref-p rhs))
+         (let ((ck (config-ref-p rhs)))
+           (list (case op
+                   (>  (list :field lf :min-config ck :exclusive t))
+                   (>= (list :field lf :min-config ck))
+                   (<  (list :field lf :max-config ck :exclusive t))
+                   (<= (list :field lf :max-config ck))
+                   (=  (list :field lf :eq-config ck))))))
+        ;; (op (config :key) (getf e :f))
+        ((and rf (config-ref-p lhs))
+         (let ((ck (config-ref-p lhs)))
+           (list (case op
+                   (>  (list :field rf :max-config ck :exclusive t))
+                   (>= (list :field rf :max-config ck))
+                   (<  (list :field rf :min-config ck :exclusive t))
+                   (<= (list :field rf :min-config ck))
+                   (=  (list :field rf :eq-config ck))))))
         ;; (op (getf e :f) (* factor (getf e :other)))
         ((and lf (extract-scaled-ref rhs entity-var))
          (let* ((scaled (extract-scaled-ref rhs entity-var))
@@ -350,7 +385,23 @@ compute effective generation bounds. Returns (:min N :max N :eq N)."
           (when (getf c :eq-field)
             (let* ((ref (getf instance (getf c :eq-field)))
                    (factor (or (getf c :factor) 1)))
-              (when ref (setf fixed (* ref factor))))))))
+              (when ref (setf fixed (* ref factor)))))
+          ;; Config-reference bounds
+          (when (getf c :min-config)
+            (let ((ref (config (getf c :min-config)))
+                  (exclusive (getf c :exclusive)))
+              (when ref
+                (let ((bound (+ ref (if exclusive 0.001 0))))
+                  (setf lo (if lo (max lo bound) bound))))))
+          (when (getf c :max-config)
+            (let ((ref (config (getf c :max-config)))
+                  (exclusive (getf c :exclusive)))
+              (when ref
+                (let ((bound (- ref (if exclusive 0.001 0))))
+                  (setf hi (if hi (min hi bound) bound))))))
+          (when (getf c :eq-config)
+            (let ((ref (config (getf c :eq-config))))
+              (when ref (setf fixed ref)))))))
     (list :min lo :max hi :eq fixed)))
 
 ;;; ---------------------------------------------------------------------------
@@ -454,24 +505,62 @@ with bounds derived from invariant check forms."
             (setf (getf instance key) (funcall fn instance))))))
     instance))
 
+(defun generate-config ()
+  "Generate a random config plist from *CONFIG* field specs."
+  (let ((result nil))
+    (dolist (field *config*)
+      (let* ((fname (first field))
+             (ftype (second field))
+             (key (field-keyword fname))
+             (fc (field-constraints field)))
+        (push (generate-value ftype :min (getf fc :min) :max (getf fc :max))
+              result)
+        (push key result)))
+    result))
+
+(defun generate-variant-fields (variant instance)
+  "Generate variant-specific fields and merge into INSTANCE plist."
+  (dolist (field (getf variant :fields))
+    (let* ((fname (first field))
+           (ftype (second field))
+           (key (field-keyword fname))
+           (fc (field-constraints field)))
+      (setf (getf instance key)
+            (generate-value ftype :min (getf fc :min) :max (getf fc :max)))))
+  instance)
+
 (defun generate-instance (entity-name &optional overrides)
   "Generate a random instance of ENTITY-NAME as a plist.
 If a custom generator is registered via DEFGENERATOR, uses that.
-Otherwise uses constraint-aware default generation with a retry loop."
+Otherwise uses constraint-aware default generation with a retry loop.
+For entities with variants, picks a random variant and generates
+variant-specific fields."
   (let ((custom (gethash (string-downcase (string entity-name)) *generators*)))
     (if custom
         (funcall custom overrides)
-        ;; Constraint-aware generation with retry
-        (let ((best nil)
-              (best-n most-positive-fixnum))
+        (let* ((variants (entity-variants entity-name))
+               (best nil)
+               (best-n most-positive-fixnum))
           (dotimes (attempt 10)
-            (let* ((inst (default-generate-instance entity-name overrides))
-                   (violations (check-invariants entity-name inst))
+            (let* ((variant (when variants
+                              (describe-variant
+                               (nth (random (length variants)) variants))))
+                   (eff-overrides
+                     (if variant
+                         (cons (cons (getf variant :discriminator)
+                                     (getf variant :value))
+                               (or overrides nil))
+                         overrides))
+                   (inst (default-generate-instance entity-name eff-overrides))
+                   (full-inst (if variant
+                                  (generate-variant-fields variant inst)
+                                  inst))
+                   (violations (check-invariants entity-name full-inst))
                    (n (length violations)))
               (when (< n best-n)
-                (setf best inst best-n n))
+                (setf best full-inst best-n n))
               (when (zerop n)
-                (return-from generate-instance inst))))
+                (return-from generate-instance full-inst))))
           best))))
 
 (defmacro defgenerator (entity-name (overrides-var) &body body)
@@ -525,6 +614,22 @@ Symbols are interned in *PACKAGE* (the caller's dynamic package)."
                 (let ((k key)) (lambda (instance) (getf instance k)))))))
     entity-name))
 
+(defun ensure-variant-accessors (variant-name)
+  "Define accessor functions for a variant's fields.
+Accessor names follow the pattern VARIANT-FIELD, e.g. BRANCH-CHILDREN."
+  (let* ((variant (describe-variant variant-name))
+         (variant-sym (getf variant :name))
+         (fields (getf variant :fields)))
+    (dolist (field fields)
+      (let* ((field-sym (first field))
+             (accessor (intern (format nil "~A-~A"
+                                       (symbol-name variant-sym)
+                                       (symbol-name field-sym))))
+             (key (field-keyword field-sym)))
+        (setf (symbol-function accessor)
+              (let ((k key)) (lambda (instance) (getf instance k))))))
+    variant-name))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Invariant checking
 ;;; ---------------------------------------------------------------------------
@@ -539,10 +644,21 @@ Symbols are interned in *PACKAGE* (the caller's dynamic package)."
                              (symbol-name entity-sym))
             collect (list inv-name inv))))
 
+(defun variant-invariants-for (variant-name)
+  "Return a list of (inv-name inv-plist) for invariants whose :on matches VARIANT-NAME."
+  (let ((vname (string-downcase (string variant-name))))
+    (loop for inv-name in (list-invariants)
+          for inv = (describe-invariant inv-name)
+          when (string-equal (string-downcase (symbol-name (getf inv :on)))
+                             vname)
+            collect (list inv-name inv))))
+
 (defun check-invariants (entity-name instance)
   "Check all invariants for ENTITY-NAME against INSTANCE.
+Also checks variant-specific invariants when the discriminator matches.
 Returns a list of violated invariant name strings. Empty list = all pass."
   (let ((violations nil))
+    ;; Base entity invariants
     (dolist (entry (invariants-for entity-name))
       (destructuring-bind (inv-name inv) entry
         (let ((on-sym (getf inv :on))
@@ -554,26 +670,49 @@ Returns a list of violated invariant name strings. Empty list = all pass."
                   (push inv-name violations)))
             (error (e)
               (push (format nil "~A (error: ~A)" inv-name e) violations))))))
+    ;; Variant-specific invariants
+    (dolist (vkey (entity-variants entity-name))
+      (let* ((variant (describe-variant vkey))
+             (disc (getf variant :discriminator))
+             (val (getf variant :value))
+             (actual (getf instance disc)))
+        (when (eq actual val)
+          (dolist (entry (variant-invariants-for vkey))
+            (destructuring-bind (inv-name inv) entry
+              (let ((on-sym (getf inv :on))
+                    (check-form (getf inv :check)))
+                (handler-case
+                    (let ((fn (handler-bind ((warning #'muffle-warning))
+                                (compile nil `(lambda (,on-sym) ,check-form)))))
+                      (unless (funcall fn instance)
+                        (push inv-name violations)))
+                  (error (e)
+                    (push (format nil "~A (error: ~A)" inv-name e) violations)))))))))
     (nreverse violations)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; PBT runner
 ;;; ---------------------------------------------------------------------------
 
-(defun run-pbt (&key (trials 100))
-  "Run property-based testing on all entities with invariants.
-Generates TRIALS random instances per entity and checks all applicable
-invariants. Returns a list of result plists and prints a summary."
-  ;; Set up accessors for all entities
-  (dolist (name (list-entities))
-    (ensure-entity-accessors name))
-  ;; Run trials
+(defun ensure-config-accessor ()
+  "Ensure CONFIG function is available in the caller's package."
+  (let ((sym (intern "CONFIG")))
+    (unless (fboundp sym)
+      (setf (symbol-function sym)
+            (lambda (key) (getf *current-config* key))))))
+
+(defun run-pbt-trials (trials)
+  "Run one round of entity trials with the current *CURRENT-CONFIG* binding.
+Returns (values results total-passed total-failed)."
   (let ((results nil)
         (total-passed 0)
         (total-failed 0))
     (dolist (entity-name (list-entities))
-      (let ((relevant (invariants-for entity-name)))
-        (when relevant
+      (let* ((relevant (invariants-for entity-name))
+             (variant-invs (loop for vkey in (entity-variants entity-name)
+                                 nconc (variant-invariants-for vkey)))
+             (all-relevant (append relevant variant-invs)))
+        (when all-relevant
           (let ((passed 0)
                 (failed 0)
                 (failures nil))
@@ -590,26 +729,84 @@ invariants. Returns a list of result plists and prints a summary."
             (incf total-passed passed)
             (incf total-failed failed)
             (push (list :entity entity-name
-                        :invariants (mapcar #'first relevant)
+                        :invariants (mapcar #'first all-relevant)
                         :trials trials
                         :passed passed
                         :failed failed
                         :failures (nreverse failures))
                   results)))))
-    ;; Print summary
-    (format t "~%=== PBT Results ===~%")
-    (dolist (r (reverse results))
-      (format t "~%~A (~A invariants)~%  ~A/~A passed"
-              (getf r :entity)
-              (length (getf r :invariants))
-              (getf r :passed)
-              (getf r :trials))
-      (when (plusp (getf r :failed))
-        (format t ", ~A FAILED" (getf r :failed))
-        (dolist (f (getf r :failures))
-          (format t "~%  counterexample: ~S~%    violated: ~{~A~^, ~}"
-                  (getf f :instance)
-                  (getf f :violations)))))
-    (format t "~%~%Total: ~A passed, ~A failed~%"
-            total-passed total-failed)
-    (nreverse results)))
+    (values (nreverse results) total-passed total-failed)))
+
+(defun run-pbt (&key (trials 100) (config-trials 5))
+  "Run property-based testing on all entities with invariants.
+Generates TRIALS random instances per entity and checks all applicable
+invariants. When *CONFIG* is defined, runs CONFIG-TRIALS rounds with
+random configs to test across configuration space.
+Returns a list of result plists and prints a summary."
+  ;; Set up accessors for all entities and variants
+  (dolist (name (list-entities))
+    (ensure-entity-accessors name))
+  (dolist (name (list-variants))
+    (ensure-variant-accessors name))
+  ;; Set up config accessor in caller's package
+  (when *config*
+    (ensure-config-accessor))
+  ;; Run trials
+  (let ((all-results nil)
+        (grand-passed 0)
+        (grand-failed 0))
+    (if *config*
+        ;; Config-aware: multiple config trials
+        (dotimes (ct config-trials)
+          (let ((*current-config* (generate-config)))
+            (multiple-value-bind (results passed failed)
+                (run-pbt-trials trials)
+              (setf all-results (append all-results results))
+              (incf grand-passed passed)
+              (incf grand-failed failed))))
+        ;; No config: single round
+        (multiple-value-bind (results passed failed)
+            (run-pbt-trials trials)
+          (setf all-results results)
+          (setf grand-passed passed)
+          (setf grand-failed failed)))
+    ;; Merge results by entity (sum across config trials)
+    (let ((merged (make-hash-table :test #'equal)))
+      (dolist (r all-results)
+        (let* ((ename (getf r :entity))
+               (existing (gethash ename merged)))
+          (if existing
+              (progn
+                (incf (getf existing :passed) (getf r :passed))
+                (incf (getf existing :failed) (getf r :failed))
+                (incf (getf existing :trials) (getf r :trials))
+                (let ((new-failures (getf r :failures)))
+                  (when (and new-failures (< (length (getf existing :failures)) 3))
+                    (setf (getf existing :failures)
+                          (append (getf existing :failures)
+                                  (subseq new-failures 0
+                                          (min (length new-failures)
+                                               (- 3 (length (getf existing :failures))))))))))
+              (setf (gethash ename merged) (copy-list r)))))
+      ;; Print summary
+      (let ((final-results nil))
+        (maphash (lambda (k v) (declare (ignore k)) (push v final-results)) merged)
+        (setf final-results (nreverse final-results))
+        (format t "~%=== PBT Results ===~%")
+        (when *config*
+          (format t "(~A config trials x ~A entity trials)~%" config-trials trials))
+        (dolist (r final-results)
+          (format t "~%~A (~A invariants)~%  ~A/~A passed"
+                  (getf r :entity)
+                  (length (getf r :invariants))
+                  (getf r :passed)
+                  (getf r :trials))
+          (when (plusp (getf r :failed))
+            (format t ", ~A FAILED" (getf r :failed))
+            (dolist (f (getf r :failures))
+              (format t "~%  counterexample: ~S~%    violated: ~{~A~^, ~}"
+                      (getf f :instance)
+                      (getf f :violations)))))
+        (format t "~%~%Total: ~A passed, ~A failed~%"
+                grand-passed grand-failed)
+        final-results))))
