@@ -55,7 +55,9 @@ All macros are available in the sandbox with no imports:
   :on branch
   :check (> (length (branch-children branch)) 0))
 
-;; Scenarios — multi-entity test fixtures for cross-entity PBT
+;; Scenarios — use defscenario when an invariant references fields from
+;; multiple entity types, or when valid instances require correlated
+;; generation across entities (e.g. totals must match sums of parts).
 (defscenario order-fulfillment
   :entities ((warehouses (1 3) warehouse)
              (orders     (5 20) order)
