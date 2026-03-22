@@ -37,12 +37,14 @@
            #:generate-config
            #:check-invariants
            #:check-scenario-invariants
+           #:invariants-for
            #:scenario-invariants-for
            #:generate-scenario
            #:default-generate-scenario
            #:defscenario-generator
            #:run-pbt
-           #:extract-generation-constraints))
+           #:extract-generation-constraints
+           #:getf-field-p))
 
 (in-package #:mcp-lisp/src/spec/pbt)
 

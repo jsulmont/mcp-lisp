@@ -82,6 +82,39 @@ All macros are available in the sandbox with no imports:
 - `(validate-specs)` — catches dangling entity references, undefined functions, free variables, non-exhaustive variant handling, and invalid scenario bindings
 - `(clear-specs)` — reset all registries
 
+### Spec analysis
+
+Tools for inspecting coverage, feasibility, and dependencies:
+
+```lisp
+;; Which fields are covered by invariants? NIL = unconstrained.
+(invariant-coverage "generator")
+;; → ((:STATE "output-matches-state" "output-within-bounds")
+;;    (:START-COST)       ;; ← no coverage
+;;    (:MARGINAL-COST))   ;; ← no coverage
+
+;; Reverse lookup: what invariants and rules touch a field?
+(field-index "generator" :output-mw)
+;; → (:INVARIANTS ("output-matches-state" "output-within-bounds")
+;;    :RULES (("ramp-generator" . :REQUIRES) ("ramp-generator" . :ENSURES)))
+
+;; Can the default generator produce valid instances?
+(generation-feasibility "generator")
+;; → (:VERDICT :NEEDS-CUSTOM-GENERATOR  ;; conditional constraints on :state
+;;    :CONDITIONAL-CONSTRAINTS (:OUTPUT-MW :EMISSIONS-RATE ...)
+;;    :UNCONSTRAINED-FIELDS (:ID :NAME :START-COST ...))
+
+;; Does a scenario need a custom generator?
+(scenario-feasibility "full-dispatch")
+;; → (:NEEDS-CUSTOM-GENERATOR T  ;; aggregate invariants detected
+;;    :HAS-CUSTOM-GENERATOR T    ;; and one exists
+;;    :VERDICT :OK)
+
+;; Step through rules on a concrete instance
+(simulate-trace "generator" instance '("start-generator" "sync-generator"))
+;; → per-step: rule, from/to state, each guard pass/fail, instance-after
+```
+
 ### Property-based testing
 
 Generate random entity instances and check invariants automatically:
@@ -212,18 +245,21 @@ Example: `(zones (1 3) grid-zone)` → `zones` is always a list; use `(every (la
    - **Dead-end states**: non-terminal states with no outgoing transitions — usually a missing rule.
    - **Unreachable states**: states no transition leads to — either the state is unused or an inbound rule is missing.
    - **Missing terminal states**: if every real-world process has an end state, the machine should have at least one terminal state.
+   - Use `(simulate-trace "entity" instance '("rule1" "rule2"))` to verify a concrete instance can walk through the full lifecycle. Each step shows which guards pass/fail and the resulting state.
    - Fix gaps in rules/states before proceeding — the state graph shapes what invariants and scenarios are needed.
-4. **Audit for missing cross-entity invariants.** After per-entity invariants are defined, check for gaps:
+4. **Check invariant coverage.** Run `(invariant-coverage "entity")` for each entity. Fields with NIL have no invariant checking them. Decide whether each unconstrained field needs an invariant or is intentionally uncovered (e.g. `:id`, `:name`). Use `(field-index "entity" :field)` to see the full picture of what touches a specific field.
+5. **Audit for missing cross-entity invariants.** After per-entity invariants are defined, check for gaps:
    - **Bounding fields**: Any field whose purpose is to constrain another entity (e.g. `max-notional` on a risk-limit that should bound a trader's positions, `capacity` on a warehouse that should bound stored items) MUST have a cross-entity scenario testing that relationship. A per-entity invariant on such a field (e.g. "max-notional > 0") is necessary but not sufficient — the aggregate constraint is the one that matters.
    - **Relations as signals**: For every `has-many` relation, ask: does the parent entity have fields that should bound aggregate properties of the children (count, sum, max)? If yes, that's a scenario.
    - **Rules that reach across entities**: If a rule's `:requires` or `:let` accesses fields from related entities, the constraint it checks likely has a corresponding aggregate invariant that should hold at rest, not just at transition time.
    - If this audit finds gaps, define the scenarios before proceeding.
-5. Define scenarios with `defscenario` for cross-entity invariants
-6. **Write `defscenario-generator` when cross-entity invariants require correlated data.** If any scenario invariant computes aggregates across bindings (e.g. "sum of generator outputs = interval total", "transfers net to zero"), random independent generation will always fail. Write a custom scenario generator that constructs instances top-down so derived/aggregate fields are consistent. See [Custom scenario generators](#custom-scenario-generators).
-7. Run `(validate-specs)` to catch dangling references, non-exhaustive variant handling, and invalid scenario bindings
-8. Run `(run-pbt :trials 500 :negative-trials 200)` to test per-entity invariants against random data (and random configs). The negative pass verifies invariants aren't trivially true.
-9. Run `(run-pbt :scenario "name" :trials 50)` to test cross-entity invariants
-10. Generate code artifacts (SQL, API routes, types, validation) from the spec
-11. Export with `(specs-to-json)` and save to a file
+6. Define scenarios with `defscenario` for cross-entity invariants
+7. **Check generation feasibility.** Run `(generation-feasibility "entity")` for each entity with invariants. If the verdict is `:needs-custom-generator` (conditional constraints that require correlated field values), write a `defgenerator` **before** running PBT — otherwise you'll waste trials on guaranteed failures.
+8. **Check scenario feasibility.** Run `(scenario-feasibility "scenario")` for each scenario. If `:needs-custom-generator` is T and `:has-custom-generator` is NIL, write a `defscenario-generator` before running PBT. See [Custom scenario generators](#custom-scenario-generators).
+9. Run `(validate-specs)` to catch dangling references, non-exhaustive variant handling, and invalid scenario bindings
+10. Run `(run-pbt :trials 500 :negative-trials 200)` to test per-entity invariants against random data (and random configs). The negative pass verifies invariants aren't trivially true.
+11. Run `(run-pbt :scenario "name" :trials 50)` to test cross-entity invariants
+12. Generate code artifacts (SQL, API routes, types, validation) from the spec
+13. Export with `(specs-to-json)` and save to a file
 
 Always spec first, code second.

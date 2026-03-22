@@ -238,6 +238,13 @@
                 #:defscenario-generator
                 #:run-pbt
                 #:extract-generation-constraints)
+  ;; Spec analysis
+  (:import-from #:mcp-lisp/src/spec/analysis
+                #:invariant-coverage
+                #:field-index
+                #:generation-feasibility
+                #:simulate-trace
+                #:scenario-feasibility)
   ;; Export everything
   (:export ;; Core
    #:+protocol-version+
@@ -445,6 +452,12 @@
    #:default-generate-scenario
    #:defscenario-generator
    #:run-pbt
-   #:extract-generation-constraints))
+   #:extract-generation-constraints
+   ;; Spec analysis
+   #:invariant-coverage
+   #:field-index
+   #:generation-feasibility
+   #:simulate-trace
+   #:scenario-feasibility))
 
 (in-package #:mcp-lisp/main)
