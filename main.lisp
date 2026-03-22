@@ -191,6 +191,8 @@
                 #:describe-invariant
                 #:clear-specs
                 #:validate-specs
+                #:form-to-ast
+                #:ast-to-form
                 #:specs-to-json
                 #:json-to-specs
                 #:spec-json-schema)
@@ -367,6 +369,8 @@
    #:describe-invariant
    #:clear-specs
    #:validate-specs
+   #:form-to-ast
+   #:ast-to-form
    #:specs-to-json
    #:json-to-specs
    #:spec-json-schema

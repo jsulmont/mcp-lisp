@@ -31,6 +31,9 @@
            ;; Utilities
            #:clear-specs
            #:validate-specs
+           ;; AST
+           #:form-to-ast
+           #:ast-to-form
            ;; JSON
            #:specs-to-json
            #:json-to-specs
@@ -206,6 +209,29 @@ Returns (values fields relations derived)."
                                                 (string-downcase (symbol-name (second r)))))
                                      (getf plist :relations)))
                        (return-from entity-accessor-p t))))))
+             *entities*)
+    nil))
+
+(defun decompose-accessor (sym)
+  "If SYM names an entity accessor like ACCOUNT-BALANCE, return
+\(values entity-key field-name) where both are lowercase strings.
+Returns NIL if SYM is not a recognized accessor."
+  (let ((name (string-downcase (symbol-name sym))))
+    (maphash (lambda (ekey plist)
+               (let ((prefix (concatenate 'string ekey "-")))
+                 (when (and (> (length name) (length prefix))
+                            (string= prefix name :end2 (length prefix)))
+                   (let ((suffix (subseq name (length prefix))))
+                     (when (or (some (lambda (f)
+                                       (string= suffix
+                                                (string-downcase (symbol-name (first f)))))
+                                     (getf plist :fields))
+                               (some (lambda (r)
+                                       (string= suffix
+                                                (string-downcase (symbol-name (second r)))))
+                                     (getf plist :relations)))
+                       (return-from decompose-accessor
+                         (values ekey suffix)))))))
              *entities*)
     nil))
 
@@ -395,6 +421,204 @@ Returns a list of warning strings. Empty list = all clear."
     (with-output-to-string (s)
       (emit form s))))
 
+;;; ---------------------------------------------------------------------------
+;;; Portable AST for JSON interchange
+;;; ---------------------------------------------------------------------------
+
+(defun form-to-ast (form)
+  "Convert a CL form to a portable AST hash table.
+Node types: literal, keyword, var, field, compare, eq, and, or, not,
+if, member, lambda, let, call."
+  (cond
+    ((null form)
+     (dict "node" "literal" "value" nil))
+    ((eq form t)
+     (dict "node" "literal" "value" t))
+    ((keywordp form)
+     (dict "node" "keyword" "name" (string-downcase (symbol-name form))))
+    ((numberp form)
+     (dict "node" "literal" "value" form))
+    ((stringp form)
+     (dict "node" "literal" "value" form))
+    ((symbolp form)
+     (dict "node" "var" "name" (string-downcase (symbol-name form))))
+    ((consp form)
+     (let ((head (car form)))
+       (cond
+         ;; (quote x) — rare at top level; member handler unquotes inline
+         ((eq head 'quote)
+          (let ((val (second form)))
+            (cond
+              ((keywordp val)
+               (dict "node" "keyword" "name" (string-downcase (symbol-name val))))
+              ((symbolp val)
+               (dict "node" "literal" "value" (string-downcase (symbol-name val))))
+              (t (dict "node" "literal" "value" val)))))
+         ;; (and ...)
+         ((eq head 'and)
+          (dict "node" "and"
+                "args" (coerce (mapcar #'form-to-ast (cdr form)) 'vector)))
+         ;; (or ...)
+         ((eq head 'or)
+          (dict "node" "or"
+                "args" (coerce (mapcar #'form-to-ast (cdr form)) 'vector)))
+         ;; (not x)
+         ((eq head 'not)
+          (dict "node" "not" "arg" (form-to-ast (second form))))
+         ;; (if test then else)
+         ((eq head 'if)
+          (dict "node" "if"
+                "test" (form-to-ast (second form))
+                "then" (form-to-ast (third form))
+                "else" (form-to-ast (fourth form))))
+         ;; comparison: >= <= > < =
+         ((member head '(>= <= > < =))
+          (dict "node" "compare"
+                "op" (symbol-name head)
+                "left" (form-to-ast (second form))
+                "right" (form-to-ast (third form))))
+         ;; (eq a b)
+         ((eq head 'eq)
+          (dict "node" "eq"
+                "left" (form-to-ast (second form))
+                "right" (form-to-ast (third form))))
+         ;; (member val set)
+         ((eq head 'member)
+          (let* ((val (second form))
+                 (set-form (third form))
+                 (set-items (if (and (consp set-form) (eq (car set-form) 'quote))
+                                (second set-form)
+                                set-form)))
+            (dict "node" "member"
+                  "value" (form-to-ast val)
+                  "set" (coerce (mapcar #'form-to-ast
+                                        (if (listp set-items) set-items
+                                            (list set-items)))
+                                'vector))))
+         ;; (getf obj :key) → field node
+         ((eq head 'getf)
+          (dict "node" "field"
+                "object" (form-to-ast (second form))
+                "field" (string-downcase (symbol-name (third form)))))
+         ;; (lambda (params...) body)
+         ((eq head 'lambda)
+          (dict "node" "lambda"
+                "params" (coerce (mapcar (lambda (p) (string-downcase (symbol-name p)))
+                                         (second form))
+                                 'vector)
+                "body" (form-to-ast (if (cdddr form)
+                                        `(progn ,@(cddr form))
+                                        (third form)))))
+         ;; (let/let* ((var init)...) body)
+         ((member head '(let let*))
+          (dict "node" "let"
+                "bindings" (coerce
+                            (mapcar (lambda (b)
+                                      (if (consp b)
+                                          (dict "name" (string-downcase (symbol-name (car b)))
+                                                "value" (form-to-ast (second b)))
+                                          (dict "name" (string-downcase (symbol-name b))
+                                                "value" (form-to-ast nil))))
+                                    (second form))
+                            'vector)
+                "body" (form-to-ast (if (cdddr form)
+                                        `(progn ,@(cddr form))
+                                        (third form)))))
+         ;; entity accessor: (entity-field entity) → field node
+         ((and (symbolp head) (= (length form) 2) (decompose-accessor head))
+          (multiple-value-bind (entity-key field-name) (decompose-accessor head)
+            (declare (ignore entity-key))
+            (dict "node" "field"
+                  "object" (form-to-ast (second form))
+                  "field" field-name)))
+         ;; default: function call
+         ((symbolp head)
+          (dict "node" "call"
+                "fn" (string-downcase (symbol-name head))
+                "args" (coerce (mapcar #'form-to-ast (cdr form)) 'vector)))
+         ;; fallback
+         (t (dict "node" "call"
+                  "fn" (format nil "~S" head)
+                  "args" (coerce (mapcar #'form-to-ast (cdr form)) 'vector))))))
+    (t (dict "node" "literal" "value" nil))))
+
+(defun ast-to-form (ast)
+  "Convert a portable AST hash table back to a CL form."
+  (cond
+    ((null ast) nil)
+    ((vectorp ast) (map 'list #'ast-to-form ast))
+    ((hash-table-p ast)
+     (let ((node (gethash "node" ast)))
+       (cond
+         ((string= node "literal")
+          (gethash "value" ast))
+
+         ((string= node "keyword")
+          (intern (string-upcase (gethash "name" ast)) :keyword))
+
+         ((string= node "var")
+          (intern (string-upcase (gethash "name" ast))))
+
+         ((string= node "field")
+          (let ((obj (ast-to-form (gethash "object" ast)))
+                (field (gethash "field" ast)))
+            (if (symbolp obj)
+                (list (intern (format nil "~A-~A"
+                                      (symbol-name obj) (string-upcase field)))
+                      obj)
+                (list 'getf obj (intern (string-upcase field) :keyword)))))
+
+         ((string= node "compare")
+          (list (find-symbol (gethash "op" ast) :cl)
+                (ast-to-form (gethash "left" ast))
+                (ast-to-form (gethash "right" ast))))
+
+         ((string= node "eq")
+          (list 'eq
+                (ast-to-form (gethash "left" ast))
+                (ast-to-form (gethash "right" ast))))
+
+         ((string= node "and")
+          (cons 'and (map 'list #'ast-to-form (gethash "args" ast))))
+
+         ((string= node "or")
+          (cons 'or (map 'list #'ast-to-form (gethash "args" ast))))
+
+         ((string= node "not")
+          (list 'not (ast-to-form (gethash "arg" ast))))
+
+         ((string= node "if")
+          (list 'if
+                (ast-to-form (gethash "test" ast))
+                (ast-to-form (gethash "then" ast))
+                (ast-to-form (gethash "else" ast))))
+
+         ((string= node "member")
+          (list 'member
+                (ast-to-form (gethash "value" ast))
+                (list 'quote (map 'list #'ast-to-form (gethash "set" ast)))))
+
+         ((string= node "lambda")
+          (list 'lambda
+                (map 'list (lambda (p) (intern (string-upcase p)))
+                     (gethash "params" ast))
+                (ast-to-form (gethash "body" ast))))
+
+         ((string= node "let")
+          (list 'let
+                (map 'list (lambda (b)
+                             (list (intern (string-upcase (gethash "name" b)))
+                                   (ast-to-form (gethash "value" b))))
+                     (gethash "bindings" ast))
+                (ast-to-form (gethash "body" ast))))
+
+         ((string= node "call")
+          (cons (intern (string-upcase (gethash "fn" ast)))
+                (map 'list #'ast-to-form (gethash "args" ast))))
+
+         (t (error "Unknown AST node type: ~A" node)))))
+    (t ast)))
+
 (defun field-to-ht (field-spec)
   "Convert a field spec like (ID STRING :REQUIRED T) to a hash table."
   (let* ((name (string-downcase (symbol-name (first field-spec))))
@@ -407,7 +631,7 @@ Returns a list of warning strings. Empty list = all clear."
                (:default      (setf (gethash "default" ht) (form-to-string v)))
                (:min          (setf (gethash "min" ht) v))
                (:max          (setf (gethash "max" ht) v))
-               (:derived-from (setf (gethash "derived-from" ht) (form-to-string v)))))
+               (:derived-from (setf (gethash "derived-from" ht) (form-to-ast v)))))
     ht))
 
 (defun relation-to-ht (rel-spec)
@@ -422,7 +646,7 @@ Returns a list of warning strings. Empty list = all clear."
 (defun derived-to-ht (derived-spec)
   "Convert (:DERIVED NAME EXPR) to a hash table."
   (dict "name" (string-downcase (symbol-name (second derived-spec)))
-        "expression" (form-to-string (third derived-spec))))
+        "expression" (form-to-ast (third derived-spec))))
 
 (defun entity-to-ht (plist)
   (dict "name" (string-downcase (symbol-name (getf plist :name)))
@@ -433,19 +657,32 @@ Returns a list of warning strings. Empty list = all clear."
         "relations" (coerce (mapcar #'relation-to-ht (getf plist :relations)) 'vector)
         "derived" (coerce (mapcar #'derived-to-ht (getf plist :derived)) 'vector)))
 
+(defun binding-to-ast (binding)
+  "Convert a rule :let binding form (VAR INIT) to a structured AST object."
+  (if (consp binding)
+      (dict "name" (string-downcase (symbol-name (first binding)))
+            "value" (form-to-ast (second binding)))
+      (dict "name" (string-downcase (symbol-name binding))
+            "value" (form-to-ast nil))))
+
+(defun ast-to-binding (ht)
+  "Convert a structured AST binding object back to a CL binding form (VAR INIT)."
+  (list (intern (string-upcase (gethash "name" ht)))
+        (ast-to-form (gethash "value" ht))))
+
 (defun rule-to-ht (plist)
   (let ((ht (dict "name" (string-downcase (symbol-name (getf plist :name))))))
     (when (getf plist :when)
-      (setf (gethash "when" ht) (form-to-string (getf plist :when))))
+      (setf (gethash "when" ht) (form-to-ast (getf plist :when))))
     (when (getf plist :let)
       (setf (gethash "let" ht)
-            (coerce (mapcar #'form-to-string (getf plist :let)) 'vector)))
+            (coerce (mapcar #'binding-to-ast (getf plist :let)) 'vector)))
     (when (getf plist :requires)
       (setf (gethash "requires" ht)
-            (coerce (mapcar #'form-to-string (getf plist :requires)) 'vector)))
+            (coerce (mapcar #'form-to-ast (getf plist :requires)) 'vector)))
     (when (getf plist :ensures)
       (setf (gethash "ensures" ht)
-            (coerce (mapcar #'form-to-string (getf plist :ensures)) 'vector)))
+            (coerce (mapcar #'form-to-ast (getf plist :ensures)) 'vector)))
     ht))
 
 (defun invariant-to-ht (plist)
@@ -453,7 +690,7 @@ Returns a list of warning strings. Empty list = all clear."
     (when (getf plist :on)
       (setf (gethash "on" ht) (string-downcase (symbol-name (getf plist :on)))))
     (when (getf plist :check)
-      (setf (gethash "check" ht) (form-to-string (getf plist :check))))
+      (setf (gethash "check" ht) (form-to-ast (getf plist :check))))
     ht))
 
 (defun specs-to-json ()
@@ -488,7 +725,7 @@ Returns a list of warning strings. Empty list = all clear."
     (when (gethash "max" ht)
       (setf spec (append spec (list :max (gethash "max" ht)))))
     (when (gethash "derived-from" ht)
-      (setf spec (append spec (list :derived-from (read-from-string (gethash "derived-from" ht))))))
+      (setf spec (append spec (list :derived-from (ast-to-form (gethash "derived-from" ht))))))
     spec))
 
 (defun ht-to-relation (ht)
@@ -502,7 +739,7 @@ Returns a list of warning strings. Empty list = all clear."
   "Convert a JSON derived hash table back to a derived spec list."
   (list :derived
         (intern (string-upcase (gethash "name" ht)))
-        (read-from-string (gethash "expression" ht))))
+        (ast-to-form (gethash "expression" ht))))
 
 (defun json-to-specs (json-string)
   "Import specs from a JSON string, populating the registries.
@@ -532,13 +769,13 @@ Merges with existing specs — call CLEAR-SPECS first for a clean import."
            (setf (gethash key *rules*)
                  (list :name (intern (string-upcase (gethash "name" ht)))
                        :when (when (gethash "when" ht)
-                               (read-from-string (gethash "when" ht)))
+                               (ast-to-form (gethash "when" ht)))
                        :let (when (gethash "let" ht)
-                              (map 'list #'read-from-string (gethash "let" ht)))
+                              (map 'list #'ast-to-binding (gethash "let" ht)))
                        :requires (when (gethash "requires" ht)
-                                   (map 'list #'read-from-string (gethash "requires" ht)))
+                                   (map 'list #'ast-to-form (gethash "requires" ht)))
                        :ensures (when (gethash "ensures" ht)
-                                  (map 'list #'read-from-string (gethash "ensures" ht))))))
+                                  (map 'list #'ast-to-form (gethash "ensures" ht))))))
          rules)))
     ;; Invariants
     (let ((invariants (gethash "invariants" data)))
@@ -550,7 +787,7 @@ Merges with existing specs — call CLEAR-SPECS first for a clean import."
                        :on (when (gethash "on" ht)
                              (intern (string-upcase (gethash "on" ht))))
                        :check (when (gethash "check" ht)
-                                (read-from-string (gethash "check" ht))))))
+                                (ast-to-form (gethash "check" ht))))))
          invariants)))
     (values)))
 
@@ -558,45 +795,163 @@ Merges with existing specs — call CLEAR-SPECS first for a clean import."
 ;;; JSON Schema
 ;;; ---------------------------------------------------------------------------
 
+(defun expr-schema-ref ()
+  "Return a $ref to the expression schema."
+  (dict "$ref" "#/$defs/expr"))
+
+(defun binding-schema ()
+  "Return the JSON Schema for a let-binding."
+  (dict "type" "object"
+        "required" (vector "name" "value")
+        "properties"
+        (dict "name" (dict "type" "string")
+              "value" (expr-schema-ref))))
+
+(defun expr-node-schemas ()
+  "Return a hash table of AST node type schemas keyed by node name."
+  (dict
+   "literal"
+   (dict "type" "object"
+         "required" (vector "node")
+         "properties"
+         (dict "node" (dict "const" "literal")
+               "value" (dict "description" "Atomic value: number, string, boolean, or null")))
+   "keyword"
+   (dict "type" "object"
+         "required" (vector "node" "name")
+         "properties"
+         (dict "node" (dict "const" "keyword")
+               "name" (dict "type" "string" "description" "Keyword name without colon prefix")))
+   "var"
+   (dict "type" "object"
+         "required" (vector "node" "name")
+         "properties"
+         (dict "node" (dict "const" "var")
+               "name" (dict "type" "string" "description" "Variable name")))
+   "field"
+   (dict "type" "object"
+         "required" (vector "node" "object" "field")
+         "properties"
+         (dict "node" (dict "const" "field")
+               "object" (expr-schema-ref)
+               "field" (dict "type" "string" "description" "Field name on the entity")))
+   "compare"
+   (dict "type" "object"
+         "required" (vector "node" "op" "left" "right")
+         "properties"
+         (dict "node" (dict "const" "compare")
+               "op" (dict "type" "string" "enum" (vector ">=" "<=" ">" "<" "="))
+               "left" (expr-schema-ref)
+               "right" (expr-schema-ref)))
+   "eq"
+   (dict "type" "object"
+         "required" (vector "node" "left" "right")
+         "properties"
+         (dict "node" (dict "const" "eq")
+               "left" (expr-schema-ref)
+               "right" (expr-schema-ref)))
+   "and"
+   (dict "type" "object"
+         "required" (vector "node" "args")
+         "properties"
+         (dict "node" (dict "const" "and")
+               "args" (dict "type" "array" "items" (expr-schema-ref))))
+   "or"
+   (dict "type" "object"
+         "required" (vector "node" "args")
+         "properties"
+         (dict "node" (dict "const" "or")
+               "args" (dict "type" "array" "items" (expr-schema-ref))))
+   "not"
+   (dict "type" "object"
+         "required" (vector "node" "arg")
+         "properties"
+         (dict "node" (dict "const" "not")
+               "arg" (expr-schema-ref)))
+   "if"
+   (dict "type" "object"
+         "required" (vector "node" "test" "then" "else")
+         "properties"
+         (dict "node" (dict "const" "if")
+               "test" (expr-schema-ref)
+               "then" (expr-schema-ref)
+               "else" (expr-schema-ref)))
+   "member"
+   (dict "type" "object"
+         "required" (vector "node" "value" "set")
+         "properties"
+         (dict "node" (dict "const" "member")
+               "value" (expr-schema-ref)
+               "set" (dict "type" "array" "items" (expr-schema-ref))))
+   "lambda"
+   (dict "type" "object"
+         "required" (vector "node" "params" "body")
+         "properties"
+         (dict "node" (dict "const" "lambda")
+               "params" (dict "type" "array" "items" (dict "type" "string"))
+               "body" (expr-schema-ref)))
+   "let"
+   (dict "type" "object"
+         "required" (vector "node" "bindings" "body")
+         "properties"
+         (dict "node" (dict "const" "let")
+               "bindings" (dict "type" "array" "items" (binding-schema))
+               "body" (expr-schema-ref)))
+   "call"
+   (dict "type" "object"
+         "required" (vector "node" "fn" "args")
+         "properties"
+         (dict "node" (dict "const" "call")
+               "fn" (dict "type" "string" "description" "Function name")
+               "args" (dict "type" "array" "items" (expr-schema-ref))))))
+
 (defun spec-json-schema ()
   "Return the JSON Schema for the behavioral spec format as a hash table."
-  (let ((field-schema
-          (dict "type" "object"
-                "required" (vector "name" "type")
-                "properties"
-                (dict "name" (dict "type" "string")
-                      "type" (dict "type" "string"
-                                   "description" "CL type specifier")
-                      "required" (dict "type" "boolean")
-                      "default" (dict "type" "string"
-                                      "description" "Default value as CL form")
-                      "unique" (dict "type" "boolean")
-                      "min" (dict "type" "number"
-                                  "description" "Minimum value for generator")
-                      "max" (dict "type" "number"
-                                  "description" "Maximum value for generator")
-                      "derived-from" (dict "type" "string"
-                                           "description" "CL form to compute from other fields"))))
-        (relation-schema
-          (dict "type" "object"
-                "required" (vector "kind" "name" "of")
-                "properties"
-                (dict "kind" (dict "type" "string"
-                                   "enum" (vector "has-many" "has-one" "belongs-to"))
-                      "name" (dict "type" "string")
-                      "of" (dict "type" "string"
-                                 "description" "Target entity name"))))
-        (derived-schema
-          (dict "type" "object"
-                "required" (vector "name" "expression")
-                "properties"
-                (dict "name" (dict "type" "string")
-                      "expression" (dict "type" "string"
-                                         "description" "CL lambda form")))))
+  (let* ((node-schemas (expr-node-schemas))
+         (one-of (coerce (loop for v being the hash-values of node-schemas
+                               collect v)
+                         'vector))
+         (expr-schema (dict "oneOf" one-of
+                            "discriminator" (dict "propertyName" "node")))
+         (field-schema
+           (dict "type" "object"
+                 "required" (vector "name" "type")
+                 "properties"
+                 (dict "name" (dict "type" "string")
+                       "type" (dict "type" "string"
+                                    "description" "Type specifier")
+                       "required" (dict "type" "boolean")
+                       "default" (dict "type" "string"
+                                       "description" "Default value as string")
+                       "unique" (dict "type" "boolean")
+                       "min" (dict "type" "number"
+                                   "description" "Minimum value for generator")
+                       "max" (dict "type" "number"
+                                   "description" "Maximum value for generator")
+                       "derived-from" (dict "$ref" "#/$defs/expr"
+                                            "description" "Expression to compute from other fields"))))
+         (relation-schema
+           (dict "type" "object"
+                 "required" (vector "kind" "name" "of")
+                 "properties"
+                 (dict "kind" (dict "type" "string"
+                                    "enum" (vector "has-many" "has-one" "belongs-to"))
+                       "name" (dict "type" "string")
+                       "of" (dict "type" "string"
+                                  "description" "Target entity name"))))
+         (derived-schema
+           (dict "type" "object"
+                 "required" (vector "name" "expression")
+                 "properties"
+                 (dict "name" (dict "type" "string")
+                       "expression" (dict "$ref" "#/$defs/expr"
+                                          "description" "Expression AST")))))
     (dict
      "$schema" "https://json-schema.org/draft/2020-12/schema"
      "title" "Behavioral Specification"
      "type" "object"
+     "$defs" (dict "expr" expr-schema
+                   "binding" (binding-schema))
      "properties"
      (dict
       "entities"
@@ -618,17 +973,17 @@ Merges with existing specs — call CLEAR-SPECS first for a clean import."
                   "required" (vector "name")
                   "properties"
                   (dict "name" (dict "type" "string")
-                        "when" (dict "type" "string"
-                                     "description" "Trigger condition as CL form")
+                        "when" (dict "$ref" "#/$defs/expr"
+                                     "description" "Trigger condition")
                         "let" (dict "type" "array"
-                                    "items" (dict "type" "string")
-                                    "description" "Binding forms")
+                                    "items" (dict "$ref" "#/$defs/binding")
+                                    "description" "Variable bindings")
                         "requires" (dict "type" "array"
-                                         "items" (dict "type" "string")
-                                         "description" "Precondition forms")
+                                         "items" (dict "$ref" "#/$defs/expr")
+                                         "description" "Preconditions")
                         "ensures" (dict "type" "array"
-                                        "items" (dict "type" "string")
-                                        "description" "Postcondition forms"))))
+                                        "items" (dict "$ref" "#/$defs/expr")
+                                        "description" "Postconditions"))))
       "invariants"
       (dict "type" "object"
             "additionalProperties"
@@ -638,5 +993,5 @@ Merges with existing specs — call CLEAR-SPECS first for a clean import."
                   (dict "name" (dict "type" "string")
                         "on" (dict "type" "string"
                                    "description" "Entity this invariant applies to")
-                        "check" (dict "type" "string"
-                                      "description" "Predicate as CL form"))))))))
+                        "check" (dict "$ref" "#/$defs/expr"
+                                      "description" "Predicate expression"))))))))

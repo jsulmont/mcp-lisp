@@ -363,13 +363,18 @@
         (is (string= "has-many" (gethash "kind" rel)))
         (is (string= "orders" (gethash "name" rel)))
         (is (string= "order" (gethash "of" rel))))
-      ;; Derived
+      ;; Derived — expression is now an AST node
       (let ((der (aref (gethash "derived" user) 0)))
         (is (string= "display-name" (gethash "name" der)))
-        (is (string= "(lambda (u) (name u))" (gethash "expression" der)))))))
+        (let ((expr (gethash "expression" der)))
+          (is (string= "lambda" (gethash "node" expr)))
+          (is (string= "u" (aref (gethash "params" expr) 0)))
+          (let ((body (gethash "body" expr)))
+            (is (string= "call" (gethash "node" body)))
+            (is (string= "name" (gethash "fn" body)))))))))
 
 (test specs-to-json-rules
-  "specs-to-json serializes rules"
+  "specs-to-json serializes rules as AST"
   (with-fresh-specs
     (mcp-lisp:defrule place-order
       :when (order :state :draft)
@@ -380,13 +385,26 @@
            (data (mcp-lisp:decode-json json))
            (rule (gethash "place-order" (gethash "rules" data))))
       (is (string= "place-order" (gethash "name" rule)))
-      (is (string= "(order :state :draft)" (gethash "when" rule)))
-      (is (string= "(customer (order-customer order))" (aref (gethash "let" rule) 0)))
-      (is (string= "(active-account-p customer)" (aref (gethash "requires" rule) 0)))
-      (is (string= "(eq (order-state order) :placed)" (aref (gethash "ensures" rule) 0))))))
+      ;; when → call node (order :state :draft)
+      (let ((when-ast (gethash "when" rule)))
+        (is (string= "call" (gethash "node" when-ast)))
+        (is (string= "order" (gethash "fn" when-ast))))
+      ;; let → structured binding
+      (let ((binding (aref (gethash "let" rule) 0)))
+        (is (string= "customer" (gethash "name" binding)))
+        (let ((val (gethash "value" binding)))
+          (is (string= "call" (gethash "node" val)))
+          (is (string= "order-customer" (gethash "fn" val)))))
+      ;; requires → call node
+      (let ((req (aref (gethash "requires" rule) 0)))
+        (is (string= "call" (gethash "node" req)))
+        (is (string= "active-account-p" (gethash "fn" req))))
+      ;; ensures → eq node
+      (let ((ens (aref (gethash "ensures" rule) 0)))
+        (is (string= "eq" (gethash "node" ens)))))))
 
 (test specs-to-json-invariants
-  "specs-to-json serializes invariants"
+  "specs-to-json serializes invariants as AST"
   (with-fresh-specs
     (mcp-lisp:definvariant positive-balance
       :on account
@@ -396,7 +414,18 @@
            (inv (gethash "positive-balance" (gethash "invariants" data))))
       (is (string= "positive-balance" (gethash "name" inv)))
       (is (string= "account" (gethash "on" inv)))
-      (is (string= "(>= (balance account) 0)" (gethash "check" inv))))))
+      ;; check → compare node
+      (let ((check (gethash "check" inv)))
+        (is (string= "compare" (gethash "node" check)))
+        (is (string= ">=" (gethash "op" check)))
+        ;; left: (balance account) → call node
+        (let ((left (gethash "left" check)))
+          (is (string= "call" (gethash "node" left)))
+          (is (string= "balance" (gethash "fn" left))))
+        ;; right: 0 → literal node
+        (let ((right (gethash "right" check)))
+          (is (string= "literal" (gethash "node" right)))
+          (is (= 0 (gethash "value" right))))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; JSON round-trip
@@ -477,7 +506,7 @@
 ;;; ---------------------------------------------------------------------------
 
 (test spec-json-schema-structure
-  "spec-json-schema returns a well-formed schema"
+  "spec-json-schema returns a well-formed schema with AST $defs"
   (let ((schema (mcp-lisp:spec-json-schema)))
     (is (hash-table-p schema))
     (is (string= "https://json-schema.org/draft/2020-12/schema"
@@ -486,4 +515,15 @@
     (let ((props (gethash "properties" schema)))
       (is (hash-table-p (gethash "entities" props)))
       (is (hash-table-p (gethash "rules" props)))
-      (is (hash-table-p (gethash "invariants" props))))))
+      (is (hash-table-p (gethash "invariants" props))))
+    ;; $defs contains expr and binding schemas
+    (let ((defs (gethash "$defs" schema)))
+      (is (hash-table-p defs))
+      (is (hash-table-p (gethash "expr" defs)))
+      (is (hash-table-p (gethash "binding" defs)))
+      ;; expr uses discriminated union
+      (let ((expr (gethash "expr" defs)))
+        (is (not (null (gethash "oneOf" expr))))
+        (is (hash-table-p (gethash "discriminator" expr)))
+        (is (string= "node" (gethash "propertyName"
+                                      (gethash "discriminator" expr))))))))
