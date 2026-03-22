@@ -218,7 +218,7 @@ The coder defines the tool, unit-tests it with `pp`, then `test_tool` spawns a f
 
 ## Behavioral Specs
 
-A specification DSL for capturing domain models as structured metadata — entities, rules, and invariants — queryable and testable at the REPL or via MCP tools. Inspired by [JUXT Allium](https://github.com/juxt/allium) but executable from day one.
+A specification DSL for capturing domain models as structured metadata — entities, rules, and invariants — queryable and testable at the REPL or via MCP tools. Inspired by [JUXT Allium](https://github.com/juxt/allium) but executable from day one. See [mcp-lisp vs allium v3](mcp-lisp-vs-allium-v3.md) for a detailed comparison.
 
 ```lisp
 (defentity account ()
