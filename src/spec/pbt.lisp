@@ -135,17 +135,61 @@ Recognizes both (GETF ENTITY-VAR :FIELD) and (ENTITY-FIELD ENTITY-VAR) patterns.
          (intern (string-upcase (subseq accessor-name (length prefix)))
                  :keyword))))))
 
-(defun extract-scaled-ref (form entity-var)
-  "Recognize (* FACTOR (GETF E :F)) or (* (GETF E :F) FACTOR).
-Returns (:field KEYWORD :factor NUMBER) or NIL."
-  (when (and (consp form) (eq (car form) '*) (= (length form) 3))
-    (let ((a (second form))
-          (b (third form)))
-      (cond
-        ((and (numberp a) (getf-field-p b entity-var))
-         (list :field (getf-field-p b entity-var) :factor a))
-        ((and (numberp b) (getf-field-p a entity-var))
-         (list :field (getf-field-p a entity-var) :factor b))))))
+(defun pure-field-expr-p (form entity-var)
+  "Check if FORM is a pure arithmetic expression over entity fields and constants.
+Returns a list of field keywords referenced, or NIL if not a pure expression.
+Recognizes +, -, *, /, abs, mod, expt, min, max, and nested combinations."
+  (cond
+    ;; Field access → single dependency
+    ((getf-field-p form entity-var)
+     (list (getf-field-p form entity-var)))
+    ;; Numeric constant → no dependencies
+    ((numberp form) nil)
+    ;; Arithmetic expression → union of sub-dependencies
+    ((and (consp form)
+          (member (first form) '(+ - * / abs mod expt min max))
+          (>= (length form) 2))
+     (let ((deps nil)
+           (ok t))
+       (dolist (sub (cdr form))
+         (let ((sub-deps (pure-field-expr-p sub entity-var)))
+           (if (and (null sub-deps) (not (numberp sub))
+                    (not (getf-field-p sub entity-var)))
+               (progn (setf ok nil) (return))
+               (setf deps (union deps sub-deps)))))
+       (when ok deps)))
+    (t nil)))
+
+(defun eval-field-expr (form entity-var instance)
+  "Evaluate a pure field expression by substituting field values from INSTANCE.
+Returns the numeric result, or NIL if any field is missing from instance."
+  (cond
+    ;; Field access → look up value
+    ((getf-field-p form entity-var)
+     (let ((val (getf instance (getf-field-p form entity-var))))
+       (when (numberp val) val)))
+    ;; Numeric constant
+    ((numberp form) form)
+    ;; Arithmetic expression
+    ((and (consp form) (member (first form) '(+ - * / abs mod expt min max)))
+     (let* ((op (first form))
+            (args (cdr form))
+            (vals (mapcar (lambda (sub)
+                            (eval-field-expr sub entity-var instance))
+                          args)))
+       (when (every #'numberp vals)
+         (case op
+           (+    (apply #'+ vals))
+           (-    (apply #'- vals))
+           (*    (apply #'* vals))
+           (/    (when (every (lambda (v) (not (zerop v))) (cdr vals))
+                   (apply #'/ vals)))
+           (abs  (abs (first vals)))
+           (mod  (mod (first vals) (second vals)))
+           (expt (expt (first vals) (second vals)))
+           (min  (apply #'min vals))
+           (max  (apply #'max vals))))))
+    (t nil)))
 
 (defun config-ref-p (form)
   "If FORM is (CONFIG :KEY), return the config key. Otherwise NIL."
@@ -209,15 +253,21 @@ Returns a list of constraint plists or NIL."
                    (<  (list :field rf :min-config ck :exclusive t))
                    (<= (list :field rf :min-config ck))
                    (=  (list :field rf :eq-config ck))))))
-        ;; (op (getf e :f) (* factor (getf e :other)))
-        ((and lf (extract-scaled-ref rhs entity-var))
-         (let* ((scaled (extract-scaled-ref rhs entity-var))
-                (ref (getf scaled :field))
-                (factor (getf scaled :factor)))
+        ;; (op (getf e :f) pure-field-expr) — generic expression on RHS
+        ((and lf (pure-field-expr-p rhs entity-var))
+         (let ((deps (pure-field-expr-p rhs entity-var)))
            (list (case op
-                   ((>= >) (list :field lf :min-field ref :factor factor))
-                   ((<= <) (list :field lf :max-field ref :factor factor))
-                   (=      (list :field lf :eq-field ref :factor factor))))))))))
+                   ((>= >) (list :field lf :min-expr rhs :deps deps))
+                   ((<= <) (list :field lf :max-expr rhs :deps deps))
+                   (=      (list :field lf :eq-expr rhs :deps deps))))))
+        ;; (op pure-field-expr (getf e :f)) — generic expression on LHS
+        ((and rf (pure-field-expr-p lhs entity-var))
+         (let ((deps (pure-field-expr-p lhs entity-var)))
+           (list (case op
+                   ;; reversed: (>= expr field) means field <= expr
+                   ((>= >) (list :field rf :max-expr lhs :deps deps))
+                   ((<= <) (list :field rf :min-expr lhs :deps deps))
+                   (=      (list :field rf :eq-expr lhs :deps deps))))))))))
 
 (defun extract-condition (form entity-var)
   "Extract a condition from (EQ (GETF E :F) :V), (NOT ...), or (MEMBER ...).
@@ -243,7 +293,10 @@ Returns (:field KW :value V :negated BOOL) or (:field KW :values LIST :negated B
            (when (and (consp values) (eq (car values) 'quote))
              (setf values (second values)))
            (when (listp values)
-             (list :field field :values values :negated nil))))))))
+             (list :field field :values values :negated nil))))))
+    ;; Bare boolean accessor: (entity-field entity-var) → treat as (eq field T)
+    ((getf-field-p form entity-var)
+     (list :field (getf-field-p form entity-var) :value t :negated nil))))
 
 (defun negate-condition (condition)
   "Return a copy of CONDITION with :negated flipped."
@@ -359,9 +412,11 @@ Returns a hash table mapping field keywords to lists of constraint plists."
                     (t (equal actual (getf condition :value))))))
       (if negated (not match) match))))
 
-(defun resolve-field-bounds (field-keyword inv-constraints field-constraints instance)
+(defun resolve-field-bounds (field-keyword inv-constraints field-constraints instance
+                             &optional entity-var)
   "Given a field's invariant constraints, field-level :min/:max, and current instance,
-compute effective generation bounds. Returns (:min N :max N :eq N)."
+compute effective generation bounds. Returns (:min N :max N :eq N).
+ENTITY-VAR is needed for evaluating expression constraints."
   (let ((lo (getf field-constraints :min))
         (hi (getf field-constraints :max))
         (fixed nil))
@@ -397,6 +452,18 @@ compute effective generation bounds. Returns (:min N :max N :eq N)."
             (let* ((ref (getf instance (getf c :eq-field)))
                    (factor (or (getf c :factor) 1)))
               (when ref (setf fixed (* ref factor)))))
+          ;; Expression constraints (generic arithmetic over fields)
+          (when (getf c :eq-expr)
+            (let ((val (eval-field-expr (getf c :eq-expr) entity-var instance)))
+              (when val (setf fixed val))))
+          (when (getf c :min-expr)
+            (let ((val (eval-field-expr (getf c :min-expr) entity-var instance)))
+              (when val
+                (setf lo (if lo (max lo val) val)))))
+          (when (getf c :max-expr)
+            (let ((val (eval-field-expr (getf c :max-expr) entity-var instance)))
+              (when val
+                (setf hi (if hi (min hi val) val)))))
           ;; Config-reference bounds
           (when (getf c :min-config)
             (let ((ref (config (getf c :min-config)))
@@ -425,7 +492,14 @@ compute effective generation bounds. Returns (:min N :max N :eq N)."
     (dolist (c inv-constraints)
       (when (getf c :min-field) (pushnew (getf c :min-field) deps))
       (when (getf c :max-field) (pushnew (getf c :max-field) deps))
-      (when (getf c :eq-field)  (pushnew (getf c :eq-field) deps)))
+      (when (getf c :eq-field)  (pushnew (getf c :eq-field) deps))
+      ;; Expression constraints: deps listed explicitly
+      (when (getf c :deps)
+        (dolist (d (getf c :deps)) (pushnew d deps)))
+      ;; Conditional constraints depend on the condition field
+      (when (getf c :when)
+        (let ((cond-field (getf (getf c :when) :field)))
+          (when cond-field (pushnew cond-field deps)))))
     deps))
 
 (defun toposort-fields (non-member-fields constraint-map)
@@ -494,7 +568,8 @@ with bounds derived from invariant check forms."
            (push nil instance) (push key instance)
            (push (list key (getf fc :derived-from)) deferred))
           (t
-           (let* ((bounds (resolve-field-bounds key ic fc instance))
+           (let* ((bounds (resolve-field-bounds key ic fc instance
+                                                          (getf entity :name)))
                   (eq-val (getf bounds :eq))
                   (eff-min (getf bounds :min))
                   (eff-max (getf bounds :max)))
@@ -823,6 +898,52 @@ mapping binding keywords to instances (or lists of instances)."
       (setf (symbol-function sym)
             (lambda (key) (getf *current-config* key))))))
 
+(defun generate-raw-instance (entity-name)
+  "Generate a random instance of ENTITY-NAME WITHOUT constraint-aware generation.
+All fields are independently random — used for negative testing."
+  (let* ((entity (describe-entity entity-name))
+         (fields (getf entity :fields))
+         (instance nil))
+    (dolist (field fields)
+      (let* ((fname (first field))
+             (ftype (second field))
+             (key (field-keyword fname))
+             (fc (field-constraints field)))
+        (push (generate-value ftype :min (getf fc :min) :max (getf fc :max))
+              instance)
+        (push key instance)))
+    instance))
+
+(defun run-negative-trials (trials)
+  "Run negative PBT: generate unconstrained random instances and check that
+invariants correctly reject them. Returns per-invariant rejection stats.
+Invariants that never reject unconstrained data are flagged as suspicious."
+  (let ((inv-stats (make-hash-table :test #'equal)))
+    (dolist (entity-name (list-entities))
+      (let ((relevant (invariants-for entity-name)))
+        (when relevant
+          ;; Initialize per-invariant counters
+          (dolist (entry relevant)
+            (let ((inv-name (first entry)))
+              (setf (gethash inv-name inv-stats)
+                    (list :entity entity-name :tested 0 :rejected 0))))
+          (dotimes (i trials)
+            (let ((instance (generate-raw-instance entity-name)))
+              (dolist (entry relevant)
+                (destructuring-bind (inv-name inv) entry
+                  (let* ((on-sym (getf inv :on))
+                         (check-form (getf inv :check))
+                         (stats (gethash inv-name inv-stats)))
+                    (incf (getf stats :tested))
+                    (handler-case
+                        (let ((fn (handler-bind ((warning #'muffle-warning))
+                                    (compile nil `(lambda (,on-sym) ,check-form)))))
+                          (unless (funcall fn instance)
+                            (incf (getf stats :rejected))))
+                      (error ()
+                        (incf (getf stats :rejected))))))))))))
+    inv-stats))
+
 (defun run-pbt-trials (trials)
   "Run one round of entity trials with the current *CURRENT-CONFIG* binding.
 Returns (values results total-passed total-failed)."
@@ -911,12 +1032,14 @@ Returns (values results total-passed total-failed)."
           :failed failed
           :failures (nreverse failures))))
 
-(defun run-pbt (&key (trials 100) (config-trials 5) scenario)
+(defun run-pbt (&key (trials 100) (config-trials 5) scenario (negative-trials 0))
   "Run property-based testing on all entities with invariants.
 Generates TRIALS random instances per entity and checks all applicable
 invariants. When *CONFIG* is defined, runs CONFIG-TRIALS rounds with
 random configs to test across configuration space.
 When SCENARIO is provided (name string), runs only that scenario's PBT.
+When NEGATIVE-TRIALS is positive, also generates unconstrained random instances
+and verifies that invariants reject them (catches trivially-true invariants).
 Returns a list of result plists and prints a summary."
   ;; Set up accessors for all entities and variants
   (dolist (name (list-entities))
@@ -1007,4 +1130,26 @@ Returns a list of result plists and prints a summary."
                       (getf f :violations)))))
         (format t "~%~%Total: ~A passed, ~A failed~%"
                 grand-passed grand-failed)
+        ;; Negative testing pass
+        (when (and (plusp negative-trials) (not scenario))
+          (let ((neg-stats (run-negative-trials negative-trials))
+                (suspicious nil))
+            (format t "~%=== Negative Testing (unconstrained generation) ===~%")
+            (let ((sorted-keys nil))
+              (maphash (lambda (k v) (declare (ignore v)) (push k sorted-keys))
+                       neg-stats)
+              (dolist (inv-name (nreverse sorted-keys))
+                (let* ((stats (gethash inv-name neg-stats))
+                       (tested (getf stats :tested))
+                       (rejected (getf stats :rejected))
+                       (pct (if (plusp tested)
+                                (round (* 100 (/ rejected tested)))
+                                0)))
+                  (format t "~%  ~A: ~A/~A rejected (~A%)" inv-name rejected tested pct)
+                  (when (zerop rejected)
+                    (push inv-name suspicious)))))
+            (if suspicious
+                (format t "~%~%WARNING: ~A invariant~:P never rejected random data: ~{~A~^, ~}~%"
+                        (length suspicious) (nreverse suspicious))
+                (format t "~%~%All invariants correctly reject unconstrained data.~%"))))
         final-results))))

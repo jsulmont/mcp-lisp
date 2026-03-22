@@ -134,18 +134,19 @@
   "run-pbt finds counterexamples for violable invariants"
   (with-fresh-specs
     ;; Use a cross-field invariant the constraint extractor can't solve:
-    ;; balance must equal quantity * price (a derived equality the extractor skips)
-    (mcp-lisp:defentity position ()
-      (balance number :required t)
-      (quantity number :required t)
-      (price number :required t))
-    (mcp-lisp:definvariant balance-matches
-      :on position
-      :check (= (position-balance position)
-                (* (position-quantity position) (position-price position))))
+    ;; (+ result a) = (* b b) — neither side is a single field access,
+    ;; so the extractor can't assign a target field to constrain.
+    (mcp-lisp:defentity triple ()
+      (result number :required t)
+      (a number :required t)
+      (b number :required t))
+    (mcp-lisp:definvariant cross-field-sum
+      :on triple
+      :check (= (+ (triple-result triple) (triple-a triple))
+                (* (triple-b triple) (triple-b triple))))
     (let ((results (mcp-lisp:run-pbt :trials 200)))
       (is (= 1 (length results)))
-      ;; Three independent random numbers almost never satisfy a = b * c
+      ;; Three independent random numbers almost never satisfy result + a = b²
       (is (plusp (getf (first results) :failed)))
       (is (plusp (length (getf (first results) :failures)))))))
 

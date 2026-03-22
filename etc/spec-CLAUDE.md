@@ -96,6 +96,15 @@ Generate random entity instances and check invariants automatically:
 (run-pbt :scenario "order-fulfillment" :trials 50)
 ```
 
+Add `:negative-trials` to also verify invariants aren't trivially true:
+
+```lisp
+;; Positive: smart generation should pass. Negative: random generation should fail.
+(run-pbt :trials 200 :negative-trials 100)
+```
+
+The negative pass generates unconstrained random instances (no constraint extraction, no retry) and checks that each invariant correctly rejects them. Invariants that pass 100% of random data are flagged as suspicious — they may be trivially true or too weak. Always run negative trials alongside positive trials to validate both directions.
+
 This generates random instances for every entity that has invariants, checks all applicable invariants (including variant-specific ones), and reports counterexamples on failure. When `defconfig` is defined, `:config-trials` (default 5) generates random configs within declared bounds — catching specs that only hold for the default config.
 
 For entities with variants, `generate-instance` picks a random variant, sets the discriminator, and generates variant-specific fields. Invariants on the base entity apply to all variants; invariants on a variant name apply only when the discriminator matches.
@@ -108,26 +117,30 @@ The default generator automatically extracts constraints from invariant `:check`
 
 - **Constant bounds**: `(>= field 0)`, `(< field 100)` → narrows numeric range
 - **Field ordering**: `(< min-output max-output)` → generates in dependency order
-- **Scaled references**: `(>= min-output (* 0.5 max-output))` → computes bound from other field
+- **Arithmetic expressions**: `(= notional (* quantity price))`, `(= total (+ base tax))` → computes derived field from any pure arithmetic expression (`+`, `-`, `*`, `/`, `abs`, `mod`, `expt`, `min`, `max`) over other fields and constants. Also works for inequalities: `(<= field (- max-val offset))` → upper bound computed from expression
+- **Boolean conditionals**: `(if (trader-suspended trader) (< margin-ratio 0.5) t)` → applies bounds when boolean field is true
 - **Conditional constraints**: `(if (eq state :online) (>= output min-output) t)` → applies bounds only when condition holds
 - **Member conditions**: `(if (member fuel '(:hydro :wind :solar)) (= emissions 0) (> emissions 0))`
 - **Disjunctive state patterns**: `(or (and (eq state :idle) (= rate 0)) (and (eq state :charging) (< rate 0)))` → per-state constraints
 - **Config references**: `(<= (position-leverage position) (config :max-leverage))` → resolves bound from current config at generation time
 
-Member/enum fields are generated first, then numeric fields in topologically sorted dependency order. A retry loop (10 attempts) catches constraints too complex for static extraction.
+Member/enum and boolean fields are generated first, then numeric fields in topologically sorted dependency order (expression deps and conditional deps are both tracked). A retry loop (10 attempts) catches constraints too complex for static extraction.
+
+The extractor cannot solve constraints where neither side of a comparison is a single field access (e.g. `(= (+ a b) (* c c))`). Use `defgenerator` for those cases.
 
 Use `(extract-generation-constraints "entity-name")` to inspect what the extractor found.
 
 #### Custom generators
 
-For constraints the extractor can't handle (complex arithmetic across multiple fields, iterative computations), use `defgenerator` as an escape hatch:
+For constraints the extractor can't handle (e.g. neither side is a single field, iterative computations), use `defgenerator` as an escape hatch:
 
 ```lisp
-(defgenerator trader (overrides)
-  (let ((inst (default-generate-instance "trader" overrides)))
-    (when (getf inst :suspended)
-      (setf (getf inst :margin-ratio)
-            (generate-value 'number :min 0.0 :max 0.5)))
+(defgenerator triple (overrides)
+  (let* ((inst (default-generate-instance "triple" overrides))
+         (a (getf inst :a))
+         (b (getf inst :b)))
+    ;; Satisfy: (= (+ result a) (* b b))
+    (setf (getf inst :result) (- (* b b) a))
     inst))
 ```
 
@@ -208,8 +221,8 @@ Example: `(zones (1 3) grid-zone)` → `zones` is always a list; use `(every (la
 5. Define scenarios with `defscenario` for cross-entity invariants
 6. **Write `defscenario-generator` when cross-entity invariants require correlated data.** If any scenario invariant computes aggregates across bindings (e.g. "sum of generator outputs = interval total", "transfers net to zero"), random independent generation will always fail. Write a custom scenario generator that constructs instances top-down so derived/aggregate fields are consistent. See [Custom scenario generators](#custom-scenario-generators).
 7. Run `(validate-specs)` to catch dangling references, non-exhaustive variant handling, and invalid scenario bindings
-8. Run `(run-pbt)` to test per-entity invariants against random data (and random configs)
-9. Run `(run-pbt :scenario "name")` to test cross-entity invariants
+8. Run `(run-pbt :trials 500 :negative-trials 200)` to test per-entity invariants against random data (and random configs). The negative pass verifies invariants aren't trivially true.
+9. Run `(run-pbt :scenario "name" :trials 50)` to test cross-entity invariants
 10. Generate code artifacts (SQL, API routes, types, validation) from the spec
 11. Export with `(specs-to-json)` and save to a file
 
