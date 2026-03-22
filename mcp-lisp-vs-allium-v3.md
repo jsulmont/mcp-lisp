@@ -22,6 +22,7 @@ performed by an LLM reasoning about whether code matches the spec.
 | Structural validator | `validate-specs` (working) | Referenced as `allium check` — does not exist |
 | PBT runner | `run-pbt` (working) | Referenced as `allium generators` — does not exist |
 | Instance generation | Constraint-aware `generate-instance` with variant + config support (working) | Not implemented |
+| Cross-entity PBT | `defscenario` with cardinality ranges, `:per` relations, scenario invariants, custom scenario generators (working) | Not implemented |
 | Sum types | `defvariant` with variant-aware generation, invariants, exhaustiveness checking (working) | Language supports variants — no tooling |
 | Typed config | `defconfig` with PBT over config space (working) | Language supports config — no tooling |
 | State machine analysis | `extract-transitions` + dead-end/unreachable detection (working) | Language supports `transitions` blocks, no tooling to analyze them |
@@ -47,7 +48,7 @@ This is the decisive axis.
 | Structural validation | Deterministic (`validate-specs`) | LLM reads language reference, applies rules |
 | Invariant evaluation | Deterministic (compiled predicates) | LLM reasons about whether invariant holds |
 | Instance generation | Deterministic (constraint extraction, topological field ordering) | Not available |
-| PBT execution | Deterministic (generate N instances, check all invariants, report counterexamples) | Not available |
+| PBT execution | Deterministic (generate N instances, check all invariants, report counterexamples) — per-entity and cross-entity via scenarios | Not available |
 | State machine analysis | Deterministic (graph algorithms) | LLM reads transition blocks |
 | Spec export | Deterministic (JSON with schema validation) | Plain text `.allium` files |
 | Drift detection | Not available | LLM reads spec + code, emits opinion |
@@ -67,9 +68,11 @@ The pattern:
 
 1. LLM reads a domain prompt (e.g. "model a trading desk")
 2. LLM generates `defentity`, `defvariant`, `defconfig`, `defrule`, `definvariant` forms
-3. `run-pbt` finds a counterexample: `balance = -3.7` violates `non-negative-balance` (under config `max-leverage = 47.3`)
-4. LLM sees the concrete failure and fixes the spec
-5. Repeat until `run-pbt` passes across all variants and config space
+3. LLM defines `defscenario` for cross-entity relationships (e.g. portfolios containing positions referencing instruments)
+4. `run-pbt` finds a counterexample: `balance = -3.7` violates `non-negative-balance` (under config `max-leverage = 47.3`)
+5. `run-pbt :scenario "portfolio-check"` finds a cross-entity counterexample: total position notional exceeds portfolio limit
+6. LLM sees the concrete failures and fixes the spec
+7. Repeat until `run-pbt` passes across all entities, variants, config space, and scenarios
 
 The LLM is fallible at authoring. The PBT runner is not fallible at checking.
 The LLM does not need to "understand" whether the invariant holds — it receives
@@ -103,8 +106,9 @@ constructs exist in the language reference even if tooling does not.
 | Module system | No | Yes (immutable coordinates) |
 | Trigger types | 1 (state match) | 7 (stimulus, transition, becomes, temporal, derived, creation, chained) |
 | `implies` operator | No | Yes |
-| Universal quantifiers | No | Yes (`for x in Collection: expr`) |
-| Existence checks | No | Yes |
+| Cross-entity invariants | Yes (`defscenario` — cardinality ranges, `:per` parent relations, flat-binding in check forms) | Yes (inline expressions) |
+| Universal quantifiers | Via CL (`every`, `reduce`, `loop` in check forms) | Yes (`for x in Collection: expr`) |
+| Existence checks | Via CL (`some`, `find`) | Yes |
 | Optional types / null safety | Not modeled | `T?`, `??`, `?.` |
 | Deferred specs | No | Yes |
 | Open questions | No | Yes |
@@ -155,9 +159,14 @@ allium invariants are expression-bearing (`invariant Name { expr }`) or prose
 "validate that entity-level invariants hold after every state-changing rule,"
 but no checker exists. The LLM reads the invariant and reasons about it.
 
-allium invariants can express things mcp-lisp cannot: universal quantification
-over collections, cross-entity assertions, implication. But these are
-assertions that nothing mechanically verifies.
+allium invariants can express things mcp-lisp cannot: implication, optional
+types, and state-dependent field existence. Cross-entity assertions — previously
+an allium-only capability — are now covered by `defscenario`: scenario
+invariants receive all bound entity collections as variables, enabling checks
+like "total generation must equal dispatch-interval total" across arbitrary
+entity graphs. Universal quantification over collections works naturally via
+CL's `every`, `reduce`, `loop`. But allium's remaining assertions are still
+things that nothing mechanically verifies.
 
 ## Where Each Wins
 
@@ -166,13 +175,17 @@ When it finds a counterexample, that counterexample is real. You can hand the
 JSON export to a CI pipeline, a code generator, or another tool — no LLM
 required. The feedback loop (LLM authors, oracle checks, LLM fixes) converges
 on correct specs without requiring the LLM to be right on the first try.
+`defscenario` extends this to cross-entity properties: the PBT runner generates
+correlated multi-entity fixtures and checks invariants across entity boundaries,
+producing counterexamples that show the full scenario state on failure.
 
 **allium wins on coverage.** It can describe boundaries, actors, temporal
 behavior, contracts, and cross-module dependencies that mcp-lisp has no syntax
 for. For teams that need to capture "who can see what, when, under what
-conditions," allium's language is the only option. The gap has narrowed — sum
-types and config are no longer allium-only — but surfaces, actors, temporal
-triggers, contracts, and modules remain outside mcp-lisp's scope.
+conditions," allium's language is the only option. The gap has narrowed
+further — sum types, config, and cross-entity invariants are no longer
+allium-only — but surfaces, actors, temporal triggers, contracts, and modules
+remain outside mcp-lisp's scope.
 
 ## The Verification Gap
 
@@ -188,8 +201,8 @@ do not exist today.
 ## The Fundamental Limitation of mcp-lisp
 
 mcp-lisp can only verify what it can express. Its spec language covers entities,
-discriminated unions, typed config, rules with state guards, and invariants with
-boolean predicates. It cannot express:
+discriminated unions, typed config, rules with state guards, invariants with
+boolean predicates, and cross-entity scenarios with PBT. It cannot express:
 
 - Who is allowed to perform an action (no actors/surfaces)
 - What happens when a deadline passes (no temporal triggers)
@@ -256,9 +269,9 @@ expressiveness wins.
 |  | mcp-lisp | allium v3 |
 |---|---|---|
 | **What it is** | Executable spec runtime | Spec language for LLMs |
-| **Verification** | Deterministic (PBT over entity × variant × config space, constraint extraction, state machine analysis, exhaustiveness checking) | Non-deterministic (LLM reasoning) |
-| **Feedback loop** | Yes — LLM authors, oracle rejects, LLM fixes | No — LLM authors, LLM checks |
-| **Expressiveness** | Moderate (entities, variants, config, rules, invariants, state machines) | Broad (+ surfaces, actors, triggers, contracts, modules) |
+| **Verification** | Deterministic (PBT over entity × variant × config × scenario space, constraint extraction, state machine analysis, exhaustiveness checking) | Non-deterministic (LLM reasoning) |
+| **Feedback loop** | Yes — LLM authors, oracle rejects with counterexamples (including cross-entity), LLM fixes | No — LLM authors, LLM checks |
+| **Expressiveness** | Moderate (entities, variants, config, rules, invariants, state machines, cross-entity scenarios) | Broad (+ surfaces, actors, triggers, contracts, modules) |
 | **Tooling** | Working end-to-end | Language reference + skill definitions, no working tools |
 | **Portable output** | JSON with schema validation | Plain text `.allium` files |
 | **Token cost of verification** | Near zero (SBCL process via MCP tools) | High (LLM does all reasoning) |
