@@ -14,6 +14,8 @@
          (mcp-lisp/src/spec/spec::*invariants* (make-hash-table :test #'equal))
          (mcp-lisp/src/spec/spec::*generators* (make-hash-table :test #'equal))
          (mcp-lisp/src/spec/spec::*variants* (make-hash-table :test #'equal))
+         (mcp-lisp/src/spec/spec::*scenarios* (make-hash-table :test #'equal))
+         (mcp-lisp/src/spec/spec::*scenario-generators* (make-hash-table :test #'equal))
          (mcp-lisp/src/spec/spec::*config* nil)
          (mcp-lisp/src/spec/spec::*current-config* nil))
      ,@body))
@@ -540,4 +542,166 @@
       (is (= 1 (length results)))
       ;; Without config, only one round of trials
       (is (= 50 (getf (first results) :trials)))
+      (is (= 0 (getf (first results) :failed))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Scenario PBT
+;;; ---------------------------------------------------------------------------
+
+(test scenario-default-generation
+  "default-generate-scenario produces instances for all bindings"
+  (with-fresh-specs
+    (mcp-lisp:defentity account ()
+      (id string :required t)
+      (balance number :required t :min 0 :max 1000))
+    (mcp-lisp:defentity txn ()
+      (id string :required t)
+      (amount number :required t :min 1 :max 100)
+      (:belongs-to account))
+    (mcp-lisp:defscenario ledger
+      :entities ((accounts (2 3) account)
+                 (txns (1 2) txn :per accounts)))
+    (mcp-lisp:ensure-entity-accessors "account")
+    (mcp-lisp:ensure-entity-accessors "txn")
+    (let ((instance (mcp-lisp:default-generate-scenario "ledger")))
+      ;; Has both bindings
+      (is (not (null (getf instance :accounts))))
+      (is (not (null (getf instance :txns))))
+      ;; Accounts is a list of 2-3
+      (is (listp (getf instance :accounts)))
+      (is (<= 2 (length (getf instance :accounts)) 3))
+      ;; Each account is a plist with :id and :balance
+      (dolist (a (getf instance :accounts))
+        (is (stringp (getf a :id)))
+        (is (numberp (getf a :balance))))
+      ;; Txns generated per-account
+      (is (listp (getf instance :txns)))
+      (is (>= (length (getf instance :txns)) 2)))))
+
+(test scenario-exact-cardinality-one
+  "cardinality=1 produces a single instance, not a list"
+  (with-fresh-specs
+    (mcp-lisp:defentity config-entity ()
+      (name string :required t))
+    (mcp-lisp:defscenario singleton
+      :entities ((cfg 1 config-entity)))
+    (mcp-lisp:ensure-entity-accessors "config-entity")
+    (let ((instance (mcp-lisp:default-generate-scenario "singleton")))
+      ;; Single instance, not a list
+      (is (stringp (getf (getf instance :cfg) :name))))))
+
+(test scenario-invariant-passing
+  "scenario invariant that passes"
+  (with-fresh-specs
+    (mcp-lisp:defentity account ()
+      (id string :required t)
+      (balance number :required t :min 0 :max 1000))
+    (mcp-lisp:defscenario bank
+      :entities ((accounts (2 5) account)))
+    (mcp-lisp:definvariant at-least-two-accounts
+      :on bank
+      :check (>= (length accounts) 2))
+    (mcp-lisp:ensure-entity-accessors "account")
+    (let ((violations (mcp-lisp:check-scenario-invariants
+                       "bank"
+                       (mcp-lisp:generate-scenario "bank"))))
+      (is (null violations)))))
+
+(test scenario-invariant-failing
+  "scenario invariant that fails"
+  (with-fresh-specs
+    (mcp-lisp:defentity account ()
+      (id string :required t)
+      (balance number :required t :min 0 :max 1000))
+    (mcp-lisp:defscenario bank
+      :entities ((accounts (2 5) account)))
+    ;; Impossible invariant: no way to have 100 accounts with max 5
+    (mcp-lisp:definvariant too-many-accounts
+      :on bank
+      :check (>= (length accounts) 100))
+    (mcp-lisp:ensure-entity-accessors "account")
+    (let ((violations (mcp-lisp:check-scenario-invariants
+                       "bank"
+                       (mcp-lisp:generate-scenario "bank"))))
+      (is (= 1 (length violations)))
+      (is (string= "too-many-accounts" (first violations))))))
+
+(test scenario-custom-generator
+  "defscenario-generator overrides default generation"
+  (with-fresh-specs
+    (mcp-lisp:defentity item ()
+      (id string :required t)
+      (value number :required t))
+    (mcp-lisp:defscenario custom-test
+      :entities ((items (2 4) item)))
+    ;; Custom generator always produces exactly 3 items with value=42
+    (mcp-lisp:defscenario-generator custom-test (overrides)
+      (declare (ignore overrides))
+      (list :items (list (list :id "a" :value 42)
+                         (list :id "b" :value 42)
+                         (list :id "c" :value 42))))
+    (mcp-lisp:definvariant all-42
+      :on custom-test
+      :check (every (lambda (i) (= 42 (getf i :value))) items))
+    (mcp-lisp:ensure-entity-accessors "item")
+    (let ((instance (mcp-lisp:generate-scenario "custom-test")))
+      (is (= 3 (length (getf instance :items))))
+      (is (null (mcp-lisp:check-scenario-invariants "custom-test" instance))))))
+
+(test scenario-run-pbt
+  "run-pbt with :scenario runs scenario trials"
+  (with-fresh-specs
+    (mcp-lisp:defentity account ()
+      (id string :required t)
+      (balance number :required t :min 0 :max 1000))
+    (mcp-lisp:defscenario bank
+      :entities ((accounts (2 5) account)))
+    (mcp-lisp:definvariant at-least-two
+      :on bank
+      :check (>= (length accounts) 2))
+    (let ((results (mcp-lisp:run-pbt :scenario "bank" :trials 20)))
+      (is (= 1 (length results)))
+      (is (string= "scenario:bank" (getf (first results) :entity)))
+      (is (= 0 (getf (first results) :failed))))))
+
+(test scenario-run-pbt-entity-invariants-checked
+  "scenario PBT also checks per-entity invariants on generated instances"
+  (with-fresh-specs
+    (mcp-lisp:defentity account ()
+      (id string :required t)
+      (balance number :required t :min 0 :max 1000))
+    (mcp-lisp:definvariant non-negative
+      :on account
+      :check (>= (account-balance account) 0))
+    (mcp-lisp:defscenario bank
+      :entities ((accounts (2 3) account)))
+    ;; Trivial scenario invariant
+    (mcp-lisp:definvariant has-accounts
+      :on bank
+      :check (> (length accounts) 0))
+    ;; This should pass since generated accounts have balance >= 0
+    (let ((results (mcp-lisp:run-pbt :scenario "bank" :trials 30)))
+      (is (= 1 (length results)))
+      (is (= 0 (getf (first results) :failed))))))
+
+(test scenario-cross-entity-invariant
+  "scenario invariant that checks relationships across entities"
+  (with-fresh-specs
+    (mcp-lisp:defentity warehouse ()
+      (id string :required t)
+      (capacity number :required t :min 100 :max 500))
+    (mcp-lisp:defentity product ()
+      (id string :required t)
+      (stock number :required t :min 0 :max 50))
+    (mcp-lisp:defscenario inventory
+      :entities ((warehouses (1 2) warehouse)
+                 (products (3 6) product :per warehouses)))
+    ;; Invariant: each warehouse has at least 3 products
+    (mcp-lisp:definvariant min-products-per-warehouse
+      :on inventory
+      :check (>= (length products) (* 3 (length warehouses))))
+    (mcp-lisp:ensure-entity-accessors "warehouse")
+    (mcp-lisp:ensure-entity-accessors "product")
+    (let ((results (mcp-lisp:run-pbt :scenario "inventory" :trials 30)))
+      (is (= 1 (length results)))
       (is (= 0 (getf (first results) :failed))))))

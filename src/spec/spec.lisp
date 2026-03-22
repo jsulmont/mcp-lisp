@@ -39,6 +39,12 @@
            #:describe-config
            #:config-fields
            #:config
+           ;; Scenarios
+           #:*scenarios*
+           #:*scenario-generators*
+           #:defscenario
+           #:list-scenarios
+           #:describe-scenario
            ;; Utilities
            #:clear-specs
            #:validate-specs
@@ -65,6 +71,8 @@
   "Config field specs — a list of (NAME TYPE &key ...) forms set by DEFCONFIG.")
 (defvar *current-config* nil
   "Currently active config plist, bound dynamically during PBT.")
+(defvar *scenarios* (make-hash-table :test #'equal))
+(defvar *scenario-generators* (make-hash-table :test #'equal))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Known keywords for validation at macroexpand time
@@ -208,6 +216,42 @@ Returns (values fields relations derived)."
      (values)))
 
 ;;; ---------------------------------------------------------------------------
+;;; defscenario
+;;; ---------------------------------------------------------------------------
+
+(defun parse-scenario-cardinality (card)
+  "Parse cardinality spec: N → (N N), (MIN MAX) → (MIN MAX)."
+  (if (consp card)
+      (list (first card) (second card))
+      (list card card)))
+
+(defmacro defscenario (name &key entities)
+  "Define a multi-entity test scenario for cross-entity PBT.
+
+  (defscenario grid-dispatch
+    :entities ((zones   (1 3) grid-zone)
+               (gens    (3 8) generator :per zones)
+               (storage (0 2) storage-unit :per zones)
+               (interval 1 dispatch-interval)))"
+  (let ((key (string-downcase (string name)))
+        (parsed-entities
+          (mapcar (lambda (spec)
+                    (destructuring-bind (binding card entity-name &key per) spec
+                      (let ((minmax (parse-scenario-cardinality card)))
+                        (list :binding (intern (string binding) :keyword)
+                              :entity (string-downcase (string entity-name))
+                              :min (first minmax)
+                              :max (second minmax)
+                              :per (when per
+                                     (intern (string per) :keyword))))))
+                  entities)))
+    `(progn
+       (setf (gethash ,key *scenarios*)
+             (list :name ',name
+                   :entities ',parsed-entities))
+       ',name)))
+
+;;; ---------------------------------------------------------------------------
 ;;; Config accessor
 ;;; ---------------------------------------------------------------------------
 
@@ -278,6 +322,14 @@ Bound dynamically during PBT via *CURRENT-CONFIG*."
   "Return the config field specs (alias for DESCRIBE-CONFIG)."
   *config*)
 
+(defun list-scenarios ()
+  "Return a list of registered scenario name strings."
+  (loop for k being the hash-keys of *scenarios* collect k))
+
+(defun describe-scenario (name)
+  "Return the plist for scenario NAME (string-downcased), or NIL."
+  (gethash (string-downcase (string name)) *scenarios*))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Utilities
 ;;; ---------------------------------------------------------------------------
@@ -289,6 +341,8 @@ Bound dynamically during PBT via *CURRENT-CONFIG*."
   (clrhash *invariants*)
   (clrhash *generators*)
   (clrhash *variants*)
+  (clrhash *scenarios*)
+  (clrhash *scenario-generators*)
   (setf *config* nil)
   (setf *current-config* nil)
   (values))
@@ -446,11 +500,14 @@ Also warns about non-exhaustive variant handling in rules.
 Returns a list of warning strings. Empty list = all clear."
   (let ((entity-keys (loop for k being the hash-keys of *entities* collect k))
         (variant-keys (loop for k being the hash-keys of *variants* collect k))
+        (scenario-keys (loop for k being the hash-keys of *scenarios* collect k))
         (warnings nil))
     (flet ((known-entity-p (sym)
              (member (string-downcase (string sym)) entity-keys :test #'string=))
            (known-variant-p (sym)
-             (member (string-downcase (string sym)) variant-keys :test #'string=)))
+             (member (string-downcase (string sym)) variant-keys :test #'string=))
+           (known-scenario-p (sym)
+             (member (string-downcase (string sym)) scenario-keys :test #'string=)))
       ;; Check rules — :when car should name an entity
       (maphash (lambda (key plist)
                  (let ((when-clause (getf plist :when)))
@@ -460,12 +517,13 @@ Returns a list of warning strings. Empty list = all clear."
                                      key (car when-clause))
                              warnings)))))
                *rules*)
-      ;; Check invariants — :on should name an entity or variant
+      ;; Check invariants — :on should name an entity, variant, or scenario
       (maphash (lambda (key plist)
                  (let ((on (getf plist :on)))
                    (when on
-                     (unless (or (known-entity-p on) (known-variant-p on))
-                       (push (format nil "invariant ~A: :on references unknown entity ~A"
+                     (unless (or (known-entity-p on) (known-variant-p on)
+                                 (known-scenario-p on))
+                       (push (format nil "invariant ~A: :on references unknown entity/scenario ~A"
                                      key on)
                              warnings)))))
                *invariants*)
@@ -486,12 +544,22 @@ Returns a list of warning strings. Empty list = all clear."
                                              (format nil "invariant ~A" key)
                                              warnings))
                    (when (getf plist :on)
-                     (setf warnings
-                           (check-form-free-variables
-                            (getf plist :check)
-                            (list (getf plist :on))
-                            (format nil "invariant ~A" key)
-                            warnings)))))
+                     (let* ((on-sym (getf plist :on))
+                            (scenario (describe-scenario on-sym))
+                            (bound-vars
+                              (if scenario
+                                  ;; Scenario invariant: bindings are the variable names
+                                  (mapcar (lambda (e)
+                                            (intern (symbol-name (getf e :binding))))
+                                          (getf scenario :entities))
+                                  ;; Entity/variant invariant: entity name is the variable
+                                  (list on-sym))))
+                       (setf warnings
+                             (check-form-free-variables
+                              (getf plist :check)
+                              bound-vars
+                              (format nil "invariant ~A" key)
+                              warnings))))))
                *invariants*)
       ;; Check forms in rule :requires, :ensures, and :let clauses
       (maphash (lambda (key plist)
@@ -550,7 +618,24 @@ Returns a list of warning strings. Empty list = all clear."
                            (push (format nil "rule exhaustiveness: entity ~A variant ~A (~A = ~A) not handled by any rule"
                                          ekey val disc-field val)
                                  warnings))))))
-                 entity-disc)))
+                 entity-disc))
+      ;; Check scenarios — entity refs exist, :per bindings valid
+      (maphash (lambda (key plist)
+                 (let ((binding-names nil))
+                   (dolist (espec (getf plist :entities))
+                     (let ((binding (getf espec :binding))
+                           (entity (getf espec :entity))
+                           (per (getf espec :per)))
+                       (push binding binding-names)
+                       (unless (known-entity-p entity)
+                         (push (format nil "scenario ~A: entity ~A not defined"
+                                       key entity)
+                               warnings))
+                       (when (and per (not (member per binding-names)))
+                         (push (format nil "scenario ~A: :per ~A references unknown binding (must be declared before use)"
+                                       key per)
+                               warnings))))))
+               *scenarios*))
     (nreverse warnings)))
 
 ;;; ---------------------------------------------------------------------------
@@ -867,20 +952,41 @@ if, member, lambda, let, call."
         "value" (string-downcase (symbol-name (getf plist :value)))
         "fields" (coerce (mapcar #'field-to-ht (getf plist :fields)) 'vector)))
 
+(defun scenario-entity-to-ht (espec)
+  "Convert a scenario entity spec plist to a hash table."
+  (let ((ht (dict "binding" (string-downcase (symbol-name (getf espec :binding)))
+                  "entity" (getf espec :entity)
+                  "min" (getf espec :min)
+                  "max" (getf espec :max))))
+    (when (getf espec :per)
+      (setf (gethash "per" ht)
+            (string-downcase (symbol-name (getf espec :per)))))
+    ht))
+
+(defun scenario-to-ht (plist)
+  "Convert a scenario plist to a hash table for JSON serialization."
+  (dict "name" (string-downcase (symbol-name (getf plist :name)))
+        "entities" (coerce (mapcar #'scenario-entity-to-ht
+                                   (getf plist :entities))
+                           'vector)))
+
 (defun specs-to-json ()
   "Serialize all spec registries to a JSON string."
   (let ((entities (dict))
         (rules (dict))
         (invariants (dict))
-        (variants (dict)))
+        (variants (dict))
+        (scenarios (dict)))
     (maphash (lambda (k v) (setf (gethash k entities) (entity-to-ht v))) *entities*)
     (maphash (lambda (k v) (setf (gethash k rules) (rule-to-ht v))) *rules*)
     (maphash (lambda (k v) (setf (gethash k invariants) (invariant-to-ht v))) *invariants*)
     (maphash (lambda (k v) (setf (gethash k variants) (variant-to-ht v))) *variants*)
+    (maphash (lambda (k v) (setf (gethash k scenarios) (scenario-to-ht v))) *scenarios*)
     (let ((result (dict "entities" entities
                         "rules" rules
                         "invariants" invariants
-                        "variants" variants)))
+                        "variants" variants
+                        "scenarios" scenarios)))
       (when *config*
         (setf (gethash "config" result)
               (dict "fields" (coerce (mapcar #'field-to-ht *config*) 'vector))))
@@ -990,6 +1096,26 @@ Merges with existing specs — call CLEAR-SPECS first for a clean import."
         (setf *config*
               (map 'list #'ht-to-field
                    (or (gethash "fields" config-ht) #())))))
+    ;; Scenarios
+    (let ((scenarios (gethash "scenarios" data)))
+      (when scenarios
+        (maphash
+         (lambda (key ht)
+           (setf (gethash key *scenarios*)
+                 (list :name (intern (string-upcase (gethash "name" ht)))
+                       :entities
+                       (map 'list
+                            (lambda (eht)
+                              (let ((per (gethash "per" eht)))
+                                (list :binding (intern (string-upcase (gethash "binding" eht))
+                                                       :keyword)
+                                      :entity (gethash "entity" eht)
+                                      :min (gethash "min" eht)
+                                      :max (gethash "max" eht)
+                                      :per (when per
+                                             (intern (string-upcase per) :keyword)))))
+                            (or (gethash "entities" ht) #())))))
+         scenarios)))
     (values)))
 
 ;;; ---------------------------------------------------------------------------

@@ -200,6 +200,11 @@
                 #:entity-variants
                 #:describe-config
                 #:config-fields
+                #:*scenarios*
+                #:*scenario-generators*
+                #:defscenario
+                #:list-scenarios
+                #:describe-scenario
                 #:clear-specs
                 #:validate-specs
                 #:form-to-ast
@@ -226,6 +231,11 @@
                 #:ensure-variant-accessors
                 #:generate-config
                 #:check-invariants
+                #:check-scenario-invariants
+                #:scenario-invariants-for
+                #:generate-scenario
+                #:default-generate-scenario
+                #:defscenario-generator
                 #:run-pbt
                 #:extract-generation-constraints)
   ;; Export everything
@@ -400,6 +410,11 @@
    #:entity-variants
    #:describe-config
    #:config-fields
+   #:*scenarios*
+   #:*scenario-generators*
+   #:defscenario
+   #:list-scenarios
+   #:describe-scenario
    #:clear-specs
    #:validate-specs
    #:form-to-ast
@@ -424,6 +439,11 @@
    #:ensure-variant-accessors
    #:generate-config
    #:check-invariants
+   #:check-scenario-invariants
+   #:scenario-invariants-for
+   #:generate-scenario
+   #:default-generate-scenario
+   #:defscenario-generator
    #:run-pbt
    #:extract-generation-constraints))
 

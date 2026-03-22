@@ -54,6 +54,19 @@ All macros are available in the sandbox with no imports:
 (definvariant branch-has-children
   :on branch
   :check (> (length (branch-children branch)) 0))
+
+;; Scenarios — multi-entity test fixtures for cross-entity PBT
+(defscenario order-fulfillment
+  :entities ((warehouses (1 3) warehouse)
+             (orders     (5 20) order)
+             (items      (1 5) line-item :per orders)))
+
+;; Scenario invariants — check properties across entity boundaries
+;; Binding names from defscenario become variables in the check form
+(definvariant total-items-match
+  :on order-fulfillment
+  :check (= (reduce #'+ orders :key #'order-item-count)
+             (length items)))
 ```
 
 ### Querying specs
@@ -62,8 +75,9 @@ All macros are available in the sandbox with no imports:
 - `(list-rules)`, `(describe-rule name)`
 - `(list-invariants)`, `(describe-invariant name)`
 - `(list-variants)`, `(describe-variant name)`, `(entity-variants entity-name)`
+- `(list-scenarios)`, `(describe-scenario name)`
 - `(describe-config)`, `(config-fields)`
-- `(validate-specs)` — catches dangling entity references, undefined functions, free variables, and non-exhaustive variant handling in rules
+- `(validate-specs)` — catches dangling entity references, undefined functions, free variables, non-exhaustive variant handling, and invalid scenario bindings
 - `(clear-specs)` — reset all registries
 
 ### Property-based testing
@@ -75,6 +89,9 @@ Generate random entity instances and check invariants automatically:
 
 ;; With config: test across random configuration space
 (run-pbt :trials 100 :config-trials 5)
+
+;; Test a specific scenario (cross-entity invariants)
+(run-pbt :scenario "order-fulfillment" :trials 50)
 ```
 
 This generates random instances for every entity that has invariants, checks all applicable invariants (including variant-specific ones), and reports counterexamples on failure. When `defconfig` is defined, `:config-trials` (default 5) generates random configs within declared bounds — catching specs that only hold for the default config.
@@ -117,6 +134,24 @@ For constraints the extractor can't handle (complex arithmetic across multiple f
 - `generate-value` is available for generating individual typed values (e.g. `(generate-value 'number :min 0.0 :max 10.0)`).
 - `clear-specs` also clears registered generators.
 
+#### Custom scenario generators
+
+For scenarios where instances must be correlated across entities, use `defscenario-generator`:
+
+```lisp
+(defscenario-generator order-fulfillment (overrides)
+  (declare (ignore overrides))
+  (let* ((warehouses (list (generate-instance "warehouse")))
+         (orders (loop repeat 5 collect (generate-instance "order")))
+         (items (loop for o in orders
+                      append (loop repeat (getf o :item-count)
+                                   collect (generate-instance "line-item")))))
+    (list :warehouses warehouses :orders orders :items items)))
+```
+
+- Returns a plist mapping binding keywords to instances (lists for plural bindings, single plist for cardinality=1).
+- `generate-scenario` dispatches to custom generator if registered, otherwise uses `default-generate-scenario`.
+
 ### State machine analysis
 
 Rules with `:when`/`:ensures` patterns implicitly define state machines. The transitions module extracts and validates them:
@@ -150,10 +185,12 @@ Save specs to a file for persistence across sessions. Load them at the start of 
 
 1. User describes domain in natural language
 2. Define entities, variants, config, rules, invariants via `eval_lisp`
-3. Run `(validate-specs)` to catch dangling references and non-exhaustive variant handling
-4. Run `(validate-transitions)` to check state machines for unreachable/dead-end states
-5. Run `(run-pbt)` to test invariants against random data (and random configs)
-6. Generate code artifacts (SQL, API routes, types, validation) from the spec
-7. Export with `(specs-to-json)` and save to a file
+3. Define scenarios with `defscenario` for cross-entity invariants
+4. Run `(validate-specs)` to catch dangling references, non-exhaustive variant handling, and invalid scenario bindings
+5. Run `(validate-transitions)` to check state machines for unreachable/dead-end states
+6. Run `(run-pbt)` to test per-entity invariants against random data (and random configs)
+7. Run `(run-pbt :scenario "name")` to test cross-entity invariants
+8. Generate code artifacts (SQL, API routes, types, validation) from the spec
+9. Export with `(specs-to-json)` and save to a file
 
 Always spec first, code second.

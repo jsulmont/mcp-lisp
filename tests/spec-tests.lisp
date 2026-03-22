@@ -15,6 +15,8 @@
          (mcp-lisp/src/spec/spec::*rules* (make-hash-table :test #'equal))
          (mcp-lisp/src/spec/spec::*invariants* (make-hash-table :test #'equal))
          (mcp-lisp/src/spec/spec::*variants* (make-hash-table :test #'equal))
+         (mcp-lisp/src/spec/spec::*scenarios* (make-hash-table :test #'equal))
+         (mcp-lisp/src/spec/spec::*scenario-generators* (make-hash-table :test #'equal))
          (mcp-lisp/src/spec/spec::*config* nil)
          (mcp-lisp/src/spec/spec::*current-config* nil))
      ,@body))
@@ -753,6 +755,140 @@
     (let* ((json (mcp-lisp:specs-to-json))
            (data (mcp-lisp:decode-json json)))
       (is (null (gethash "config" data))))))
+
+;;; ---------------------------------------------------------------------------
+;;; JSON Schema
+;;; ---------------------------------------------------------------------------
+
+;;; ---------------------------------------------------------------------------
+;;; defscenario
+;;; ---------------------------------------------------------------------------
+
+(test defscenario-basic
+  "defscenario stores entity specs with parsed cardinality"
+  (with-fresh-specs
+    (mcp-lisp:defentity order ()
+      (id string :required t)
+      (total number :required t))
+    (mcp-lisp:defentity line-item ()
+      (id string :required t)
+      (qty number :required t)
+      (:belongs-to order))
+    (mcp-lisp:defscenario order-scenario
+      :entities ((orders (1 3) order)
+                 (items  (2 5) line-item :per orders)))
+    (is (= 1 (length (mcp-lisp:list-scenarios))))
+    (let ((s (mcp-lisp:describe-scenario "order-scenario")))
+      (is (not (null s)))
+      (is (= 2 (length (getf s :entities))))
+      ;; First entity spec
+      (let ((e1 (first (getf s :entities))))
+        (is (eq :orders (getf e1 :binding)))
+        (is (string= "order" (getf e1 :entity)))
+        (is (= 1 (getf e1 :min)))
+        (is (= 3 (getf e1 :max)))
+        (is (null (getf e1 :per))))
+      ;; Second entity spec with :per
+      (let ((e2 (second (getf s :entities))))
+        (is (eq :items (getf e2 :binding)))
+        (is (string= "line-item" (getf e2 :entity)))
+        (is (= 2 (getf e2 :min)))
+        (is (= 5 (getf e2 :max)))
+        (is (eq :orders (getf e2 :per)))))))
+
+(test defscenario-exact-cardinality
+  "defscenario with exact cardinality (number, not list)"
+  (with-fresh-specs
+    (mcp-lisp:defentity widget ()
+      (id string :required t))
+    (mcp-lisp:defscenario single-widget
+      :entities ((w 1 widget)))
+    (let* ((s (mcp-lisp:describe-scenario "single-widget"))
+           (e1 (first (getf s :entities))))
+      (is (= 1 (getf e1 :min)))
+      (is (= 1 (getf e1 :max))))))
+
+(test defscenario-clear-specs
+  "clear-specs clears scenarios"
+  (with-fresh-specs
+    (mcp-lisp:defentity widget ()
+      (id string :required t))
+    (mcp-lisp:defscenario test-scenario
+      :entities ((w (1 2) widget)))
+    (is (= 1 (length (mcp-lisp:list-scenarios))))
+    (mcp-lisp:clear-specs)
+    (is (= 0 (length (mcp-lisp:list-scenarios))))))
+
+(test validate-specs-scenario-entity-ref
+  "validate-specs catches unknown entity in scenario"
+  (with-fresh-specs
+    (mcp-lisp:defscenario bad-scenario
+      :entities ((things (1 3) nonexistent-entity)))
+    (let ((warnings (mcp-lisp:validate-specs)))
+      (is (plusp (length warnings)))
+      (is (search "not defined" (first warnings))))))
+
+(test validate-specs-scenario-per-ref
+  "validate-specs catches :per referencing unknown binding"
+  (with-fresh-specs
+    (mcp-lisp:defentity widget ()
+      (id string :required t))
+    (mcp-lisp:defentity part ()
+      (id string :required t)
+      (:belongs-to widget))
+    (mcp-lisp:defscenario bad-per
+      :entities ((parts (2 3) part :per missing-parent)))
+    (let ((warnings (mcp-lisp:validate-specs)))
+      (is (plusp (length warnings)))
+      (is (search "unknown binding" (first warnings))))))
+
+(test validate-specs-scenario-invariant-on
+  "validate-specs accepts scenario name in invariant :on"
+  (with-fresh-specs
+    (mcp-lisp:defentity account ()
+      (balance number :required t))
+    (mcp-lisp:defscenario bank-test
+      :entities ((accounts (2 5) account)))
+    (mcp-lisp:definvariant total-positive
+      :on bank-test
+      :check (> (reduce #'+ accounts :key (lambda (a) (getf a :balance))) 0))
+    (let ((warnings (mcp-lisp:validate-specs)))
+      ;; No warning about unknown entity for :on bank-test
+      (is (notany (lambda (w) (search "unknown entity/scenario" w)) warnings)))))
+
+(test defscenario-json-roundtrip
+  "scenarios survive JSON serialization and deserialization"
+  (with-fresh-specs
+    (mcp-lisp:defentity account ()
+      (id string :required t)
+      (balance number :required t))
+    (mcp-lisp:defentity txn ()
+      (id string :required t)
+      (amount number :required t)
+      (:belongs-to account))
+    (mcp-lisp:defscenario ledger
+      :entities ((accounts (2 4) account)
+                 (txns (1 10) txn :per accounts)))
+    (let ((json (mcp-lisp:specs-to-json)))
+      (mcp-lisp:clear-specs)
+      (is (= 0 (length (mcp-lisp:list-scenarios))))
+      (mcp-lisp:json-to-specs json)
+      (is (= 1 (length (mcp-lisp:list-scenarios))))
+      (let* ((s (mcp-lisp:describe-scenario "ledger"))
+             (entities (getf s :entities)))
+        (is (= 2 (length entities)))
+        (let ((e1 (first entities)))
+          (is (eq :accounts (getf e1 :binding)))
+          (is (string= "account" (getf e1 :entity)))
+          (is (= 2 (getf e1 :min)))
+          (is (= 4 (getf e1 :max)))
+          (is (null (getf e1 :per))))
+        (let ((e2 (second entities)))
+          (is (eq :txns (getf e2 :binding)))
+          (is (string= "txn" (getf e2 :entity)))
+          (is (= 1 (getf e2 :min)))
+          (is (= 10 (getf e2 :max)))
+          (is (eq :accounts (getf e2 :per))))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; JSON Schema

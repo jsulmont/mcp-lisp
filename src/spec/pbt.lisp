@@ -12,6 +12,8 @@
                 #:*variants*
                 #:*config*
                 #:*current-config*
+                #:*scenarios*
+                #:*scenario-generators*
                 #:config
                 #:describe-entity
                 #:list-entities
@@ -20,6 +22,8 @@
                 #:describe-variant
                 #:entity-variants
                 #:list-variants
+                #:describe-scenario
+                #:list-scenarios
                 #:entity-fields
                 #:entity-relations)
   (:export #:generate-value
@@ -30,6 +34,11 @@
            #:ensure-variant-accessors
            #:generate-config
            #:check-invariants
+           #:check-scenario-invariants
+           #:scenario-invariants-for
+           #:generate-scenario
+           #:default-generate-scenario
+           #:defscenario-generator
            #:run-pbt
            #:extract-generation-constraints))
 
@@ -691,6 +700,111 @@ Returns a list of violated invariant name strings. Empty list = all pass."
     (nreverse violations)))
 
 ;;; ---------------------------------------------------------------------------
+;;; Scenario invariants
+;;; ---------------------------------------------------------------------------
+
+(defun scenario-invariants-for (scenario-name)
+  "Return a list of (inv-name inv-plist) for invariants whose :on matches SCENARIO-NAME."
+  (let ((sname (string-downcase (string scenario-name))))
+    (loop for inv-name in (list-invariants)
+          for inv = (describe-invariant inv-name)
+          when (string-equal (string-downcase (symbol-name (getf inv :on)))
+                             sname)
+            collect (list inv-name inv))))
+
+(defun check-scenario-invariants (scenario-name scenario-instance)
+  "Check all scenario-level invariants for SCENARIO-NAME against SCENARIO-INSTANCE.
+SCENARIO-INSTANCE is a plist mapping binding keywords to instances (or lists of instances).
+Invariant check forms receive bindings as variables via flat-binding:
+singular bindings (cardinality 1) are single plists, plural bindings are lists.
+Returns a list of violated invariant name strings."
+  (let ((scenario (describe-scenario scenario-name))
+        (violations nil))
+    (when scenario
+      (let* ((bindings (getf scenario :entities))
+             ;; Build (sym value) pairs for let-binding
+             (bind-pairs
+               (mapcar (lambda (espec)
+                         (let* ((binding-kw (getf espec :binding))
+                                (sym (intern (symbol-name binding-kw)))
+                                (val (getf scenario-instance binding-kw)))
+                           (list sym val)))
+                       bindings)))
+        (dolist (entry (scenario-invariants-for scenario-name))
+          (destructuring-bind (inv-name inv) entry
+            (let ((check-form (getf inv :check)))
+              (handler-case
+                  (let* ((params (mapcar #'first bind-pairs))
+                         (fn (handler-bind ((warning #'muffle-warning))
+                               (compile nil `(lambda ,params ,check-form)))))
+                    (unless (apply fn (mapcar #'second bind-pairs))
+                      (push inv-name violations)))
+                (error (e)
+                  (push (format nil "~A (error: ~A)" inv-name e) violations))))))))
+    (nreverse violations)))
+
+;;; ---------------------------------------------------------------------------
+;;; Scenario generation
+;;; ---------------------------------------------------------------------------
+
+(defun default-generate-scenario (scenario-name &optional overrides)
+  "Generate a scenario instance: a plist mapping binding keywords to entity instances.
+Iterates entity specs in declaration order, respecting cardinality and :per relations.
+OVERRIDES is a plist mapping binding keywords to pre-built instances."
+  (let* ((scenario (describe-scenario scenario-name))
+         (result nil))
+    (dolist (espec (getf scenario :entities))
+      (let* ((binding (getf espec :binding))
+             (entity-name (getf espec :entity))
+             (emin (getf espec :min))
+             (emax (getf espec :max))
+             (per (getf espec :per))
+             (override (getf overrides binding)))
+        (if override
+            (setf (getf result binding) override)
+            (if per
+                ;; Generate N instances per parent
+                (let ((parents (let ((p (getf result per)))
+                                 (if (listp p) p (list p))))
+                      (all-instances nil))
+                  (dolist (parent parents)
+                    (declare (ignore parent))
+                    (let ((n (if (= emin emax) emin
+                                 (+ emin (random (1+ (- emax emin)))))))
+                      (dotimes (i n)
+                        (push (generate-instance entity-name) all-instances))))
+                  (setf (getf result binding) (nreverse all-instances)))
+                ;; Generate N instances (no parent)
+                (let ((n (if (= emin emax) emin
+                             (+ emin (random (1+ (- emax emin)))))))
+                  (if (= n 1)
+                      (setf (getf result binding) (generate-instance entity-name))
+                      (let ((instances nil))
+                        (dotimes (i n)
+                          (push (generate-instance entity-name) instances))
+                        (setf (getf result binding) (nreverse instances)))))))))
+    result))
+
+(defun generate-scenario (scenario-name &optional overrides)
+  "Generate a scenario instance, using custom generator if registered."
+  (let ((custom (gethash (string-downcase (string scenario-name))
+                         *scenario-generators*)))
+    (if custom
+        (funcall custom overrides)
+        (default-generate-scenario scenario-name overrides))))
+
+(defmacro defscenario-generator (scenario-name (overrides-var) &body body)
+  "Register a custom scenario generator for SCENARIO-NAME.
+The generator receives OVERRIDES (a plist or NIL) and must return a plist
+mapping binding keywords to instances (or lists of instances)."
+  (let ((key (string-downcase (string scenario-name))))
+    `(progn
+       (setf (gethash ,key *scenario-generators*)
+             (lambda (,overrides-var)
+               ,@body))
+       ',scenario-name)))
+
+;;; ---------------------------------------------------------------------------
 ;;; PBT runner
 ;;; ---------------------------------------------------------------------------
 
@@ -737,11 +851,64 @@ Returns (values results total-passed total-failed)."
                   results)))))
     (values (nreverse results) total-passed total-failed)))
 
-(defun run-pbt (&key (trials 100) (config-trials 5))
+(defun run-scenario-trials (scenario-name trials)
+  "Run scenario PBT trials. Returns a result plist."
+  (let* ((invs (scenario-invariants-for scenario-name))
+         (scenario (describe-scenario scenario-name))
+         (entity-specs (getf scenario :entities))
+         (passed 0)
+         (failed 0)
+         (failures nil))
+    (dotimes (i trials)
+      (let* ((instance (generate-scenario scenario-name))
+             ;; Check scenario-level invariants
+             (scenario-violations (check-scenario-invariants scenario-name instance))
+             ;; Check per-entity invariants on each generated instance
+             (entity-violations nil))
+        (dolist (espec entity-specs)
+          (let* ((binding (getf espec :binding))
+                 (entity-name (getf espec :entity))
+                 (val (getf instance binding))
+                 (instances (if (listp val)
+                                (if (and val (keywordp (car val)))
+                                    (list val)  ;; single plist
+                                    val)         ;; list of plists
+                                (list val))))
+            (dolist (inst instances)
+              (when inst
+                (let ((v (check-invariants entity-name inst)))
+                  (when v
+                    (push (list :binding binding :entity entity-name
+                                :violations v)
+                          entity-violations)))))))
+        (let ((all-v (append scenario-violations
+                             (when entity-violations
+                               (list (format nil "entity-violations: ~{~A~^, ~}"
+                                             (mapcar (lambda (ev)
+                                                       (format nil "~A.~A: ~{~A~^, ~}"
+                                                               (getf ev :binding)
+                                                               (getf ev :entity)
+                                                               (getf ev :violations)))
+                                                     entity-violations)))))))
+          (if all-v
+              (progn
+                (incf failed)
+                (when (< (length failures) 3)
+                  (push (list :instance instance :violations all-v) failures)))
+              (incf passed)))))
+    (list :entity (format nil "scenario:~A" scenario-name)
+          :invariants (mapcar #'first invs)
+          :trials trials
+          :passed passed
+          :failed failed
+          :failures (nreverse failures))))
+
+(defun run-pbt (&key (trials 100) (config-trials 5) scenario)
   "Run property-based testing on all entities with invariants.
 Generates TRIALS random instances per entity and checks all applicable
 invariants. When *CONFIG* is defined, runs CONFIG-TRIALS rounds with
 random configs to test across configuration space.
+When SCENARIO is provided (name string), runs only that scenario's PBT.
 Returns a list of result plists and prints a summary."
   ;; Set up accessors for all entities and variants
   (dolist (name (list-entities))
@@ -759,18 +926,41 @@ Returns a list of result plists and prints a summary."
         ;; Config-aware: multiple config trials
         (dotimes (ct config-trials)
           (let ((*current-config* (generate-config)))
+            (unless scenario
+              (multiple-value-bind (results passed failed)
+                  (run-pbt-trials trials)
+                (setf all-results (append all-results results))
+                (incf grand-passed passed)
+                (incf grand-failed failed)))
+            ;; Scenario trials
+            (let ((scenario-names (if scenario
+                                      (list (string-downcase (string scenario)))
+                                      (list-scenarios))))
+              (dolist (sname scenario-names)
+                (when (scenario-invariants-for sname)
+                  (let ((r (run-scenario-trials sname trials)))
+                    (push r all-results)
+                    (incf grand-passed (getf r :passed))
+                    (incf grand-failed (getf r :failed))))))))
+        ;; No config
+        (progn
+          (unless scenario
             (multiple-value-bind (results passed failed)
                 (run-pbt-trials trials)
-              (setf all-results (append all-results results))
-              (incf grand-passed passed)
-              (incf grand-failed failed))))
-        ;; No config: single round
-        (multiple-value-bind (results passed failed)
-            (run-pbt-trials trials)
-          (setf all-results results)
-          (setf grand-passed passed)
-          (setf grand-failed failed)))
-    ;; Merge results by entity (sum across config trials)
+              (setf all-results results)
+              (setf grand-passed passed)
+              (setf grand-failed failed)))
+          ;; Scenario trials
+          (let ((scenario-names (if scenario
+                                    (list (string-downcase (string scenario)))
+                                    (list-scenarios))))
+            (dolist (sname scenario-names)
+              (when (scenario-invariants-for sname)
+                (let ((r (run-scenario-trials sname trials)))
+                  (push r all-results)
+                  (incf grand-passed (getf r :passed))
+                  (incf grand-failed (getf r :failed))))))))
+    ;; Merge results by entity/scenario (sum across config trials)
     (let ((merged (make-hash-table :test #'equal)))
       (dolist (r all-results)
         (let* ((ename (getf r :entity))
