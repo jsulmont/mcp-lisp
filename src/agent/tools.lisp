@@ -180,6 +180,33 @@ system commands, git, etc."
     (error (e)
       (format nil "Error reading file: ~a" e))))
 
+;;; write_file - Write file contents
+
+(define-tool write-file ((path string "Path to the file to write" :required t)
+                         (content string "Content to write" :required t)
+                         (if-exists string "Behavior when file exists: overwrite (default), append, or error"
+                                    :default "overwrite"))
+  "Write content to a file. Creates parent directories if needed."
+  (:annotations :destructive t)
+  (ensure-directories-exist (pathname path))
+  (let ((exists-action (cond ((string-equal if-exists "append") :append)
+                             ((string-equal if-exists "error")
+                              (when (probe-file path)
+                                (return-from write-file-handler
+                                  (format nil "Error: file already exists: ~a" path)))
+                              :supersede)
+                             (t :supersede))))
+    (handler-case
+        (progn
+          (with-open-file (out path :direction :output
+                                    :if-exists exists-action
+                                    :if-does-not-exist :create
+                                    :external-format :utf-8)
+            (write-string content out))
+          (format nil "Wrote ~a bytes to ~a" (length content) path))
+      (error (e)
+        (format nil "Error writing file: ~a" e)))))
+
 ;;; list_tools - List available tools (meta-tool)
 
 (define-tool list-tools ()
@@ -232,6 +259,81 @@ system commands, git, etc."
                            (gethash "title" result)
                            (gethash "url" result)
                            (gethash "content" result))))))))
+
+;;; http_fetch - Fetch a URL
+
+(define-tool http-fetch ((url string "URL to fetch" :required t)
+                         (max-bytes integer "Maximum response bytes to return" :default 100000))
+  "Fetch the contents of a URL via HTTP GET and return the response body."
+  (:annotations :read-only t :open-world t)
+  (handler-case
+      (multiple-value-bind (body status)
+          (dex:get url :read-timeout 15 :connect-timeout 5
+                       :want-stream nil
+                       :force-string t)
+        (if (<= 200 status 299)
+            (if (> (length body) (or max-bytes 100000))
+                (subseq body 0 (or max-bytes 100000))
+                body)
+            (format nil "HTTP ~a: ~a" status
+                    (subseq body 0 (min (length body) 500)))))
+    (error (e)
+      (format nil "Error fetching ~a: ~a" url e))))
+
+;;; diff - Unified diff between two strings or files
+
+(define-tool diff ((a string "First string or file path" :required t)
+                   (b string "Second string or file path" :required t)
+                   (as-files boolean "Treat a and b as file paths" :default nil))
+  "Return a unified diff between two strings, or between two files when as_files is true."
+  (:annotations :read-only t)
+  (flet ((resolve (x)
+           (if as-files
+               (handler-case (uiop:read-file-string x)
+                 (error (e) (return-from diff-handler
+                              (format nil "Error reading ~a: ~a" x e))))
+               x)))
+    (let* ((text-a (resolve a))
+           (text-b (resolve b))
+           (lines-a (uiop:split-string text-a :separator '(#\Newline)))
+           (lines-b (uiop:split-string text-b :separator '(#\Newline)))
+           (len-a (length lines-a))
+           (len-b (length lines-b)))
+      ;; Simple LCS-based unified diff
+      (let* ((dp (make-array (list (1+ len-a) (1+ len-b)) :initial-element 0)))
+        ;; Build LCS table
+        (loop for i from 1 to len-a
+              do (loop for j from 1 to len-b
+                       do (setf (aref dp i j)
+                                (if (string= (nth (1- i) lines-a) (nth (1- j) lines-b))
+                                    (1+ (aref dp (1- i) (1- j)))
+                                    (max (aref dp (1- i) j) (aref dp i (1- j)))))))
+        ;; Backtrack to produce diff
+        (let ((hunks nil)
+              (i len-a)
+              (j len-b))
+          (loop while (or (plusp i) (plusp j))
+                do (cond
+                     ((and (plusp i) (plusp j)
+                           (string= (nth (1- i) lines-a) (nth (1- j) lines-b)))
+                      (push (cons :ctx (nth (1- i) lines-a)) hunks)
+                      (decf i) (decf j))
+                     ((and (plusp j)
+                           (or (zerop i)
+                               (> (aref dp i (1- j)) (aref dp (1- i) j))))
+                      (push (cons :add (nth (1- j) lines-b)) hunks)
+                      (decf j))
+                     (t
+                      (push (cons :del (nth (1- i) lines-a)) hunks)
+                      (decf i))))
+          (if (every (lambda (h) (eq (car h) :ctx)) hunks)
+              "No differences."
+              (with-output-to-string (out)
+                (dolist (h hunks)
+                  (ecase (car h)
+                    (:ctx (format out " ~a~%" (cdr h)))
+                    (:add (format out "+~a~%" (cdr h)))
+                    (:del (format out "-~a~%" (cdr h))))))))))))
 
 ;;; grep_files - Search file contents (rg or grep)
 
