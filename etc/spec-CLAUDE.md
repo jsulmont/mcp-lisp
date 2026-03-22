@@ -138,7 +138,7 @@ For constraints the extractor can't handle (complex arithmetic across multiple f
 
 #### Custom scenario generators
 
-For scenarios where instances must be correlated across entities, use `defscenario-generator`:
+**You MUST write a `defscenario-generator` whenever a scenario has invariants that compute aggregates, sums, or cross-references across entity bindings** (e.g. "total equals sum of parts", "transfers net to zero", "priority ordering across contracts"). Default random generation will never satisfy these — instances must be constructed top-down with correlated values.
 
 ```lisp
 (defscenario-generator order-fulfillment (overrides)
@@ -183,16 +183,25 @@ A state field is a `(member ...)` field that appears as a source in at least one
 
 Save specs to a file for persistence across sessions. Load them at the start of a new session.
 
+### Scenario binding semantics
+
+- Cardinality `(min max)` (e.g. `(1 3)`) always produces a **list** of instances, even when the random count is 1. Use `every`, `reduce`, `mapcar` to iterate.
+- Cardinality `1` (bare number) produces a **single plist** (not a list). Access fields directly with `getf`.
+
+Example: `(interval 1 dispatch-interval)` → `interval` is a plist; use `(getf interval :total-generation-mw)`.
+Example: `(zones (1 3) grid-zone)` → `zones` is always a list; use `(every (lambda (z) ...) zones)`.
+
 ### Workflow
 
 1. User describes domain in natural language
 2. Define entities, variants, config, rules, invariants via `eval_lisp`
 3. Define scenarios with `defscenario` for cross-entity invariants
-4. Run `(validate-specs)` to catch dangling references, non-exhaustive variant handling, and invalid scenario bindings
-5. Run `(validate-transitions)` to check state machines for unreachable/dead-end states
-6. Run `(run-pbt)` to test per-entity invariants against random data (and random configs)
-7. Run `(run-pbt :scenario "name")` to test cross-entity invariants
-8. Generate code artifacts (SQL, API routes, types, validation) from the spec
-9. Export with `(specs-to-json)` and save to a file
+4. **Write `defscenario-generator` when cross-entity invariants require correlated data.** If any scenario invariant computes aggregates across bindings (e.g. "sum of generator outputs = interval total", "zone transfers net to zero"), random independent generation will always fail. Write a custom scenario generator that constructs instances top-down so derived/aggregate fields are consistent. See [Custom scenario generators](#custom-scenario-generators).
+5. Run `(validate-specs)` to catch dangling references, non-exhaustive variant handling, and invalid scenario bindings
+6. Run `(validate-transitions)` to check state machines for unreachable/dead-end states
+7. Run `(run-pbt)` to test per-entity invariants against random data (and random configs)
+8. Run `(run-pbt :scenario "name")` to test cross-entity invariants
+9. Generate code artifacts (SQL, API routes, types, validation) from the spec
+10. Export with `(specs-to-json)` and save to a file
 
 Always spec first, code second.
