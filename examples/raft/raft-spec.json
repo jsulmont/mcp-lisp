@@ -1,0 +1,1770 @@
+{
+  "entities": {
+    "server": {
+      "name": "server",
+      "supers": [],
+      "fields": [
+        {
+          "name": "id",
+          "type": "string",
+          "required": true,
+          "unique": true
+        },
+        {
+          "name": "current-term",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "state",
+          "type": "(member :follower :candidate :leader)",
+          "required": true,
+          "default": ":follower"
+        },
+        {
+          "name": "voted-for",
+          "type": "string"
+        },
+        {
+          "name": "commit-index",
+          "type": "number",
+          "required": true,
+          "default": "0"
+        },
+        {
+          "name": "log-length",
+          "type": "number",
+          "required": true,
+          "default": "0"
+        }
+      ],
+      "relations": [
+        {
+          "kind": "has-many",
+          "name": "log-entries",
+          "of": "log-entry"
+        }
+      ],
+      "derived": []
+    },
+    "log-entry": {
+      "name": "log-entry",
+      "supers": [],
+      "fields": [
+        {
+          "name": "id",
+          "type": "string",
+          "required": true,
+          "unique": true
+        },
+        {
+          "name": "server-id",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "idx",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "term",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "value",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "relations": [
+        {
+          "kind": "belongs-to",
+          "name": "server",
+          "of": false
+        }
+      ],
+      "derived": []
+    }
+  },
+  "rules": {
+    "timeout-from-follower": {
+      "name": "timeout-from-follower",
+      "when": {
+        "node": "call",
+        "fn": "server",
+        "args": [
+          {
+            "node": "keyword",
+            "name": "state"
+          },
+          {
+            "node": "keyword",
+            "name": "follower"
+          }
+        ]
+      },
+      "sets": "((server-voted-for server) nil)",
+      "ensures": [
+        {
+          "node": "eq",
+          "left": {
+            "node": "field",
+            "object": {
+              "node": "var",
+              "name": "server"
+            },
+            "field": "state"
+          },
+          "right": {
+            "node": "keyword",
+            "name": "candidate"
+          }
+        }
+      ]
+    },
+    "timeout-from-candidate": {
+      "name": "timeout-from-candidate",
+      "when": {
+        "node": "call",
+        "fn": "server",
+        "args": [
+          {
+            "node": "keyword",
+            "name": "state"
+          },
+          {
+            "node": "keyword",
+            "name": "candidate"
+          }
+        ]
+      },
+      "sets": "((server-voted-for server) nil)",
+      "ensures": [
+        {
+          "node": "eq",
+          "left": {
+            "node": "field",
+            "object": {
+              "node": "var",
+              "name": "server"
+            },
+            "field": "state"
+          },
+          "right": {
+            "node": "keyword",
+            "name": "candidate"
+          }
+        }
+      ]
+    },
+    "become-leader": {
+      "name": "become-leader",
+      "when": {
+        "node": "call",
+        "fn": "server",
+        "args": [
+          {
+            "node": "keyword",
+            "name": "state"
+          },
+          {
+            "node": "keyword",
+            "name": "candidate"
+          }
+        ]
+      },
+      "ensures": [
+        {
+          "node": "eq",
+          "left": {
+            "node": "field",
+            "object": {
+              "node": "var",
+              "name": "server"
+            },
+            "field": "state"
+          },
+          "right": {
+            "node": "keyword",
+            "name": "leader"
+          }
+        }
+      ]
+    },
+    "step-down-from-leader": {
+      "name": "step-down-from-leader",
+      "when": {
+        "node": "call",
+        "fn": "server",
+        "args": [
+          {
+            "node": "keyword",
+            "name": "state"
+          },
+          {
+            "node": "keyword",
+            "name": "leader"
+          }
+        ]
+      },
+      "sets": "((server-voted-for server) nil)",
+      "ensures": [
+        {
+          "node": "eq",
+          "left": {
+            "node": "field",
+            "object": {
+              "node": "var",
+              "name": "server"
+            },
+            "field": "state"
+          },
+          "right": {
+            "node": "keyword",
+            "name": "follower"
+          }
+        }
+      ]
+    },
+    "step-down-from-candidate": {
+      "name": "step-down-from-candidate",
+      "when": {
+        "node": "call",
+        "fn": "server",
+        "args": [
+          {
+            "node": "keyword",
+            "name": "state"
+          },
+          {
+            "node": "keyword",
+            "name": "candidate"
+          }
+        ]
+      },
+      "sets": "((server-voted-for server) nil)",
+      "ensures": [
+        {
+          "node": "eq",
+          "left": {
+            "node": "field",
+            "object": {
+              "node": "var",
+              "name": "server"
+            },
+            "field": "state"
+          },
+          "right": {
+            "node": "keyword",
+            "name": "follower"
+          }
+        }
+      ]
+    },
+    "restart-from-leader": {
+      "name": "restart-from-leader",
+      "when": {
+        "node": "call",
+        "fn": "server",
+        "args": [
+          {
+            "node": "keyword",
+            "name": "state"
+          },
+          {
+            "node": "keyword",
+            "name": "leader"
+          }
+        ]
+      },
+      "sets": "((server-commit-index server) 0 (server-voted-for server) nil)",
+      "ensures": [
+        {
+          "node": "eq",
+          "left": {
+            "node": "field",
+            "object": {
+              "node": "var",
+              "name": "server"
+            },
+            "field": "state"
+          },
+          "right": {
+            "node": "keyword",
+            "name": "follower"
+          }
+        }
+      ]
+    },
+    "restart-from-candidate": {
+      "name": "restart-from-candidate",
+      "when": {
+        "node": "call",
+        "fn": "server",
+        "args": [
+          {
+            "node": "keyword",
+            "name": "state"
+          },
+          {
+            "node": "keyword",
+            "name": "candidate"
+          }
+        ]
+      },
+      "sets": "((server-commit-index server) 0 (server-voted-for server) nil)",
+      "ensures": [
+        {
+          "node": "eq",
+          "left": {
+            "node": "field",
+            "object": {
+              "node": "var",
+              "name": "server"
+            },
+            "field": "state"
+          },
+          "right": {
+            "node": "keyword",
+            "name": "follower"
+          }
+        }
+      ]
+    },
+    "restart-from-follower": {
+      "name": "restart-from-follower",
+      "when": {
+        "node": "call",
+        "fn": "server",
+        "args": [
+          {
+            "node": "keyword",
+            "name": "state"
+          },
+          {
+            "node": "keyword",
+            "name": "follower"
+          }
+        ]
+      },
+      "sets": "((server-commit-index server) 0 (server-voted-for server) nil)",
+      "ensures": [
+        {
+          "node": "eq",
+          "left": {
+            "node": "field",
+            "object": {
+              "node": "var",
+              "name": "server"
+            },
+            "field": "state"
+          },
+          "right": {
+            "node": "keyword",
+            "name": "follower"
+          }
+        }
+      ]
+    }
+  },
+  "invariants": {
+    "term-positive": {
+      "name": "term-positive",
+      "on": "server",
+      "check": {
+        "node": "compare",
+        "op": ">=",
+        "left": {
+          "node": "field",
+          "object": {
+            "node": "var",
+            "name": "server"
+          },
+          "field": "current-term"
+        },
+        "right": {
+          "node": "literal",
+          "value": 1
+        }
+      }
+    },
+    "commit-index-non-negative": {
+      "name": "commit-index-non-negative",
+      "on": "server",
+      "check": {
+        "node": "compare",
+        "op": ">=",
+        "left": {
+          "node": "field",
+          "object": {
+            "node": "var",
+            "name": "server"
+          },
+          "field": "commit-index"
+        },
+        "right": {
+          "node": "literal",
+          "value": 0
+        }
+      }
+    },
+    "commit-within-log": {
+      "name": "commit-within-log",
+      "on": "server",
+      "check": {
+        "node": "compare",
+        "op": "<=",
+        "left": {
+          "node": "field",
+          "object": {
+            "node": "var",
+            "name": "server"
+          },
+          "field": "commit-index"
+        },
+        "right": {
+          "node": "field",
+          "object": {
+            "node": "var",
+            "name": "server"
+          },
+          "field": "log-length"
+        }
+      }
+    },
+    "log-length-non-negative": {
+      "name": "log-length-non-negative",
+      "on": "server",
+      "check": {
+        "node": "compare",
+        "op": ">=",
+        "left": {
+          "node": "field",
+          "object": {
+            "node": "var",
+            "name": "server"
+          },
+          "field": "log-length"
+        },
+        "right": {
+          "node": "literal",
+          "value": 0
+        }
+      }
+    },
+    "entry-index-positive": {
+      "name": "entry-index-positive",
+      "on": "log-entry",
+      "check": {
+        "node": "compare",
+        "op": ">=",
+        "left": {
+          "node": "field",
+          "object": {
+            "node": "var",
+            "name": "log-entry"
+          },
+          "field": "idx"
+        },
+        "right": {
+          "node": "literal",
+          "value": 1
+        }
+      }
+    },
+    "entry-term-positive": {
+      "name": "entry-term-positive",
+      "on": "log-entry",
+      "check": {
+        "node": "compare",
+        "op": ">=",
+        "left": {
+          "node": "field",
+          "object": {
+            "node": "var",
+            "name": "log-entry"
+          },
+          "field": "term"
+        },
+        "right": {
+          "node": "literal",
+          "value": 1
+        }
+      }
+    },
+    "election-safety": {
+      "name": "election-safety",
+      "on": "raft-cluster",
+      "check": {
+        "node": "let",
+        "bindings": [
+          {
+            "name": "leaders",
+            "value": {
+              "node": "call",
+              "fn": "remove-if-not",
+              "args": [
+                {
+                  "node": "lambda",
+                  "params": [
+                    "s"
+                  ],
+                  "body": {
+                    "node": "eq",
+                    "left": {
+                      "node": "field",
+                      "object": {
+                        "node": "var",
+                        "name": "s"
+                      },
+                      "field": "state"
+                    },
+                    "right": {
+                      "node": "keyword",
+                      "name": "leader"
+                    }
+                  }
+                },
+                {
+                  "node": "var",
+                  "name": "servers"
+                }
+              ]
+            }
+          }
+        ],
+        "body": {
+          "node": "compare",
+          "op": "=",
+          "left": {
+            "node": "call",
+            "fn": "length",
+            "args": [
+              {
+                "node": "var",
+                "name": "leaders"
+              }
+            ]
+          },
+          "right": {
+            "node": "call",
+            "fn": "length",
+            "args": [
+              {
+                "node": "call",
+                "fn": "remove-duplicates",
+                "args": [
+                  {
+                    "node": "call",
+                    "fn": "mapcar",
+                    "args": [
+                      {
+                        "node": "lambda",
+                        "params": [
+                          "s"
+                        ],
+                        "body": {
+                          "node": "field",
+                          "object": {
+                            "node": "var",
+                            "name": "s"
+                          },
+                          "field": "current-term"
+                        }
+                      },
+                      {
+                        "node": "var",
+                        "name": "leaders"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    "log-matching": {
+      "name": "log-matching",
+      "on": "raft-cluster",
+      "check": {
+        "node": "call",
+        "fn": "every",
+        "args": [
+          {
+            "node": "lambda",
+            "params": [
+              "e1"
+            ],
+            "body": {
+              "node": "call",
+              "fn": "every",
+              "args": [
+                {
+                  "node": "lambda",
+                  "params": [
+                    "e2"
+                  ],
+                  "body": {
+                    "node": "or",
+                    "args": [
+                      {
+                        "node": "not",
+                        "arg": {
+                          "node": "compare",
+                          "op": "=",
+                          "left": {
+                            "node": "field",
+                            "object": {
+                              "node": "var",
+                              "name": "e1"
+                            },
+                            "field": "idx"
+                          },
+                          "right": {
+                            "node": "field",
+                            "object": {
+                              "node": "var",
+                              "name": "e2"
+                            },
+                            "field": "idx"
+                          }
+                        }
+                      },
+                      {
+                        "node": "not",
+                        "arg": {
+                          "node": "compare",
+                          "op": "=",
+                          "left": {
+                            "node": "field",
+                            "object": {
+                              "node": "var",
+                              "name": "e1"
+                            },
+                            "field": "term"
+                          },
+                          "right": {
+                            "node": "field",
+                            "object": {
+                              "node": "var",
+                              "name": "e2"
+                            },
+                            "field": "term"
+                          }
+                        }
+                      },
+                      {
+                        "node": "call",
+                        "fn": "string=",
+                        "args": [
+                          {
+                            "node": "field",
+                            "object": {
+                              "node": "var",
+                              "name": "e1"
+                            },
+                            "field": "server-id"
+                          },
+                          {
+                            "node": "field",
+                            "object": {
+                              "node": "var",
+                              "name": "e2"
+                            },
+                            "field": "server-id"
+                          }
+                        ]
+                      },
+                      {
+                        "node": "call",
+                        "fn": "string=",
+                        "args": [
+                          {
+                            "node": "field",
+                            "object": {
+                              "node": "var",
+                              "name": "e1"
+                            },
+                            "field": "value"
+                          },
+                          {
+                            "node": "field",
+                            "object": {
+                              "node": "var",
+                              "name": "e2"
+                            },
+                            "field": "value"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                },
+                {
+                  "node": "var",
+                  "name": "entries"
+                }
+              ]
+            }
+          },
+          {
+            "node": "var",
+            "name": "entries"
+          }
+        ]
+      }
+    },
+    "log-indices-unique-per-server": {
+      "name": "log-indices-unique-per-server",
+      "on": "raft-cluster",
+      "check": {
+        "node": "call",
+        "fn": "every",
+        "args": [
+          {
+            "node": "lambda",
+            "params": [
+              "s"
+            ],
+            "body": {
+              "node": "let*",
+              "bindings": [
+                {
+                  "name": "server-entries",
+                  "value": {
+                    "node": "call",
+                    "fn": "remove-if-not",
+                    "args": [
+                      {
+                        "node": "lambda",
+                        "params": [
+                          "e"
+                        ],
+                        "body": {
+                          "node": "call",
+                          "fn": "string=",
+                          "args": [
+                            {
+                              "node": "field",
+                              "object": {
+                                "node": "var",
+                                "name": "e"
+                              },
+                              "field": "server-id"
+                            },
+                            {
+                              "node": "field",
+                              "object": {
+                                "node": "var",
+                                "name": "s"
+                              },
+                              "field": "id"
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "node": "var",
+                        "name": "entries"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "name": "indices",
+                  "value": {
+                    "node": "call",
+                    "fn": "mapcar",
+                    "args": [
+                      {
+                        "node": "lambda",
+                        "params": [
+                          "e"
+                        ],
+                        "body": {
+                          "node": "field",
+                          "object": {
+                            "node": "var",
+                            "name": "e"
+                          },
+                          "field": "idx"
+                        }
+                      },
+                      {
+                        "node": "var",
+                        "name": "server-entries"
+                      }
+                    ]
+                  }
+                }
+              ],
+              "body": {
+                "node": "compare",
+                "op": "=",
+                "left": {
+                  "node": "call",
+                  "fn": "length",
+                  "args": [
+                    {
+                      "node": "var",
+                      "name": "indices"
+                    }
+                  ]
+                },
+                "right": {
+                  "node": "call",
+                  "fn": "length",
+                  "args": [
+                    {
+                      "node": "call",
+                      "fn": "remove-duplicates",
+                      "args": [
+                        {
+                          "node": "var",
+                          "name": "indices"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "node": "var",
+            "name": "servers"
+          }
+        ]
+      }
+    },
+    "log-indices-contiguous": {
+      "name": "log-indices-contiguous",
+      "on": "raft-cluster",
+      "check": {
+        "node": "call",
+        "fn": "every",
+        "args": [
+          {
+            "node": "lambda",
+            "params": [
+              "s"
+            ],
+            "body": {
+              "node": "let*",
+              "bindings": [
+                {
+                  "name": "server-entries",
+                  "value": {
+                    "node": "call",
+                    "fn": "remove-if-not",
+                    "args": [
+                      {
+                        "node": "lambda",
+                        "params": [
+                          "e"
+                        ],
+                        "body": {
+                          "node": "call",
+                          "fn": "string=",
+                          "args": [
+                            {
+                              "node": "field",
+                              "object": {
+                                "node": "var",
+                                "name": "e"
+                              },
+                              "field": "server-id"
+                            },
+                            {
+                              "node": "field",
+                              "object": {
+                                "node": "var",
+                                "name": "s"
+                              },
+                              "field": "id"
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "node": "var",
+                        "name": "entries"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "name": "n",
+                  "value": {
+                    "node": "call",
+                    "fn": "length",
+                    "args": [
+                      {
+                        "node": "var",
+                        "name": "server-entries"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "name": "indices",
+                  "value": {
+                    "node": "call",
+                    "fn": "sort",
+                    "args": [
+                      {
+                        "node": "call",
+                        "fn": "mapcar",
+                        "args": [
+                          {
+                            "node": "lambda",
+                            "params": [
+                              "e"
+                            ],
+                            "body": {
+                              "node": "field",
+                              "object": {
+                                "node": "var",
+                                "name": "e"
+                              },
+                              "field": "idx"
+                            }
+                          },
+                          {
+                            "node": "var",
+                            "name": "server-entries"
+                          }
+                        ]
+                      },
+                      {
+                        "node": "call",
+                        "fn": "function",
+                        "args": [
+                          {
+                            "node": "var",
+                            "name": "<"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              ],
+              "body": {
+                "node": "or",
+                "args": [
+                  {
+                    "node": "compare",
+                    "op": "=",
+                    "left": {
+                      "node": "var",
+                      "name": "n"
+                    },
+                    "right": {
+                      "node": "literal",
+                      "value": 0
+                    }
+                  },
+                  {
+                    "node": "and",
+                    "args": [
+                      {
+                        "node": "compare",
+                        "op": "=",
+                        "left": {
+                          "node": "call",
+                          "fn": "first",
+                          "args": [
+                            {
+                              "node": "var",
+                              "name": "indices"
+                            }
+                          ]
+                        },
+                        "right": {
+                          "node": "literal",
+                          "value": 1
+                        }
+                      },
+                      {
+                        "node": "compare",
+                        "op": "=",
+                        "left": {
+                          "node": "call",
+                          "fn": "car",
+                          "args": [
+                            {
+                              "node": "call",
+                              "fn": "last",
+                              "args": [
+                                {
+                                  "node": "var",
+                                  "name": "indices"
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        "right": {
+                          "node": "var",
+                          "name": "n"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "node": "var",
+            "name": "servers"
+          }
+        ]
+      }
+    },
+    "log-term-monotonicity": {
+      "name": "log-term-monotonicity",
+      "on": "raft-cluster",
+      "check": {
+        "node": "call",
+        "fn": "every",
+        "args": [
+          {
+            "node": "lambda",
+            "params": [
+              "s"
+            ],
+            "body": {
+              "node": "let*",
+              "bindings": [
+                {
+                  "name": "server-entries",
+                  "value": {
+                    "node": "call",
+                    "fn": "sort",
+                    "args": [
+                      {
+                        "node": "call",
+                        "fn": "remove-if-not",
+                        "args": [
+                          {
+                            "node": "lambda",
+                            "params": [
+                              "e"
+                            ],
+                            "body": {
+                              "node": "call",
+                              "fn": "string=",
+                              "args": [
+                                {
+                                  "node": "field",
+                                  "object": {
+                                    "node": "var",
+                                    "name": "e"
+                                  },
+                                  "field": "server-id"
+                                },
+                                {
+                                  "node": "field",
+                                  "object": {
+                                    "node": "var",
+                                    "name": "s"
+                                  },
+                                  "field": "id"
+                                }
+                              ]
+                            }
+                          },
+                          {
+                            "node": "var",
+                            "name": "entries"
+                          }
+                        ]
+                      },
+                      {
+                        "node": "call",
+                        "fn": "function",
+                        "args": [
+                          {
+                            "node": "var",
+                            "name": "<"
+                          }
+                        ]
+                      },
+                      {
+                        "node": "keyword",
+                        "name": "key"
+                      },
+                      {
+                        "node": "lambda",
+                        "params": [
+                          "e"
+                        ],
+                        "body": {
+                          "node": "field",
+                          "object": {
+                            "node": "var",
+                            "name": "e"
+                          },
+                          "field": "idx"
+                        }
+                      }
+                    ]
+                  }
+                }
+              ],
+              "body": {
+                "node": "or",
+                "args": [
+                  {
+                    "node": "compare",
+                    "op": "<",
+                    "left": {
+                      "node": "call",
+                      "fn": "length",
+                      "args": [
+                        {
+                          "node": "var",
+                          "name": "server-entries"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "node": "literal",
+                      "value": 2
+                    }
+                  },
+                  {
+                    "node": "call",
+                    "fn": "every",
+                    "args": [
+                      {
+                        "node": "lambda",
+                        "params": [
+                          "pair"
+                        ],
+                        "body": {
+                          "node": "compare",
+                          "op": "<=",
+                          "left": {
+                            "node": "field",
+                            "object": {
+                              "node": "call",
+                              "fn": "first",
+                              "args": [
+                                {
+                                  "node": "var",
+                                  "name": "pair"
+                                }
+                              ]
+                            },
+                            "field": "term"
+                          },
+                          "right": {
+                            "node": "field",
+                            "object": {
+                              "node": "call",
+                              "fn": "second",
+                              "args": [
+                                {
+                                  "node": "var",
+                                  "name": "pair"
+                                }
+                              ]
+                            },
+                            "field": "term"
+                          }
+                        }
+                      },
+                      {
+                        "node": "call",
+                        "fn": "mapcar",
+                        "args": [
+                          {
+                            "node": "call",
+                            "fn": "function",
+                            "args": [
+                              {
+                                "node": "var",
+                                "name": "list"
+                              }
+                            ]
+                          },
+                          {
+                            "node": "var",
+                            "name": "server-entries"
+                          },
+                          {
+                            "node": "call",
+                            "fn": "rest",
+                            "args": [
+                              {
+                                "node": "var",
+                                "name": "server-entries"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "node": "var",
+            "name": "servers"
+          }
+        ]
+      }
+    },
+    "entry-term-bounded": {
+      "name": "entry-term-bounded",
+      "on": "raft-cluster",
+      "check": {
+        "node": "call",
+        "fn": "every",
+        "args": [
+          {
+            "node": "lambda",
+            "params": [
+              "s"
+            ],
+            "body": {
+              "node": "call",
+              "fn": "every",
+              "args": [
+                {
+                  "node": "lambda",
+                  "params": [
+                    "e"
+                  ],
+                  "body": {
+                    "node": "or",
+                    "args": [
+                      {
+                        "node": "not",
+                        "arg": {
+                          "node": "call",
+                          "fn": "string=",
+                          "args": [
+                            {
+                              "node": "field",
+                              "object": {
+                                "node": "var",
+                                "name": "e"
+                              },
+                              "field": "server-id"
+                            },
+                            {
+                              "node": "field",
+                              "object": {
+                                "node": "var",
+                                "name": "s"
+                              },
+                              "field": "id"
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "node": "compare",
+                        "op": "<=",
+                        "left": {
+                          "node": "field",
+                          "object": {
+                            "node": "var",
+                            "name": "e"
+                          },
+                          "field": "term"
+                        },
+                        "right": {
+                          "node": "field",
+                          "object": {
+                            "node": "var",
+                            "name": "s"
+                          },
+                          "field": "current-term"
+                        }
+                      }
+                    ]
+                  }
+                },
+                {
+                  "node": "var",
+                  "name": "entries"
+                }
+              ]
+            }
+          },
+          {
+            "node": "var",
+            "name": "servers"
+          }
+        ]
+      }
+    },
+    "log-length-consistent": {
+      "name": "log-length-consistent",
+      "on": "raft-cluster",
+      "check": {
+        "node": "call",
+        "fn": "every",
+        "args": [
+          {
+            "node": "lambda",
+            "params": [
+              "s"
+            ],
+            "body": {
+              "node": "compare",
+              "op": "=",
+              "left": {
+                "node": "field",
+                "object": {
+                  "node": "var",
+                  "name": "s"
+                },
+                "field": "log-length"
+              },
+              "right": {
+                "node": "call",
+                "fn": "length",
+                "args": [
+                  {
+                    "node": "call",
+                    "fn": "remove-if-not",
+                    "args": [
+                      {
+                        "node": "lambda",
+                        "params": [
+                          "e"
+                        ],
+                        "body": {
+                          "node": "call",
+                          "fn": "string=",
+                          "args": [
+                            {
+                              "node": "field",
+                              "object": {
+                                "node": "var",
+                                "name": "e"
+                              },
+                              "field": "server-id"
+                            },
+                            {
+                              "node": "field",
+                              "object": {
+                                "node": "var",
+                                "name": "s"
+                              },
+                              "field": "id"
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "node": "var",
+                        "name": "entries"
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "node": "var",
+            "name": "servers"
+          }
+        ]
+      }
+    },
+    "committed-prefix-agreement": {
+      "name": "committed-prefix-agreement",
+      "on": "raft-cluster",
+      "check": {
+        "node": "let",
+        "bindings": [
+          {
+            "name": "committed-servers",
+            "value": {
+              "node": "call",
+              "fn": "remove-if",
+              "args": [
+                {
+                  "node": "lambda",
+                  "params": [
+                    "s"
+                  ],
+                  "body": {
+                    "node": "compare",
+                    "op": "=",
+                    "left": {
+                      "node": "field",
+                      "object": {
+                        "node": "var",
+                        "name": "s"
+                      },
+                      "field": "commit-index"
+                    },
+                    "right": {
+                      "node": "literal",
+                      "value": 0
+                    }
+                  }
+                },
+                {
+                  "node": "var",
+                  "name": "servers"
+                }
+              ]
+            }
+          }
+        ],
+        "body": {
+          "node": "call",
+          "fn": "every",
+          "args": [
+            {
+              "node": "lambda",
+              "params": [
+                "s1"
+              ],
+              "body": {
+                "node": "call",
+                "fn": "every",
+                "args": [
+                  {
+                    "node": "lambda",
+                    "params": [
+                      "s2"
+                    ],
+                    "body": {
+                      "node": "let",
+                      "bindings": [
+                        {
+                          "name": "ci",
+                          "value": {
+                            "node": "call",
+                            "fn": "min",
+                            "args": [
+                              {
+                                "node": "field",
+                                "object": {
+                                  "node": "var",
+                                  "name": "s1"
+                                },
+                                "field": "commit-index"
+                              },
+                              {
+                                "node": "field",
+                                "object": {
+                                  "node": "var",
+                                  "name": "s2"
+                                },
+                                "field": "commit-index"
+                              }
+                            ]
+                          }
+                        }
+                      ],
+                      "body": {
+                        "node": "call",
+                        "fn": "loop",
+                        "args": [
+                          {
+                            "node": "var",
+                            "name": "for"
+                          },
+                          {
+                            "node": "var",
+                            "name": "i"
+                          },
+                          {
+                            "node": "var",
+                            "name": "from"
+                          },
+                          {
+                            "node": "literal",
+                            "value": 1
+                          },
+                          {
+                            "node": "var",
+                            "name": "to"
+                          },
+                          {
+                            "node": "var",
+                            "name": "ci"
+                          },
+                          {
+                            "node": "var",
+                            "name": "for"
+                          },
+                          {
+                            "node": "var",
+                            "name": "e1"
+                          },
+                          {
+                            "node": "var",
+                            "name": "="
+                          },
+                          {
+                            "node": "call",
+                            "fn": "find-if",
+                            "args": [
+                              {
+                                "node": "lambda",
+                                "params": [
+                                  "e"
+                                ],
+                                "body": {
+                                  "node": "and",
+                                  "args": [
+                                    {
+                                      "node": "call",
+                                      "fn": "string=",
+                                      "args": [
+                                        {
+                                          "node": "field",
+                                          "object": {
+                                            "node": "var",
+                                            "name": "e"
+                                          },
+                                          "field": "server-id"
+                                        },
+                                        {
+                                          "node": "field",
+                                          "object": {
+                                            "node": "var",
+                                            "name": "s1"
+                                          },
+                                          "field": "id"
+                                        }
+                                      ]
+                                    },
+                                    {
+                                      "node": "compare",
+                                      "op": "=",
+                                      "left": {
+                                        "node": "field",
+                                        "object": {
+                                          "node": "var",
+                                          "name": "e"
+                                        },
+                                        "field": "idx"
+                                      },
+                                      "right": {
+                                        "node": "var",
+                                        "name": "i"
+                                      }
+                                    }
+                                  ]
+                                }
+                              },
+                              {
+                                "node": "var",
+                                "name": "entries"
+                              }
+                            ]
+                          },
+                          {
+                            "node": "var",
+                            "name": "for"
+                          },
+                          {
+                            "node": "var",
+                            "name": "e2"
+                          },
+                          {
+                            "node": "var",
+                            "name": "="
+                          },
+                          {
+                            "node": "call",
+                            "fn": "find-if",
+                            "args": [
+                              {
+                                "node": "lambda",
+                                "params": [
+                                  "e"
+                                ],
+                                "body": {
+                                  "node": "and",
+                                  "args": [
+                                    {
+                                      "node": "call",
+                                      "fn": "string=",
+                                      "args": [
+                                        {
+                                          "node": "field",
+                                          "object": {
+                                            "node": "var",
+                                            "name": "e"
+                                          },
+                                          "field": "server-id"
+                                        },
+                                        {
+                                          "node": "field",
+                                          "object": {
+                                            "node": "var",
+                                            "name": "s2"
+                                          },
+                                          "field": "id"
+                                        }
+                                      ]
+                                    },
+                                    {
+                                      "node": "compare",
+                                      "op": "=",
+                                      "left": {
+                                        "node": "field",
+                                        "object": {
+                                          "node": "var",
+                                          "name": "e"
+                                        },
+                                        "field": "idx"
+                                      },
+                                      "right": {
+                                        "node": "var",
+                                        "name": "i"
+                                      }
+                                    }
+                                  ]
+                                }
+                              },
+                              {
+                                "node": "var",
+                                "name": "entries"
+                              }
+                            ]
+                          },
+                          {
+                            "node": "var",
+                            "name": "always"
+                          },
+                          {
+                            "node": "or",
+                            "args": [
+                              {
+                                "node": "call",
+                                "fn": "null",
+                                "args": [
+                                  {
+                                    "node": "var",
+                                    "name": "e1"
+                                  }
+                                ]
+                              },
+                              {
+                                "node": "call",
+                                "fn": "null",
+                                "args": [
+                                  {
+                                    "node": "var",
+                                    "name": "e2"
+                                  }
+                                ]
+                              },
+                              {
+                                "node": "and",
+                                "args": [
+                                  {
+                                    "node": "compare",
+                                    "op": "=",
+                                    "left": {
+                                      "node": "field",
+                                      "object": {
+                                        "node": "var",
+                                        "name": "e1"
+                                      },
+                                      "field": "term"
+                                    },
+                                    "right": {
+                                      "node": "field",
+                                      "object": {
+                                        "node": "var",
+                                        "name": "e2"
+                                      },
+                                      "field": "term"
+                                    }
+                                  },
+                                  {
+                                    "node": "call",
+                                    "fn": "string=",
+                                    "args": [
+                                      {
+                                        "node": "field",
+                                        "object": {
+                                          "node": "var",
+                                          "name": "e1"
+                                        },
+                                        "field": "value"
+                                      },
+                                      {
+                                        "node": "field",
+                                        "object": {
+                                          "node": "var",
+                                          "name": "e2"
+                                        },
+                                        "field": "value"
+                                      }
+                                    ]
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    }
+                  },
+                  {
+                    "node": "var",
+                    "name": "committed-servers"
+                  }
+                ]
+              }
+            },
+            {
+              "node": "var",
+              "name": "committed-servers"
+            }
+          ]
+        }
+      }
+    }
+  },
+  "variants": {},
+  "scenarios": {
+    "raft-cluster": {
+      "name": "raft-cluster",
+      "entities": [
+        {
+          "binding": "servers",
+          "entity": "server",
+          "min": 3,
+          "max": 5
+        },
+        {
+          "binding": "entries",
+          "entity": "log-entry",
+          "min": 0,
+          "max": 50
+        }
+      ]
+    }
+  },
+  "scenario-generators": {
+    "raft-cluster": "(defscenario-generator raft-cluster (overrides) (declare (ignore overrides)) (let* ((num-servers (+ 3 (random 3))) (max-term (+ 2 (random 9))) (leader-terms nil) (committed-len (random 6)) (committed-terms (sort (loop repeat committed-len collect (+ 1 (random max-term))) (function <))) (committed-values (loop repeat committed-len collect (generate-value (quote string)))) (canonical (make-hash-table :test (function equal))) (servers nil) (all-entries nil)) (loop for idx from 1 to committed-len for ct in committed-terms for cv in committed-values do (setf (gethash (cons idx ct) canonical) cv)) (loop for i from 1 to num-servers for server-term = (+ max-term (random 3)) for raw-state = (nth (random 3) (quote (:follower :candidate :leader))) for state = (let ((s (if (and (eq raw-state :leader) (member server-term leader-terms)) :follower raw-state))) (when (eq s :leader) (push server-term leader-terms)) s) for extra-len = (random 4) for total-len = (+ committed-len extra-len) for commit-idx = (if (= committed-len 0) 0 (random (1+ committed-len))) for s = (generate-instance \"server\" (list :current-term server-term :state state :commit-index commit-idx :log-length total-len)) for s-id = (getf s :id) do (push s servers) (loop for idx from 1 to committed-len for ct in committed-terms for cv in committed-values do (push (generate-instance \"log-entry\" (list :server-id s-id :idx idx :term ct :value cv)) all-entries)) (let* ((base-term (or (car (last committed-terms)) 1)) (extra-terms (sort (loop repeat extra-len collect (+ base-term (random (max 1 (- server-term base-term -1))))) (function <)))) (loop for idx from (1+ committed-len) to total-len for et in extra-terms for capped = (min et server-term) for key = (cons idx capped) for existing = (gethash key canonical) for val = (or existing (generate-value (quote string))) do (unless existing (setf (gethash key canonical) val)) (push (generate-instance \"log-entry\" (list :server-id s-id :idx idx :term capped :value val)) all-entries)))) (list :servers (nreverse servers) :entries (nreverse all-entries))))"
+  },
+  "scenario-negative-generators": {
+    "raft-cluster": "(defscenario-negative-generator raft-cluster (overrides) (declare (ignore overrides)) (let ((violation (random 7))) (case violation (0 (let* ((term (+ 1 (random 5))) (servers (list (generate-instance \"server\" (list :state :leader :current-term term :log-length 0 :commit-index 0)) (generate-instance \"server\" (list :state :leader :current-term term :log-length 0 :commit-index 0)) (generate-instance \"server\" (list :state :follower :current-term term :log-length 0 :commit-index 0))))) (list :servers servers :entries nil))) (1 (let* ((servers (list (generate-instance \"server\" (list :current-term 3 :state :follower :log-length 1 :commit-index 0)) (generate-instance \"server\" (list :current-term 3 :state :follower :log-length 1 :commit-index 0)))) (entries (list (generate-instance \"log-entry\" (list :server-id (getf (first servers) :id) :idx 1 :term 1 :value \"cmd-alpha\")) (generate-instance \"log-entry\" (list :server-id (getf (second servers) :id) :idx 1 :term 1 :value \"cmd-beta\"))))) (list :servers servers :entries entries))) (2 (let* ((s (generate-instance \"server\" (list :current-term 5 :state :follower :log-length 2 :commit-index 0))) (entries (list (generate-instance \"log-entry\" (list :server-id (getf s :id) :idx 1 :term 1)) (generate-instance \"log-entry\" (list :server-id (getf s :id) :idx 5 :term 3))))) (list :servers (list s) :entries entries))) (3 (let* ((s (generate-instance \"server\" (list :current-term 2 :state :follower :log-length 1 :commit-index 0))) (entries (list (generate-instance \"log-entry\" (list :server-id (getf s :id) :idx 1 :term 7))))) (list :servers (list s) :entries entries))) (4 (let* ((s (generate-instance \"server\" (list :current-term 3 :state :follower :log-length 5 :commit-index 0))) (entries (list (generate-instance \"log-entry\" (list :server-id (getf s :id) :idx 1 :term 1))))) (list :servers (list s) :entries entries))) (5 (let* ((s (generate-instance \"server\" (list :current-term 5 :state :follower :log-length 3 :commit-index 0))) (entries (list (generate-instance \"log-entry\" (list :server-id (getf s :id) :idx 1 :term 3)) (generate-instance \"log-entry\" (list :server-id (getf s :id) :idx 2 :term 1)) (generate-instance \"log-entry\" (list :server-id (getf s :id) :idx 3 :term 4))))) (list :servers (list s) :entries entries))) (6 (let* ((servers (list (generate-instance \"server\" (list :current-term 5 :state :follower :log-length 2 :commit-index 2)) (generate-instance \"server\" (list :current-term 5 :state :follower :log-length 2 :commit-index 2)))) (entries (list (generate-instance \"log-entry\" (list :server-id (getf (first servers) :id) :idx 1 :term 1 :value \"same\")) (generate-instance \"log-entry\" (list :server-id (getf (second servers) :id) :idx 1 :term 1 :value \"same\")) (generate-instance \"log-entry\" (list :server-id (getf (first servers) :id) :idx 2 :term 2 :value \"x\")) (generate-instance \"log-entry\" (list :server-id (getf (second servers) :id) :idx 2 :term 3 :value \"y\"))))) (list :servers servers :entries entries))))))"
+  }
+}
