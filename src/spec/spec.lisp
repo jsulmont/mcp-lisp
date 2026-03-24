@@ -55,6 +55,7 @@
            #:register-entity-accessors
            #:clear-specs
            #:validate-specs
+           #:suggest-invariants
            ;; AST
            #:form-to-ast
            #:ast-to-form
@@ -173,7 +174,7 @@ Returns (values fields relations derived)."
 ;;; defrule
 ;;; ---------------------------------------------------------------------------
 
-(defmacro defrule (name &key when let requires ensures)
+(defmacro defrule (name &key when let requires sets ensures)
   "Define a behavioral rule. Metadata-only — nothing is compiled or executed.
 
   (defrule place-order
@@ -181,8 +182,8 @@ Returns (values fields relations derived)."
     :let ((customer (order-customer order)))
     :requires ((active-account-p customer)
                (pos (account-balance customer)))
-    :ensures ((eq (order-state order) :placed)
-              (order-placed-at order)))"
+    :sets ((order-placed-at order) (get-universal-time))
+    :ensures ((eq (order-state order) :placed)))"
   (let ((key (string-downcase (string name))))
     `(progn
        (setf (gethash ,key *rules*)
@@ -190,6 +191,7 @@ Returns (values fields relations derived)."
                    :when ',when
                    :let ',let
                    :requires ',requires
+                   :sets ',sets
                    :ensures ',ensures))
        ',name)))
 
@@ -753,7 +755,7 @@ Returns a list of warning strings. Empty list = all clear."
                               (format nil "invariant ~A" key)
                               warnings))))))
                *invariants*)
-      ;; Check forms in rule :requires, :ensures, and :let clauses
+      ;; Check forms in rule :requires, :ensures, :sets, and :let clauses
       (maphash (lambda (key plist)
                  (dolist (form (getf plist :requires))
                    (setf warnings
@@ -765,6 +767,15 @@ Returns a list of warning strings. Empty list = all clear."
                          (check-form-symbols form
                                              (format nil "rule ~A :ensures" key)
                                              warnings)))
+                 (loop for (accessor value) on (getf plist :sets) by #'cddr
+                       do (setf warnings
+                                (check-form-symbols accessor
+                                                    (format nil "rule ~A :sets" key)
+                                                    warnings))
+                          (setf warnings
+                                (check-form-symbols value
+                                                    (format nil "rule ~A :sets" key)
+                                                    warnings)))
                  (dolist (binding (getf plist :let))
                    (when (and (consp binding) (second binding))
                      (setf warnings
@@ -874,8 +885,180 @@ Returns a list of warning strings. Empty list = all clear."
                        (push (format nil "entity ~A: has conditional invariants but no defgenerator is registered"
                                      ekey)
                              warnings)))))
-               *entities*))
+               *entities*)
+      ;; Flag entities with >2 non-identifier fields but zero invariants
+      (maphash (lambda (ekey eplist)
+                 (let* ((fields (getf eplist :fields))
+                        (non-id-fields
+                          (remove-if (lambda (f)
+                                       (let ((n (string-downcase (symbol-name (first f)))))
+                                         (or (string= n "id")
+                                             (alexandria:ends-with-subseq "-mrid" n)
+                                             (string= n "mrid"))))
+                                     fields)))
+                   (when (> (length non-id-fields) 2)
+                     (let ((has-invariant nil))
+                       (maphash (lambda (_ik iplist)
+                                  (declare (ignore _ik))
+                                  (when (and (getf iplist :on)
+                                             (string-equal (string-downcase
+                                                             (symbol-name (getf iplist :on)))
+                                                           ekey))
+                                    (setf has-invariant t)))
+                                *invariants*)
+                       (unless has-invariant
+                         (push (format nil "entity ~A: ~A non-identifier fields but zero invariants"
+                                       ekey (length non-id-fields))
+                               warnings))))))
+               *entities*)
+      ;; Detect FK-like fields not covered by any scenario invariant
+      (let ((fk-patterns '("-id" "-lfdi" "-mrid"))
+            (scenario-inv-symbols nil))
+        ;; Collect all symbols referenced in scenario invariant :check forms
+        (maphash (lambda (_ik iplist)
+                   (declare (ignore _ik))
+                   (when (and (getf iplist :on)
+                              (gethash (string-downcase (symbol-name (getf iplist :on)))
+                                       *scenarios*))
+                     (labels ((collect-syms (form)
+                                (cond
+                                  ((symbolp form) (push (string-downcase (symbol-name form))
+                                                        scenario-inv-symbols))
+                                  ((consp form) (mapc #'collect-syms form)))))
+                       (collect-syms (getf iplist :check)))))
+                 *invariants*)
+        (maphash (lambda (ekey eplist)
+                   (dolist (field (getf eplist :fields))
+                     (let ((fname (string-downcase (symbol-name (first field)))))
+                       (when (some (lambda (suffix)
+                                     (and (> (length fname) (length suffix))
+                                          (alexandria:ends-with-subseq suffix fname)))
+                                   fk-patterns)
+                         ;; Check if any scenario invariant mentions an accessor for this field
+                         (let ((accessor (format nil "~A-~A" ekey fname)))
+                           (unless (member accessor scenario-inv-symbols :test #'string=)
+                             (push (format nil "entity ~A: FK-like field ~A has no scenario invariant coverage"
+                                           ekey fname)
+                                   warnings)))))))
+                 *entities*))
+      ;; Detect belongs-to relations not covered by scenario invariants
+      (maphash (lambda (ekey eplist)
+                 (dolist (rel (getf eplist :relations))
+                   (when (eq (first rel) :belongs-to)
+                     (let ((accessor (format nil "~A-~A"
+                                             ekey
+                                             (string-downcase (symbol-name (second rel))))))
+                       (let ((covered nil))
+                         (maphash (lambda (_ik iplist)
+                                    (declare (ignore _ik))
+                                    (when (and (getf iplist :on)
+                                               (gethash (string-downcase
+                                                          (symbol-name (getf iplist :on)))
+                                                        *scenarios*))
+                                      (labels ((mentions-p (form)
+                                                 (cond
+                                                   ((and (symbolp form)
+                                                         (string-equal (symbol-name form) accessor))
+                                                    t)
+                                                   ((consp form) (some #'mentions-p form)))))
+                                        (when (mentions-p (getf iplist :check))
+                                          (setf covered t)))))
+                                  *invariants*)
+                         (unless covered
+                           (push (format nil "entity ~A: belongs-to ~A has no scenario invariant coverage"
+                                         ekey (second rel))
+                                 warnings)))))))
+               *entities*)
+      ;; Config-aware scenario generator validation
+      ;; When a scenario invariant references (config :key), warn if the
+      ;; scenario's custom generator doesn't also reference that key.
+      (labels ((config-ref-p (form)
+                 (when (and (consp form) (= (length form) 2)
+                            (symbolp (first form))
+                            (string-equal (symbol-name (first form)) "CONFIG")
+                            (keywordp (second form)))
+                   (second form)))
+               (collect-config-keys (form)
+                 (cond
+                   ((config-ref-p form) (list (config-ref-p form)))
+                   ((consp form) (mapcan #'collect-config-keys form)))))
+        (maphash (lambda (skey _splist)
+                   (declare (ignore _splist))
+                   (let ((gen-src (gethash skey *scenario-generator-sources*))
+                         (inv-config-keys nil))
+                     (maphash (lambda (_ik iplist)
+                                (declare (ignore _ik))
+                                (when (and (getf iplist :on)
+                                           (string-equal (string-downcase
+                                                           (symbol-name (getf iplist :on)))
+                                                         skey))
+                                  (setf inv-config-keys
+                                        (union inv-config-keys
+                                               (collect-config-keys (getf iplist :check))))))
+                              *invariants*)
+                     (when (and gen-src inv-config-keys)
+                       (let ((gen-config-keys (collect-config-keys gen-src)))
+                         (dolist (ck inv-config-keys)
+                           (unless (member ck gen-config-keys)
+                             (push (format nil "scenario ~A: invariant references (config ~S) but generator does not"
+                                           skey ck)
+                                   warnings)))))))
+                 *scenarios*)))
     (nreverse warnings)))
+
+;;; ---------------------------------------------------------------------------
+;;; suggest-invariants
+;;; ---------------------------------------------------------------------------
+
+(defun suggest-invariants ()
+  "Scan entity relations and config fields to suggest missing invariants.
+Returns a list of suggestion strings (defscenario + definvariant skeletons)."
+  (let ((suggestions nil))
+    (maphash
+     (lambda (ekey eplist)
+       (dolist (rel (getf eplist :relations))
+         (let ((rel-type (first rel))
+               (rel-name (second rel))
+               (target (getf (cddr rel) :of)))
+           (when target
+             (let ((target-key (string-downcase (string target)))
+                   (entity-name (string-downcase (symbol-name (getf eplist :name))))
+                   (rel-str (string-downcase (symbol-name rel-name))))
+               (cond
+                 ((eq rel-type :has-one)
+                  (push (format nil ";; ~A has-one ~A~%(defscenario ~A-~A-check~%  :entities ((parents (1 5) ~A)~%            (children (1 1) ~A :per parents)))~%~%(definvariant ~A-has-exactly-one-~A~%  :on ~A-~A-check~%  :check (= (length children) (length parents)))"
+                                entity-name rel-str
+                                entity-name rel-str
+                                entity-name target-key
+                                entity-name rel-str
+                                entity-name rel-str)
+                        suggestions))
+                 ((eq rel-type :has-many)
+                  (let ((bound-config-key
+                          (when *config*
+                            (loop for field in *config*
+                                  for fname = (string-downcase (symbol-name (first field)))
+                                  when (or (search rel-str fname)
+                                           (search target-key fname))
+                                    return (intern (string-upcase fname) :keyword)))))
+                    (if bound-config-key
+                        (push (format nil ";; ~A has-many ~A, bounded by (config ~S)~%(defscenario ~A-~A-bounds~%  :entities ((parents (1 5) ~A)~%            (children (1 10) ~A :per parents)))~%~%(definvariant ~A-count-within-~A-limit~%  :on ~A-~A-bounds~%  :check (every (lambda (p)~%           (<= (count-if (lambda (c) (= (... c) (... p))) children)~%               (config ~S)))~%         parents))"
+                                      entity-name rel-str bound-config-key
+                                      entity-name rel-str
+                                      entity-name target-key
+                                      entity-name rel-str
+                                      entity-name rel-str
+                                      bound-config-key)
+                              suggestions)
+                        (push (format nil ";; ~A has-many ~A~%(defscenario ~A-~A-check~%  :entities ((parents (1 5) ~A)~%            (children (1 10) ~A :per parents)))~%~%(definvariant ~A-has-~A~%  :on ~A-~A-check~%  :check (every (lambda (p)~%           (some (lambda (c) (= (... c) (... p))) children))~%         parents))"
+                                      entity-name rel-str
+                                      entity-name rel-str
+                                      entity-name target-key
+                                      entity-name rel-str
+                                      entity-name rel-str)
+                              suggestions))))))))))
+     *entities*)
+    (nreverse suggestions)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; JSON serialization
@@ -1223,6 +1406,9 @@ before falling back to *PACKAGE*."
     (when (getf plist :requires)
       (setf (gethash "requires" ht)
             (coerce (mapcar #'form-to-ast (getf plist :requires)) 'vector)))
+    (when (getf plist :sets)
+      (setf (gethash "sets" ht)
+            (form-to-compact-string (getf plist :sets))))
     (when (getf plist :ensures)
       (setf (gethash "ensures" ht)
             (coerce (mapcar #'form-to-ast (getf plist :ensures)) 'vector)))
@@ -1380,6 +1566,7 @@ Returns a string of (defentity ...), (defrule ...), etc. forms."
                    (when (getf v :when) (setf form (append form `(:when ,(getf v :when)))))
                    (when (getf v :let) (setf form (append form `(:let ,(getf v :let)))))
                    (when (getf v :requires) (setf form (append form `(:requires ,(getf v :requires)))))
+                   (when (getf v :sets) (setf form (append form `(:sets ,(getf v :sets)))))
                    (when (getf v :ensures) (setf form (append form `(:ensures ,(getf v :ensures)))))
                    (emit form)))
                *rules*)
@@ -1586,6 +1773,8 @@ Merges with existing specs — call CLEAR-SPECS first for a clean import."
                               (map 'list #'ast-to-binding (gethash "let" ht)))
                        :requires (when (gethash "requires" ht)
                                    (map 'list #'ast-to-form (gethash "requires" ht)))
+                       :sets (when (gethash "sets" ht)
+                               (read-from-string (gethash "sets" ht)))
                        :ensures (when (gethash "ensures" ht)
                                   (map 'list #'ast-to-form (gethash "ensures" ht))))))
          rules)))

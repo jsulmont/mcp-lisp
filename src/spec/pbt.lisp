@@ -1036,6 +1036,31 @@ All fields are independently random — used for negative testing."
         (push key instance)))
     instance))
 
+(defun classify-zero-rejection (check-form)
+  "Classify why an invariant might never reject unconstrained data.
+Returns a string label or NIL."
+  (when (consp check-form)
+    (labels ((uses-p (syms form)
+               (cond
+                 ((and (symbolp form) (member (symbol-name form) syms
+                                              :test #'string-equal))
+                  t)
+                 ((consp form) (some (lambda (f) (uses-p syms f)) form))))
+             (uses-config-p (form)
+               (cond
+                 ((and (consp form) (= (length form) 2)
+                       (symbolp (first form))
+                       (string-equal (symbol-name (first form)) "CONFIG"))
+                  t)
+                 ((consp form) (some #'uses-config-p form)))))
+      (cond
+        ((uses-p '("REMOVE-DUPLICATES" "DELETE-DUPLICATES") check-form)
+         "structurally untestable — uniqueness over high-entropy field")
+        ((and (uses-p '("<" ">" "<=" ">=" "PLUSP") check-form)
+              (uses-config-p check-form))
+         "weak bounds — test with extreme config values")
+        (t nil)))))
+
 (defun run-negative-trials (trials)
   "Run negative PBT: generate unconstrained random instances and check that
 invariants correctly reject them. Returns per-invariant rejection stats.
@@ -1444,8 +1469,15 @@ Returns a list of result plists and prints a summary."
                            (push inv-name suspicious))))
                      neg-stats)
             (when suspicious
-              (format t "WARNING: never rejected: ~{~A~^, ~}~%"
-                      (nreverse suspicious)))))
+              (format t "~%WARNING: never rejected:~%")
+              (dolist (inv-name (nreverse suspicious))
+                (let* ((inv (describe-invariant inv-name))
+                       (check (when inv (getf inv :check)))
+                       (classification (classify-zero-rejection check)))
+                  (format t "  ~A~A~%" inv-name
+                          (if classification
+                              (format nil " (~A)" classification)
+                              "")))))))
         final-results))))
 
 ;;; ---------------------------------------------------------------------------
@@ -1664,6 +1696,7 @@ Returns (values new-instance applied-p rejection-reason).
       (return-from apply-rule (values instance nil :unknown-rule)))
     (let* ((when-clause (getf rule :when))
            (requires (getf rule :requires))
+           (sets-clause (getf rule :sets))
            (ensures (getf rule :ensures))
            (let-bindings (getf rule :let))
            (entity-sym (intern (string-upcase (string entity-name))))
@@ -1699,16 +1732,29 @@ Returns (values new-instance applied-p rejection-reason).
                     (values instance nil (list :guard-failed req)))))
             (error ()
               (return-from apply-rule
-                (values instance nil (list :guard-failed req)))))))
-      ;; 4. Apply state transition and field assignments from :ensures
-      (let* ((target (extract-state-target ensures entity-sym state-fields))
-             (field-assignments (extract-field-assignments ensures entity-sym state-fields))
-             (new (copy-list instance)))
-        (when target
-          (setf (getf new (car target)) (cdr target)))
-        (dolist (assignment field-assignments)
-          (setf (getf new (car assignment)) (cdr assignment)))
-        (values new t nil)))))
+                (values instance nil (list :guard-failed req))))))
+        ;; 4. Apply state transition and field assignments from :ensures
+        (let* ((target (extract-state-target ensures entity-sym state-fields))
+               (field-assignments (extract-field-assignments ensures entity-sym state-fields))
+               (new (copy-list instance)))
+          (when target
+            (setf (getf new (car target)) (cdr target)))
+          (dolist (assignment field-assignments)
+            (setf (getf new (car assignment)) (cdr assignment)))
+          ;; 5. Apply :sets — evaluate each (accessor-form value-form) pair
+          (loop for (accessor-form value-form) on sets-clause by #'cddr
+                do (handler-case
+                       (let* ((params (cons entity-sym (reverse let-vars)))
+                              (val-fn (handler-bind ((warning #'muffle-warning))
+                                        (compile nil `(lambda ,params
+                                                        (declare (ignorable ,@params))
+                                                        ,value-form))))
+                              (field-kw (getf-field-p accessor-form entity-sym)))
+                         (when field-kw
+                           (setf (getf new field-kw)
+                                 (apply val-fn new (reverse let-vals)))))
+                     (error () nil)))
+          (values new t nil))))))
 
 (defun random-walk (entity-name &key (steps 20) (trials 50) (verbose t))
   "Random walk PBT: generate instances and apply random applicable rules,

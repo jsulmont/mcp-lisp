@@ -32,12 +32,13 @@ All macros are available in the sandbox with no imports:
   (margin-call-threshold number :default 0.5 :min 0.0 :max 1.0)
   (allow-short-selling boolean :default t))
 
-;; Rules — state transition metadata (when/requires/ensures)
+;; Rules — state transition metadata (when/requires/sets/ensures)
 (defrule place-order
   :when (order :state :draft)
   :let ((customer (order-customer order)))
   :requires ((active-account-p customer)
              (pos (account-balance customer)))
+  :sets ((order-placed-at order) (get-universal-time))
   :ensures ((eq (order-state order) :placed)))
 
 ;; Invariants — properties that must always hold
@@ -79,7 +80,8 @@ All macros are available in the sandbox with no imports:
 - `(list-variants)`, `(describe-variant name)`, `(entity-variants entity-name)`
 - `(list-scenarios)`, `(describe-scenario name)`
 - `(describe-config)`, `(config-fields)`
-- `(validate-specs)` — catches dangling entity references, undefined functions, free variables, non-exhaustive variant handling, and invalid scenario bindings
+- `(validate-specs)` — catches dangling entity references, undefined functions, free variables, non-exhaustive variant handling, invalid scenario bindings, entities with zero invariant coverage, uncovered FK-like fields/belongs-to relations, and config keys referenced by scenario invariants but missing from their generators
+- `(suggest-invariants)` — scans `has-many`/`has-one` relations and config fields to propose `defscenario` + `definvariant` skeletons for existence and cardinality constraints
 - `(clear-specs)` — reset all registries
 
 ### Spec analysis
@@ -136,7 +138,11 @@ Add `:negative-trials` to also verify invariants aren't trivially true:
 (run-pbt :trials 200 :negative-trials 100)
 ```
 
-The negative pass generates unconstrained random instances (no constraint extraction, no retry) and checks that each invariant correctly rejects them. Invariants that pass 100% of random data are flagged as suspicious — they may be trivially true or too weak. Always run negative trials alongside positive trials to validate both directions.
+The negative pass generates unconstrained random instances (no constraint extraction, no retry) and checks that each invariant correctly rejects them. Invariants that pass 100% of random data are classified:
+- **Structurally untestable** — uniqueness checks over high-entropy fields (collision probability ~0); safe to ignore
+- **Weak bounds** — comparison operators referencing `(config :key)` where the generation range is too narrow to violate; test with extreme config values
+
+Always run negative trials alongside positive trials to validate both directions.
 
 This generates random instances for every entity that has invariants, checks all applicable invariants (including variant-specific ones), and reports counterexamples on failure. When `defconfig` is defined, `:config-trials` (default 5) generates random configs within declared bounds — catching specs that only hold for the default config.
 
@@ -242,7 +248,7 @@ Apply rules as state transitions and test invariants across rule sequences:
 (random-walk "order" :steps 20 :trials 50)
 ```
 
-`apply-rule` performs state transitions only — non-state fields are unchanged. This is deliberate: state-dependent invariants (e.g. "fill-price must be positive when state is :filled") will fire when a rule changes state without the corresponding field update. These violations expose incomplete rules — the spec declares a state transition but doesn't account for fields that must change with it.
+`apply-rule` performs the state transition from `:ensures` and evaluates `:sets` clauses to update correlated fields. The `:sets` clause takes alternating `(accessor-form value-form)` pairs — each accessor identifies the field to set, and the value-form is evaluated with the entity instance and `:let` bindings in scope. Use `:sets` when a state transition must update non-state fields (e.g. setting `enabled=nil` on soft-delete, or recording a timestamp). Without `:sets`, `random-walk` will trigger invariant violations for any rule that changes state without updating correlated fields.
 
 `random-walk` generates instances in the initial state, then repeatedly picks a random applicable rule, applies it, and checks all invariants. It reports the first violation with the rule trace that caused it. Use this to find invariant violations that only surface through specific rule sequences.
 

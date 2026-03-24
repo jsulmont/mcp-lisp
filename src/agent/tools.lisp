@@ -99,10 +99,12 @@ in nested eval scenarios."
 
 ;;; eval_lisp - Evaluate Lisp forms with warning/error capture
 
-(define-tool eval-lisp ((code string "The Lisp code to evaluate" :required t))
+(define-tool eval-lisp ((code string "The Lisp code to evaluate" :required t)
+                        (file-path string "Write full result to this file instead of returning inline" :default nil))
   "Evaluate Lisp code in the sandbox. Supports multiple forms - each form is
 evaluated in sequence, so definitions are available to subsequent forms.
-Captures printed output, warnings, and errors."
+Captures printed output, warnings, and errors.
+When file_path is provided, the full untruncated result is written to that file."
   (:annotations :destructive t :idempotent nil)
   (let ((sandbox (ensure-sandbox session))
         (warnings nil)
@@ -131,21 +133,37 @@ Captures printed output, warnings, and errors."
     (let* ((last-result (car (last results)))
            (result-str (when last-result (result-to-string last-result)))
            (max-len 4000))
-      (with-output-to-string (out)
-        (when (and printed-output (plusp (length printed-output)))
-          (format out "Output:~%~a~%" printed-output))
-        (when warnings
-          (format out "Warnings:~%")
-          (dolist (w (nreverse warnings))
-            (format out "  ~a~%" w)))
-        (when error-msg
-          (format out "Error: ~a~%" error-msg))
-        (when result-str
-          (if (> (length result-str) max-len)
-              (format out "=> ~a... [truncated, ~:d chars total]"
-                      (subseq result-str 0 max-len)
-                      (length result-str))
-              (format out "=> ~a" result-str)))))))
+      (if (and file-path (plusp (length file-path)))
+          (progn
+            (with-open-file (f file-path :direction :output :if-exists :supersede)
+              (when (and printed-output (plusp (length printed-output)))
+                (format f "Output:~%~a~%" printed-output))
+              (when warnings
+                (format f "Warnings:~%")
+                (dolist (w (nreverse warnings))
+                  (format f "  ~a~%" w)))
+              (when error-msg
+                (format f "Error: ~a~%" error-msg))
+              (when result-str
+                (format f "=> ~a" result-str)))
+            (format nil "Result written to ~A (~:d chars)" file-path
+                    (+ (or (length result-str) 0)
+                       (or (length printed-output) 0))))
+          (with-output-to-string (out)
+            (when (and printed-output (plusp (length printed-output)))
+              (format out "Output:~%~a~%" printed-output))
+            (when warnings
+              (format out "Warnings:~%")
+              (dolist (w (nreverse warnings))
+                (format out "  ~a~%" w)))
+            (when error-msg
+              (format out "Error: ~a~%" error-msg))
+            (when result-str
+              (if (> (length result-str) max-len)
+                  (format out "=> ~a... [truncated, ~:d chars total]"
+                          (subseq result-str 0 max-len)
+                          (length result-str))
+                  (format out "=> ~a" result-str))))))))
 
 ;;; clear_repl - Reset the sandbox
 
