@@ -40,6 +40,12 @@ All macros and functions are available in the `eval_lisp` sandbox with no import
   :sets ((order-placed-at order) (get-universal-time))
   :ensures ((eq (order-state order) :placed)))
 
+;; :when accepts a single keyword or (member ...) for multiple source states
+(defrule timeout
+  :when (server :state (member :follower :candidate))
+  :sets ((server-current-term server) (+ (server-current-term server) 1))
+  :ensures ((eq (server-state server) :candidate)))
+
 ;; Invariants — properties that must always hold
 (definvariant non-negative-balance
   :on account
