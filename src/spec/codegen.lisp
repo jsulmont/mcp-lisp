@@ -595,7 +595,17 @@ Only :postgresql dialect is currently supported."
   (let ((out (make-string-output-stream))
         (enums (collect-enums))
         (entities (toposort-entities)))
-    (format out "BEGIN;~%~%")
+    ;; Idempotent drops (reverse dependency order)
+    (let ((rev-entities (reverse entities)))
+      (format out "-- Drop existing objects~%")
+      (dolist (ename rev-entities)
+        (format out "DROP TABLE IF EXISTS ~A CASCADE;~%"
+                (lisp-to-sql ename)))
+      (when *config*
+        (format out "DROP TABLE IF EXISTS config CASCADE;~%"))
+      (dolist (enum enums)
+        (format out "DROP TYPE IF EXISTS ~A CASCADE;~%" (car enum)))
+      (format out "~%"))
     (emit-enums enums out)
     (emit-config out)
     (dolist (ename entities)
@@ -618,7 +628,6 @@ Only :postgresql dialect is currently supported."
           (unless has-triggers
             (setf has-triggers t))
           (emit-triggers ename out))))
-    (format out "COMMIT;~%")
     (get-output-stream-string out)))
 
 ;;; ---------------------------------------------------------------------------
