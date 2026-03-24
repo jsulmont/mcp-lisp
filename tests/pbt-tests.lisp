@@ -16,6 +16,7 @@
          (mcp-lisp/src/spec/spec::*variants* (make-hash-table :test #'equal))
          (mcp-lisp/src/spec/spec::*scenarios* (make-hash-table :test #'equal))
          (mcp-lisp/src/spec/spec::*scenario-generators* (make-hash-table :test #'equal))
+         (mcp-lisp/src/spec/spec::*compiled-fn-cache* (make-hash-table :test #'equal))
          (mcp-lisp/src/spec/spec::*config* nil)
          (mcp-lisp/src/spec/spec::*current-config* nil))
      ,@body))
@@ -66,7 +67,7 @@
     (mcp-lisp:defentity account ()
       (id string :required t)
       (balance number :required t))
-    (let ((inst (mcp-lisp:generate-instance "account" '((:balance . 42)))))
+    (let ((inst (mcp-lisp:generate-instance "account" '(:balance 42))))
       (is (= 42 (getf inst :balance)))
       (is (stringp (getf inst :id))))))
 
@@ -89,7 +90,7 @@
 ;;; ---------------------------------------------------------------------------
 
 (test check-invariants-passes
-  "check-invariants returns empty list when invariants hold"
+  "check-invariants returns (:pass) when invariants hold"
   (with-fresh-specs
     (mcp-lisp:defentity account ()
       (balance number :required t))
@@ -97,10 +98,10 @@
       :on account
       :check (>= (account-balance account) 0))
     (mcp-lisp:ensure-entity-accessors "account")
-    (is (null (mcp-lisp:check-invariants "account" '(:balance 50))))))
+    (is (equal '(:pass) (mcp-lisp:check-invariants "account" '(:balance 50))))))
 
 (test check-invariants-catches-violation
-  "check-invariants returns violated invariant names"
+  "check-invariants returns (:fail ...) with violated invariant names"
   (with-fresh-specs
     (mcp-lisp:defentity account ()
       (balance number :required t))
@@ -108,9 +109,28 @@
       :on account
       :check (>= (account-balance account) 0))
     (mcp-lisp:ensure-entity-accessors "account")
-    (let ((violations (mcp-lisp:check-invariants "account" '(:balance -5))))
-      (is (= 1 (length violations)))
-      (is (string= "non-negative" (first violations))))))
+    (let ((result (mcp-lisp:check-invariants "account" '(:balance -5))))
+      (is (eq :fail (first result)))
+      (is (= 1 (length (cdr result))))
+      (is (string= "non-negative" (second result))))))
+
+(test check-invariants-redefinition-refreshes-cache
+  "redefining an invariant updates the compiled predicate in the same image"
+  (with-fresh-specs
+    (mcp-lisp:defentity account ()
+      (balance number :required t))
+    (mcp-lisp:definvariant non-negative
+      :on account
+      :check (>= (account-balance account) 0))
+    (mcp-lisp:ensure-entity-accessors "account")
+    ;; Warm the cache with the original invariant body.
+    (is (equal '(:fail "non-negative")
+               (mcp-lisp:check-invariants "account" '(:balance -1))))
+    ;; Redefine the invariant with the same name but different logic.
+    (mcp-lisp:definvariant non-negative
+      :on account
+      :check (< (account-balance account) 0))
+    (is (equal '(:pass) (mcp-lisp:check-invariants "account" '(:balance -1))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; PBT runner
@@ -220,6 +240,28 @@
         (is (= (getf inst :notional)
                 (* (getf inst :quantity) (getf inst :price))))))))
 
+(test generate-instance-redefinition-refreshes-derived-cache
+  "redefining :derived-from updates the compiled function in the same image"
+  (with-fresh-specs
+    (mcp-lisp:defentity position ()
+      (quantity number :required t)
+      (price number :required t)
+      (notional number :derived-from (* (getf instance :quantity)
+                                        (getf instance :price))))
+    ;; Warm the cache with the original derived expression.
+    (is (= 6 (getf (mcp-lisp:generate-instance "position"
+                                               '(:quantity 2 :price 3))
+                   :notional)))
+    ;; Redefine the entity with the same derived field but a different form.
+    (mcp-lisp:defentity position ()
+      (quantity number :required t)
+      (price number :required t)
+      (notional number :derived-from (+ (getf instance :quantity)
+                                        (getf instance :price))))
+    (let ((inst (mcp-lisp:generate-instance "position"
+                                            '(:quantity 2 :price 3))))
+      (is (= 5 (getf inst :notional))))))
+
 (test constrained-pbt-all-pass
   "PBT passes when constraints make invariants satisfiable"
   (with-fresh-specs
@@ -278,7 +320,7 @@
     (mcp-lisp:defgenerator account (overrides)
       (let ((inst (mcp-lisp:default-generate-instance "account" overrides)))
         inst))
-    (let ((inst (mcp-lisp:generate-instance "account" '((:balance . 99)))))
+    (let ((inst (mcp-lisp:generate-instance "account" '(:balance 99))))
       (is (= 99 (getf inst :balance))))))
 
 (test defgenerator-cleared-by-clear-specs
@@ -464,16 +506,17 @@
     (mcp-lisp:ensure-entity-accessors "node")
     (mcp-lisp:ensure-variant-accessors "branch")
     ;; Branch with positive count — should pass
-    (is (null (mcp-lisp:check-invariants "node"
-               '(:id "x" :kind :branch :count 5))))
+    (is (equal '(:pass) (mcp-lisp:check-invariants "node"
+                          '(:id "x" :kind :branch :count 5))))
     ;; Branch with zero count — should fail
-    (let ((violations (mcp-lisp:check-invariants "node"
-                        '(:id "x" :kind :branch :count 0))))
-      (is (= 1 (length violations)))
-      (is (string= "branch-positive-count" (first violations))))
+    (let ((result (mcp-lisp:check-invariants "node"
+                    '(:id "x" :kind :branch :count 0))))
+      (is (eq :fail (first result)))
+      (is (= 1 (length (cdr result))))
+      (is (string= "branch-positive-count" (second result))))
     ;; Leaf — variant invariant should not apply
-    (is (null (mcp-lisp:check-invariants "node"
-               '(:id "x" :kind :leaf))))))
+    (is (equal '(:pass) (mcp-lisp:check-invariants "node"
+                          '(:id "x" :kind :leaf))))))
 
 (test variant-pbt-all-pass
   "PBT with variants and variant invariants passes when generation is correct"
@@ -616,10 +659,10 @@
       :on bank
       :check (>= (length accounts) 2))
     (mcp-lisp:ensure-entity-accessors "account")
-    (let ((violations (mcp-lisp:check-scenario-invariants
-                       "bank"
-                       (mcp-lisp:generate-scenario "bank"))))
-      (is (null violations)))))
+    (let ((result (mcp-lisp:check-scenario-invariants
+                    "bank"
+                    (mcp-lisp:generate-scenario "bank"))))
+      (is (equal '(:pass) result)))))
 
 (test scenario-invariant-failing
   "scenario invariant that fails"
@@ -634,11 +677,12 @@
       :on bank
       :check (>= (length accounts) 100))
     (mcp-lisp:ensure-entity-accessors "account")
-    (let ((violations (mcp-lisp:check-scenario-invariants
-                       "bank"
-                       (mcp-lisp:generate-scenario "bank"))))
-      (is (= 1 (length violations)))
-      (is (string= "too-many-accounts" (first violations))))))
+    (let ((result (mcp-lisp:check-scenario-invariants
+                    "bank"
+                    (mcp-lisp:generate-scenario "bank"))))
+      (is (eq :fail (first result)))
+      (is (= 1 (length (cdr result))))
+      (is (string= "too-many-accounts" (second result))))))
 
 (test scenario-custom-generator
   "defscenario-generator overrides default generation"
@@ -660,7 +704,8 @@
     (mcp-lisp:ensure-entity-accessors "item")
     (let ((instance (mcp-lisp:generate-scenario "custom-test")))
       (is (= 3 (length (getf instance :items))))
-      (is (null (mcp-lisp:check-scenario-invariants "custom-test" instance))))))
+      (is (equal '(:pass)
+                 (mcp-lisp:check-scenario-invariants "custom-test" instance))))))
 
 (test scenario-run-pbt
   "run-pbt with :scenario runs scenario trials"
@@ -719,3 +764,43 @@
     (let ((results (mcp-lisp:run-pbt :scenario "inventory" :trials 30)))
       (is (= 1 (length results)))
       (is (= 0 (getf (first results) :failed))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Regression: check-scenario includes variant invariants
+;;; ---------------------------------------------------------------------------
+
+(test check-scenario-includes-variant-invariants
+  "check-scenario checks variant-specific invariants, not just base entity ones"
+  (with-fresh-specs
+    (mcp-lisp:defentity node ()
+      (id string :required t)
+      (kind (member :branch :leaf) :required t))
+
+    (mcp-lisp:defvariant branch (node :kind :branch)
+      (child-count integer :required t))
+
+    (mcp-lisp:definvariant branch-has-children
+      :on branch
+      :check (> (branch-child-count branch) 0))
+
+    (mcp-lisp:defscenario tree
+      :entities ((nodes (2 4) node)))
+
+    ;; Scenario invariant (trivially true)
+    (mcp-lisp:definvariant tree-has-nodes
+      :on tree
+      :check (> (length nodes) 0))
+
+    (mcp-lisp:ensure-entity-accessors "node")
+    (mcp-lisp:ensure-variant-accessors "branch")
+
+    ;; Build a scenario instance where a branch node violates the variant invariant
+    (let* ((bad-branch (list :id "n1" :kind :branch :child-count 0))
+           (good-leaf (list :id "n2" :kind :leaf))
+           (instance (list :nodes (list bad-branch good-leaf)))
+           (results (mcp-lisp:check-scenario "tree" instance)))
+      ;; branch-has-children should be detected as failing
+      (is (some (lambda (r)
+                  (and (string= "branch-has-children" (getf r :invariant))
+                       (not (getf r :pass))))
+                results)))))
