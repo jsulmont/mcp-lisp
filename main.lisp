@@ -233,6 +233,8 @@
                 #:generate-instance
                 #:default-generate-instance
                 #:defgenerator
+                #:override-val
+                #:override-present-p
                 #:ensure-entity-accessors
                 #:ensure-variant-accessors
                 #:generate-config
@@ -465,6 +467,8 @@
    #:generate-instance
    #:default-generate-instance
    #:defgenerator
+   #:override-val
+   #:override-present-p
    #:ensure-entity-accessors
    #:ensure-variant-accessors
    #:generate-config
