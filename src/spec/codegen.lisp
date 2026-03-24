@@ -320,20 +320,19 @@ Returns the SQL string or NIL if the form can't be translated."
     (format out "-- Config~%")
     (format out "CREATE TABLE config (~%")
     (format out "    key   TEXT    PRIMARY KEY,~%")
-    (format out "    value NUMERIC NOT NULL~%");
+    (format out "    value TEXT    NOT NULL~%")
     (format out ");~%~%")
     (let ((defaults nil))
       (dolist (field *config*)
         (let* ((name (first field))
+               (type-spec (second field))
                (kwargs (cddr field))
                (default (getf kwargs :default))
                (mn (getf kwargs :min))
                (mx (getf kwargs :max)))
           (when default
             (push (list (lisp-to-sql (string name))
-                        (cond ((eq default t) 1)
-                              ((eq default nil) 0)
-                              (t default))
+                        (sql-literal default type-spec)
                         mn mx)
                   defaults))))
       (when defaults
