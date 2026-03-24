@@ -952,7 +952,8 @@ Returns a list of warning strings. Empty list = all clear."
                                    fk-patterns)
                          ;; Check if any scenario invariant mentions an accessor for this field
                          (let ((accessor (format nil "~A-~A" ekey fname)))
-                           (unless (member accessor scenario-inv-symbols :test #'string=)
+                           (unless (or (member accessor scenario-inv-symbols :test #'string=)
+                                       (member fname scenario-inv-symbols :test #'string=))
                              (push (format nil "entity ~A: FK-like field ~A has no scenario invariant coverage"
                                            ekey fname)
                                    warnings)))))))
@@ -963,7 +964,9 @@ Returns a list of warning strings. Empty list = all clear."
                    (when (eq (first rel) :belongs-to)
                      (let ((accessor (format nil "~A-~A"
                                              ekey
-                                             (string-downcase (symbol-name (second rel))))))
+                                             (string-downcase (symbol-name (second rel)))))
+                           (rel-id (format nil "~A-id"
+                                           (string-downcase (symbol-name (second rel))))))
                        (let ((covered nil))
                          (maphash (lambda (_ik iplist)
                                     (declare (ignore _ik))
@@ -974,7 +977,8 @@ Returns a list of warning strings. Empty list = all clear."
                                       (labels ((mentions-p (form)
                                                  (cond
                                                    ((and (symbolp form)
-                                                         (string-equal (symbol-name form) accessor))
+                                                         (or (string-equal (symbol-name form) accessor)
+                                                             (string-equal (symbol-name form) rel-id)))
                                                     t)
                                                    ((consp form) (some #'mentions-p form)))))
                                         (when (mentions-p (getf iplist :check))

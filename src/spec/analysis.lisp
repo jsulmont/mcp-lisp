@@ -308,7 +308,10 @@ Returns a list of step results, each a plist:
                                (third when-clause)))
              (current-state (when state-field (getf current state-field)))
              (when-ok (or (null expected-state)
-                          (eq current-state expected-state)))
+                          (if (and (consp expected-state)
+                                   (eq (car expected-state) 'member))
+                              (member current-state (cdr expected-state))
+                              (eq current-state expected-state))))
              (guard-results nil)
              (all-pass when-ok))
         ;; Report :when
