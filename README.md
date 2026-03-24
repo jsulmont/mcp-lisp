@@ -1,6 +1,6 @@
 # mcp-lisp
 
-Common Lisp SDK for [Model Context Protocol](https://modelcontextprotocol.io) (MCP 2025-11-25) and [Agent-to-Agent Protocol](https://github.com/google/A2A) (A2A).
+Common Lisp SDK for [Model Context Protocol](https://modelcontextprotocol.io) (MCP 2025-11-25) — server, client, agent, behavioral spec engine.
 
 **44/44 conformance checks passing** (32 scenarios) against [`@modelcontextprotocol/conformance`](https://github.com/modelcontextprotocol/conformance).
 
