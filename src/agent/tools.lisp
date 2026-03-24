@@ -128,7 +128,9 @@ Captures printed output, warnings, and errors."
                                (push (eval form) results))))))
         (error (e)
           (setf error-msg (princ-to-string e)))))
-    (let ((last-result (car (last results))))
+    (let* ((last-result (car (last results)))
+           (result-str (when last-result (result-to-string last-result)))
+           (max-len 4000))
       (with-output-to-string (out)
         (when (and printed-output (plusp (length printed-output)))
           (format out "Output:~%~a~%" printed-output))
@@ -138,8 +140,12 @@ Captures printed output, warnings, and errors."
             (format out "  ~a~%" w)))
         (when error-msg
           (format out "Error: ~a~%" error-msg))
-        (when last-result
-          (format out "=> ~a" (result-to-string last-result)))))))
+        (when result-str
+          (if (> (length result-str) max-len)
+              (format out "=> ~a... [truncated, ~:d chars total]"
+                      (subseq result-str 0 max-len)
+                      (length result-str))
+              (format out "=> ~a" result-str)))))))
 
 ;;; clear_repl - Reset the sandbox
 
