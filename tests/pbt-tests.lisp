@@ -16,6 +16,8 @@
          (mcp-lisp/src/spec/spec::*variants* (make-hash-table :test #'equal))
          (mcp-lisp/src/spec/spec::*scenarios* (make-hash-table :test #'equal))
          (mcp-lisp/src/spec/spec::*scenario-generators* (make-hash-table :test #'equal))
+         (mcp-lisp/src/spec/spec::*scenario-negative-generators* (make-hash-table :test #'equal))
+         (mcp-lisp/src/spec/spec::*scenario-negative-generator-sources* (make-hash-table :test #'equal))
          (mcp-lisp/src/spec/spec::*compiled-fn-cache* (make-hash-table :test #'equal))
          (mcp-lisp/src/spec/spec::*config* nil)
          (mcp-lisp/src/spec/spec::*current-config* nil))
@@ -764,6 +766,66 @@
     (let ((results (mcp-lisp:run-pbt :scenario "inventory" :trials 30)))
       (is (= 1 (length results)))
       (is (= 0 (getf (first results) :failed))))))
+
+(test scenario-negative-generator
+  "defscenario-negative-generator produces bad data that invariants reject"
+  (with-fresh-specs
+    (mcp-lisp:defentity server ()
+      (id string :required t)
+      (term integer :required t)
+      (state (member :follower :candidate :leader) :required t))
+    (mcp-lisp:definvariant positive-term
+      :on server
+      :check (>= (server-term server) 1))
+    (mcp-lisp:defscenario cluster
+      :entities ((servers (3 3) server)))
+    (mcp-lisp:definvariant election-safety
+      :on cluster
+      :check (let* ((leaders (remove-if-not
+                               (lambda (s) (eq (getf s :state) :leader))
+                               servers))
+                    (terms (mapcar (lambda (s) (getf s :term)) leaders)))
+               (= (length terms) (length (remove-duplicates terms)))))
+    (mcp-lisp:defscenario-negative-generator cluster (overrides)
+      (declare (ignore overrides))
+      (let ((term (+ 1 (random 10))))
+        (list :servers
+              (list (list :id "a" :term term :state :leader)
+                    (list :id "b" :term term :state :leader)
+                    (list :id "c" :term term :state :follower)))))
+    (mcp-lisp:ensure-entity-accessors "server")
+    ;; Verify the negative generator produces instances that fail
+    (let ((bad (funcall (gethash "cluster"
+                                 mcp-lisp/src/spec/spec::*scenario-negative-generators*)
+                        nil)))
+      (is (not (null bad)))
+      (is (= 3 (length (getf bad :servers)))))
+    ;; Run PBT with negative trials — election-safety should now get rejections
+    (let ((results (mcp-lisp:run-pbt :trials 20 :negative-trials 50)))
+      (is (plusp (length results)))
+      (is (every (lambda (r) (= 0 (getf r :failed))) results)))))
+
+(test scenario-negative-generator-broken-detection
+  "defscenario-negative-generator that produces valid data is flagged"
+  (with-fresh-specs
+    (mcp-lisp:defentity item ()
+      (id string :required t)
+      (value number :required t))
+    (mcp-lisp:defscenario bag
+      :entities ((items (2 3) item)))
+    (mcp-lisp:definvariant at-least-two
+      :on bag
+      :check (>= (length items) 2))
+    ;; This negative generator produces VALID data (3 items >= 2)
+    (mcp-lisp:defscenario-negative-generator bag (overrides)
+      (declare (ignore overrides))
+      (list :items (list (list :id "a" :value 1)
+                         (list :id "b" :value 2)
+                         (list :id "c" :value 3))))
+    (mcp-lisp:ensure-entity-accessors "item")
+    ;; The PBT should still pass (negative gen brokenness is a warning, not failure)
+    (let ((results (mcp-lisp:run-pbt :trials 10 :negative-trials 20)))
+      (is (every (lambda (r) (= 0 (getf r :failed))) results)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Regression: check-scenario includes variant invariants

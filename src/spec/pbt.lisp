@@ -17,6 +17,8 @@
                 #:*scenarios*
                 #:*scenario-generators*
                 #:*scenario-generator-sources*
+                #:*scenario-negative-generators*
+                #:*scenario-negative-generator-sources*
                 #:*compiled-fn-cache*
                 #:config
                 #:describe-entity
@@ -50,6 +52,7 @@
            #:generate-scenario
            #:default-generate-scenario
            #:defscenario-generator
+           #:defscenario-negative-generator
            #:current-config
            #:shrink-scenario
            #:run-pbt
@@ -1009,6 +1012,20 @@ to access the active config."
              '(defscenario-generator ,scenario-name (,overrides-var) ,@body))
        ',scenario-name)))
 
+(defmacro defscenario-negative-generator (scenario-name (overrides-var) &body body)
+  "Register a negative scenario generator for SCENARIO-NAME.
+The generator must return instances that SHOULD violate at least one scenario
+invariant. During negative PBT, every generated instance is checked — if none
+of the scenario invariants reject it, the negative generator is flagged as broken."
+  (let ((key (string-downcase (string scenario-name))))
+    `(progn
+       (setf (gethash ,key *scenario-negative-generators*)
+             (lambda (,overrides-var)
+               ,@body))
+       (setf (gethash ,key *scenario-negative-generator-sources*)
+             '(defscenario-negative-generator ,scenario-name (,overrides-var) ,@body))
+       ',scenario-name)))
+
 ;;; ---------------------------------------------------------------------------
 ;;; PBT runner
 ;;; ---------------------------------------------------------------------------
@@ -1090,19 +1107,48 @@ Invariants that never reject unconstrained data are flagged as suspicious."
                         (incf (getf stats :rejected))))))))))))
     inv-stats))
 
+(defun check-scenario-instance-against-invariants (scenario invs instance)
+  "Check a single scenario instance against all invariants.
+Returns a list of invariant names that rejected (failed) the instance."
+  (let ((rejected nil)
+        (bindings (getf scenario :entities)))
+    (let ((bind-pairs
+            (mapcar (lambda (es)
+                      (let* ((bkw (getf es :binding))
+                             (sym (intern (symbol-name bkw)))
+                             (val (getf instance bkw)))
+                        (list sym val)))
+                    bindings)))
+      (dolist (entry invs)
+        (destructuring-bind (inv-name inv) entry
+          (handler-case
+              (let* ((params (mapcar #'first bind-pairs))
+                     (fn (get-compiled-fn inv-name params (getf inv :check))))
+                (unless (apply fn (mapcar #'second bind-pairs))
+                  (push inv-name rejected)))
+            (error ()
+              (push inv-name rejected))))))
+    (nreverse rejected)))
+
 (defun run-negative-scenario-trials (trials)
   "Run negative PBT for scenarios: generate uncorrelated random instances for each
 entity in each scenario and check that scenario invariants reject them.
+When a defscenario-negative-generator is registered, uses it to produce targeted
+bad data and verifies every generated instance is actually rejected.
 Returns per-invariant rejection stats merged into the same hash table format."
-  (let ((inv-stats (make-hash-table :test #'equal)))
+  (let ((inv-stats (make-hash-table :test #'equal))
+        (neg-gen-ok nil)
+        (neg-gen-broken nil))
     (dolist (sname (list-scenarios))
       (let ((invs (scenario-invariants-for sname)))
         (when invs
-          (let ((scenario (describe-scenario sname)))
+          (let ((scenario (describe-scenario sname))
+                (neg-gen (gethash sname *scenario-negative-generators*)))
             (dolist (entry invs)
               (setf (gethash (first entry) inv-stats)
                     (list :entity (format nil "scenario:~A" sname)
                           :tested 0 :rejected 0)))
+            ;; Random negative trials (uncorrelated generation)
             (dotimes (_i trials)
               (let ((raw-instance nil))
                 (dolist (espec (getf scenario :entities))
@@ -1118,26 +1164,36 @@ Returns per-invariant rejection stats merged into the same hash table format."
                         (setf (getf raw-instance binding)
                               (loop repeat n
                                     collect (generate-raw-instance entity-name))))))
-                (dolist (entry invs)
-                  (destructuring-bind (inv-name inv) entry
-                    (let ((stats (gethash inv-name inv-stats)))
+                (let ((rejected (check-scenario-instance-against-invariants
+                                  scenario invs raw-instance)))
+                  (dolist (entry invs)
+                    (let* ((inv-name (first entry))
+                           (stats (gethash inv-name inv-stats)))
                       (incf (getf stats :tested))
-                      (handler-case
-                          (let* ((bindings (getf scenario :entities))
-                                 (bind-pairs
-                                   (mapcar (lambda (es)
-                                             (let* ((bkw (getf es :binding))
-                                                    (sym (intern (symbol-name bkw)))
-                                                    (val (getf raw-instance bkw)))
-                                               (list sym val)))
-                                           bindings))
-                                 (params (mapcar #'first bind-pairs))
-                                 (fn (get-compiled-fn inv-name params (getf inv :check))))
-                            (unless (apply fn (mapcar #'second bind-pairs))
-                              (incf (getf stats :rejected))))
-                        (error ()
-                          (incf (getf stats :rejected)))))))))))))
-    inv-stats))
+                      (when (member inv-name rejected :test #'string=)
+                        (incf (getf stats :rejected))))))))
+            ;; Targeted negative trials (from defscenario-negative-generator)
+            (when neg-gen
+              (let ((neg-passed 0) (neg-total 0))
+                (dotimes (_i trials)
+                  (handler-case
+                      (let* ((bad-instance (funcall neg-gen nil))
+                             (rejected (check-scenario-instance-against-invariants
+                                         scenario invs bad-instance)))
+                        (incf neg-total)
+                        (if rejected
+                            (dolist (entry invs)
+                              (let* ((inv-name (first entry))
+                                     (stats (gethash inv-name inv-stats)))
+                                (incf (getf stats :tested))
+                                (when (member inv-name rejected :test #'string=)
+                                  (incf (getf stats :rejected)))))
+                            (incf neg-passed)))
+                    (error () (incf neg-total))))
+                (if (zerop neg-passed)
+                    (push sname neg-gen-ok)
+                    (push (cons sname neg-passed) neg-gen-broken))))))))
+    (values inv-stats neg-gen-ok neg-gen-broken)))
 
 (defun check-form-field-keys (check-form entity-name)
   "Extract field keywords referenced in CHECK-FORM for ENTITY-NAME.
@@ -1452,32 +1508,42 @@ Returns a list of result plists and prints a summary."
         ;; Negative testing
         (when (and (plusp negative-trials) (not scenario))
           (let ((neg-stats (run-negative-trials negative-trials))
-                (neg-scenario-stats (run-negative-scenario-trials negative-trials))
                 (suspicious nil))
-            ;; Merge scenario stats into entity stats
-            (maphash (lambda (k v) (setf (gethash k neg-stats) v)) neg-scenario-stats)
-            (format t "~%=== Negative Testing ===~%")
-            (maphash (lambda (inv-name stats)
-                       (let* ((tested (getf stats :tested))
-                              (rejected (getf stats :rejected))
-                              (pct (if (plusp tested)
-                                       (round (* 100 (/ rejected tested)))
-                                       0)))
-                         (format t "  ~A: ~A% (~A/~A rejected)~%"
-                                 inv-name pct rejected tested)
-                         (when (zerop rejected)
-                           (push inv-name suspicious))))
-                     neg-stats)
-            (when suspicious
-              (format t "~%WARNING: never rejected:~%")
-              (dolist (inv-name (nreverse suspicious))
-                (let* ((inv (describe-invariant inv-name))
-                       (check (when inv (getf inv :check)))
-                       (classification (classify-zero-rejection check)))
-                  (format t "  ~A~A~%" inv-name
-                          (if classification
-                              (format nil " (~A)" classification)
-                              "")))))))
+            (multiple-value-bind (neg-scenario-stats neg-gen-ok neg-gen-broken)
+                (run-negative-scenario-trials negative-trials)
+              ;; Merge scenario stats into entity stats
+              (maphash (lambda (k v) (setf (gethash k neg-stats) v)) neg-scenario-stats)
+              (format t "~%=== Negative Testing ===~%")
+              (maphash (lambda (inv-name stats)
+                         (let* ((tested (getf stats :tested))
+                                (rejected (getf stats :rejected))
+                                (pct (if (plusp tested)
+                                         (round (* 100 (/ rejected tested)))
+                                         0)))
+                           (format t "  ~A: ~A% (~A/~A rejected)~%"
+                                   inv-name pct rejected tested)
+                           (when (zerop rejected)
+                             (push inv-name suspicious))))
+                       neg-stats)
+              (when suspicious
+                (format t "~%WARNING: never rejected:~%")
+                (dolist (inv-name (nreverse suspicious))
+                  (let* ((inv (describe-invariant inv-name))
+                         (check (when inv (getf inv :check)))
+                         (classification (classify-zero-rejection check)))
+                    (format t "  ~A~A~%" inv-name
+                            (if classification
+                                (format nil " (~A)" classification)
+                                "")))))
+              (when neg-gen-ok
+                (format t "~%Negative generators validated:~%")
+                (dolist (sname neg-gen-ok)
+                  (format t "  ~A: all generated instances correctly rejected~%" sname)))
+              (when neg-gen-broken
+                (format t "~%WARNING: broken negative generators:~%")
+                (dolist (entry neg-gen-broken)
+                  (format t "  ~A: ~A/~A instances passed all invariants (should fail)~%"
+                          (car entry) (cdr entry) negative-trials))))))
         final-results))))
 
 ;;; ---------------------------------------------------------------------------

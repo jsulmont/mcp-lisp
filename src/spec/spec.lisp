@@ -44,6 +44,8 @@
            #:*scenarios*
            #:*scenario-generators*
            #:*scenario-generator-sources*
+           #:*scenario-negative-generators*
+           #:*scenario-negative-generator-sources*
            #:*compiled-fn-cache*
            #:*helpers*
            #:*helper-sources*
@@ -90,6 +92,8 @@
 (defvar *scenarios* (make-hash-table :test #'equal))
 (defvar *scenario-generators* (make-hash-table :test #'equal))
 (defvar *scenario-generator-sources* (make-hash-table :test #'equal))
+(defvar *scenario-negative-generators* (make-hash-table :test #'equal))
+(defvar *scenario-negative-generator-sources* (make-hash-table :test #'equal))
 (defvar *compiled-fn-cache* (make-hash-table :test #'equal))
 (defvar *helpers* (make-hash-table :test #'equal))
 (defvar *helper-sources* (make-hash-table :test #'equal))
@@ -414,6 +418,8 @@ field's :default value from the defconfig spec."
   (clrhash *scenarios*)
   (clrhash *scenario-generators*)
   (clrhash *scenario-generator-sources*)
+  (clrhash *scenario-negative-generators*)
+  (clrhash *scenario-negative-generator-sources*)
   (clrhash *helpers*)
   (clrhash *helper-sources*)
   (setf *config* nil)
@@ -1475,6 +1481,7 @@ Includes generator source forms as compact s-expression strings."
         (scenarios (dict))
         (generators (dict))
         (scenario-generators (dict))
+        (scenario-negative-generators (dict))
         (helpers (dict)))
     (maphash (lambda (k v) (setf (gethash k entities) (entity-to-ht v))) *entities*)
     (maphash (lambda (k v) (setf (gethash k rules) (rule-to-ht v))) *rules*)
@@ -1493,6 +1500,12 @@ Includes generator source forms as compact s-expression strings."
                  (when src
                    (setf (gethash k scenario-generators) (form-to-compact-string src)))))
              *scenario-generators*)
+    (maphash (lambda (k v)
+               (declare (ignore v))
+               (let ((src (gethash k *scenario-negative-generator-sources*)))
+                 (when src
+                   (setf (gethash k scenario-negative-generators) (form-to-compact-string src)))))
+             *scenario-negative-generators*)
     (let ((result (dict "entities" entities
                         "rules" rules
                         "invariants" invariants
@@ -1505,6 +1518,8 @@ Includes generator source forms as compact s-expression strings."
         (setf (gethash "generators" result) generators))
       (when (plusp (hash-table-count scenario-generators))
         (setf (gethash "scenario-generators" result) scenario-generators))
+      (when (plusp (hash-table-count scenario-negative-generators))
+        (setf (gethash "scenario-negative-generators" result) scenario-negative-generators))
       (maphash (lambda (k v)
                  (declare (ignore v))
                  (let ((src (gethash k *helper-sources*)))
@@ -1626,7 +1641,12 @@ Returns a string of (defentity ...), (defrule ...), etc. forms."
       (maphash (lambda (k v)
                  (declare (ignore k))
                  (emit v))
-               *scenario-generator-sources*))
+               *scenario-generator-sources*)
+      ;; Scenario negative generators
+      (maphash (lambda (k v)
+                 (declare (ignore k))
+                 (emit v))
+               *scenario-negative-generator-sources*))
     (get-output-stream-string out)))
 
 ;;; ---------------------------------------------------------------------------
@@ -1637,7 +1657,8 @@ Returns a string of (defentity ...), (defrule ...), etc. forms."
   "Serialize all spec registries to a plist suitable for PRINT/READ round-trip.
 No code execution needed on load — use DATA-TO-SPECS to reconstruct."
   (let ((entities nil) (rules nil) (invariants nil) (variants nil)
-        (scenarios nil) (generators nil) (scenario-generators nil) (helpers nil))
+        (scenarios nil) (generators nil) (scenario-generators nil)
+        (scenario-negative-generators nil) (helpers nil))
     (maphash (lambda (k v) (push (cons k v) entities)) *entities*)
     (maphash (lambda (k v) (push (cons k v) rules)) *rules*)
     (maphash (lambda (k v) (push (cons k v) invariants)) *invariants*)
@@ -1655,6 +1676,11 @@ No code execution needed on load — use DATA-TO-SPECS to reconstruct."
              *scenario-generators*)
     (maphash (lambda (k v)
                (declare (ignore v))
+               (let ((src (gethash k *scenario-negative-generator-sources*)))
+                 (when src (push (cons k src) scenario-negative-generators))))
+             *scenario-negative-generators*)
+    (maphash (lambda (k v)
+               (declare (ignore v))
                (let ((src (gethash k *helper-sources*)))
                  (when src (push (cons k src) helpers))))
              *helpers*)
@@ -1662,6 +1688,7 @@ No code execution needed on load — use DATA-TO-SPECS to reconstruct."
           :variants variants :scenarios scenarios
           :config *config*
           :generators generators :scenario-generators scenario-generators
+          :scenario-negative-generators scenario-negative-generators
           :helpers helpers)))
 
 (defun data-to-specs (data)
@@ -1692,6 +1719,9 @@ Uses EVAL only for generator/helper source forms (which are defmacro calls)."
     (eval (cdr entry)))
   ;; Scenario generators
   (dolist (entry (getf data :scenario-generators))
+    (eval (cdr entry)))
+  ;; Scenario negative generators
+  (dolist (entry (getf data :scenario-negative-generators))
     (eval (cdr entry)))
   (clrhash *compiled-fn-cache*)
   (values))
@@ -1860,6 +1890,12 @@ Merges with existing specs — call CLEAR-SPECS first for a clean import."
                    (declare (ignore key))
                    (eval (read-from-string src-string)))
                  sgens)))
+    (let ((sngens (gethash "scenario-negative-generators" data)))
+      (when sngens
+        (maphash (lambda (key src-string)
+                   (declare (ignore key))
+                   (eval (read-from-string src-string)))
+                 sngens)))
     (clrhash *compiled-fn-cache*)
     (values)))
 

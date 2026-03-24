@@ -13,6 +13,7 @@
                 #:*variants*
                 #:*scenarios*
                 #:*scenario-generators*
+                #:*scenario-negative-generators*
                 #:describe-entity
                 #:list-entities
                 #:entity-fields
@@ -359,11 +360,13 @@ Returns a plist:
   :scenario — scenario name
   :invariants — list of invariant analysis plists
   :has-custom-generator — whether a defscenario-generator is registered
+  :has-negative-generator — whether a defscenario-negative-generator is registered
   :needs-custom-generator — whether any invariant uses aggregates
   :verdict — :ok or :needs-custom-generator"
   (let* ((sname (string-downcase (string scenario-name)))
          (invs (scenario-invariants-for sname))
          (has-custom (gethash sname *scenario-generators*))
+         (has-negative (gethash sname *scenario-negative-generators*))
          (inv-analysis nil)
          (needs-custom nil))
     (dolist (entry invs)
@@ -380,6 +383,7 @@ Returns a plist:
     (list :scenario sname
           :invariants (nreverse inv-analysis)
           :has-custom-generator (if has-custom t nil)
+          :has-negative-generator (if has-negative t nil)
           :needs-custom-generator needs-custom
           :verdict (cond
                      ((and needs-custom (not has-custom)) :needs-custom-generator)

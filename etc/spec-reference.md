@@ -205,6 +205,27 @@ For constraints the extractor can't handle, use `defgenerator`:
 - `generate-scenario` dispatches to custom generator if registered, otherwise uses `default-generate-scenario`.
 - In `defscenario-generator`, use `(or (config :key) default)` since config values are only populated during PBT runs. Outside PBT, `(config :key)` returns the field's `:default` from `defconfig`, but if no default was declared it returns NIL.
 
+#### Negative scenario generators
+
+When a scenario invariant is structurally hard to violate via random generation (e.g. two servers must share the same random integer term), the negative pass classifies it as "structurally untestable". Use `defscenario-negative-generator` to produce targeted bad data that *should* violate at least one scenario invariant:
+
+```lisp
+(defscenario-negative-generator raft-cluster (overrides)
+  (declare (ignore overrides))
+  ;; Two leaders at same term — violates election-safety
+  (let ((term (+ 1 (random 10))))
+    (list :servers
+          (list (generate-instance "server" (list :state :leader :current-term term ...))
+                (generate-instance "server" (list :state :leader :current-term term ...))
+                (generate-instance "server" (list :state :follower :current-term term ...)))
+          :entries nil)))
+```
+
+- Same plist return format as `defscenario-generator`.
+- During negative PBT, every generated instance is checked — if it passes all invariants (i.e. the negative generator produced valid data), a warning is emitted.
+- `scenario-feasibility` reports `:has-negative-generator` when one is registered.
+- Targeted negative trials are added alongside random negative trials; per-invariant rejection stats combine both sources.
+
 ### State machine analysis
 
 Rules with `:when`/`:ensures` patterns implicitly define state machines:

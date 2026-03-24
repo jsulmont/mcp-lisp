@@ -244,6 +244,7 @@
                 #:generate-scenario
                 #:default-generate-scenario
                 #:defscenario-generator
+                #:defscenario-negative-generator
                 #:run-pbt
                 #:check-scenario
                 #:extract-generation-constraints
@@ -478,6 +479,7 @@
    #:generate-scenario
    #:default-generate-scenario
    #:defscenario-generator
+   #:defscenario-negative-generator
    #:run-pbt
    #:check-scenario
    #:extract-generation-constraints
