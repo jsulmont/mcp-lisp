@@ -269,7 +269,8 @@
     (mcp-lisp:defrule r2 :when (bar :state :y))
     (mcp-lisp:definvariant i1 :on baz :check t)
     (let ((warnings (mcp-lisp:validate-specs)))
-      (is (= 3 (length warnings))))))
+      ;; 2 dangling rule entities + 1 dangling invariant entity + 1 trivially-true
+      (is (= 4 (length warnings))))))
 
 (test validate-specs-free-variable-in-invariant
   "validate-specs catches invariant :check using wrong entity variable"
@@ -1015,3 +1016,31 @@
         (is (fboundp head))
         (is (eq (find-symbol "ALL-PAIRS-CHECK" :mcp-lisp/src/spec/pbt)
                 head))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Bug 7: validate-specs warns on trivially-true invariants
+;;; ---------------------------------------------------------------------------
+
+(test validate-specs-trivially-true-invariant
+  "validate-specs warns when :check is a constant like T"
+  (with-fresh-specs
+    (mcp-lisp:defentity account ()
+      (balance number :required t))
+    (mcp-lisp:definvariant always-true
+      :on account
+      :check t)
+    (let ((warnings (mcp-lisp:validate-specs)))
+      (is (plusp (length warnings)))
+      (is (some (lambda (w) (search "constant" w)) warnings))
+      (is (some (lambda (w) (search "trivially true" w)) warnings)))))
+
+(test validate-specs-trivially-true-number
+  "validate-specs warns when :check is a numeric constant"
+  (with-fresh-specs
+    (mcp-lisp:defentity account ()
+      (balance number :required t))
+    (mcp-lisp:definvariant always-truthy
+      :on account
+      :check 42)
+    (let ((warnings (mcp-lisp:validate-specs)))
+      (is (some (lambda (w) (search "constant" w)) warnings)))))

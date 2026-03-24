@@ -69,7 +69,7 @@
     (mcp-lisp:defentity account ()
       (id string :required t :unique t)
       (balance number :required t :default 0)
-      (email string :required t))
+      (email string :required t :unique t))
     (let ((sql (mcp-lisp:specs-to-sql)))
       (is (search "PRIMARY KEY" sql))
       (is (search "UNIQUE" sql))
@@ -443,3 +443,92 @@
       (is (search "-- [-50, 150]" sql))
       ;; Plain field has no comment marker
       (is (not (search "name TEXT NOT NULL  --" sql))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Bug 8: PRIMARY KEY should not emit redundant NOT NULL UNIQUE
+;;; ---------------------------------------------------------------------------
+
+(test specs-to-sql-pk-no-redundant-modifiers
+  "PRIMARY KEY column omits NOT NULL and UNIQUE (they are implied)"
+  (with-fresh-specs
+    (mcp-lisp:defentity widget ()
+      (id string :required t :unique t)
+      (name string :required t))
+    (let ((sql (mcp-lisp:specs-to-sql)))
+      ;; id line should have PRIMARY KEY but not NOT NULL or UNIQUE
+      (let* ((id-start (search "id TEXT" sql))
+             (id-end (position #\Newline sql :start id-start))
+             (id-line (subseq sql id-start id-end)))
+        (is (search "PRIMARY KEY" id-line))
+        (is (null (search "NOT NULL" id-line)))
+        (is (null (search "UNIQUE" id-line))))
+      ;; non-PK required field still gets NOT NULL
+      (is (search "name TEXT NOT NULL" sql)))))
+
+;;; ---------------------------------------------------------------------------
+;;; Bug 9: Enum comments should use SQL values (underscores)
+;;; ---------------------------------------------------------------------------
+
+(test specs-to-sql-enum-comment-underscores
+  "Enum comments use SQL-style underscores, not Lisp hyphens"
+  (with-fresh-specs
+    (mcp-lisp:defentity resource ()
+      (id string :required t)
+      (quality (member :level-3 :level-4 :authoritative) :default :level-3))
+    (let ((sql (mcp-lisp:specs-to-sql)))
+      (is (search "level_3" sql))
+      (is (search "level_4" sql))
+      ;; Comment should use underscores too
+      (is (search "-- level_3, level_4, authoritative" sql))
+      ;; No raw Lisp hyphens in the comment
+      (is (null (search "level-3" sql))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Bug 4: Seed generation hits target row count even with scenarios
+;;; ---------------------------------------------------------------------------
+
+(test specs-to-sql-seed-hits-target-count
+  "Seed generation produces exactly rows-per-entity rows for every entity"
+  (with-fresh-specs
+    (mcp-lisp:defentity warehouse ()
+      (id string :required t)
+      (capacity number :required t :min 100 :max 500))
+    (mcp-lisp:defentity product ()
+      (id string :required t)
+      (stock number :required t :min 0 :max 50))
+    (mcp-lisp:defscenario inventory
+      :entities ((warehouses (1 2) warehouse)
+                 (products (1 2) product :per warehouses)))
+    (let* ((target 10)
+           (sql (mcp-lisp:specs-to-sql-seed :rows-per-entity target :scenario-trials 1)))
+      ;; Both entities should have at least target rows
+      (let ((wh-start (search "INSERT INTO warehouse" sql))
+            (pr-start (search "INSERT INTO product" sql)))
+        (is (not (null wh-start)))
+        (is (not (null pr-start)))
+        ;; Count rows by counting closing parens in VALUES clause
+        (let* ((wh-vals (search "VALUES" sql :start2 wh-start))
+               (wh-next-insert (or (search "INSERT" sql :start2 (1+ wh-start))
+                                   (length sql)))
+               (wh-rows (count #\) sql :start wh-vals :end wh-next-insert)))
+          (is (>= wh-rows target)))
+        (let* ((pr-vals (search "VALUES" sql :start2 pr-start))
+               (pr-rows (count #\) sql :start pr-vals)))
+          (is (>= pr-rows target)))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Bug 2: Seed generation dispatches through custom generators
+;;; ---------------------------------------------------------------------------
+
+(test specs-to-sql-seed-uses-custom-generators
+  "Seed data from uncovered entities dispatches through defgenerator"
+  (with-fresh-specs
+    (mcp-lisp:defentity device ()
+      (id string :required t)
+      (lfdi string :required t))
+    (mcp-lisp:defgenerator device (overrides)
+      (let ((inst (mcp-lisp:default-generate-instance "device" overrides)))
+        (setf (getf inst :lfdi) "CUSTOM-LFDI-VALUE")
+        inst))
+    (let ((sql (mcp-lisp:specs-to-sql-seed :rows-per-entity 3)))
+      (is (search "CUSTOM-LFDI-VALUE" sql)))))

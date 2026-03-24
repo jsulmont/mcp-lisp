@@ -886,6 +886,16 @@ Returns a list of warning strings. Empty list = all clear."
                                      ekey)
                              warnings)))))
                *entities*)
+      ;; Warn about trivially-true/false invariant :check forms
+      (maphash (lambda (key plist)
+                 (let ((check (getf plist :check)))
+                   (when (or (eq check t)
+                             (numberp check)
+                             (stringp check))
+                     (push (format nil "invariant ~A: :check is a constant (~S), trivially ~A"
+                                   key check (if check "true" "false"))
+                           warnings))))
+               *invariants*)
       ;; Flag entities with >2 non-identifier fields but zero invariants
       (maphash (lambda (ekey eplist)
                  (let* ((fields (getf eplist :fields))

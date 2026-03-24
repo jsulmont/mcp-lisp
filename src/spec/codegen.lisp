@@ -358,7 +358,7 @@ Returns the SQL string or NIL if the form can't be translated."
          (parts nil))
     (when (member-type-p ftype)
       (push (format nil "~{~A~^, ~}"
-                    (mapcar (lambda (v) (string-downcase (princ-to-string v)))
+                    (mapcar (lambda (v) (lisp-to-sql (princ-to-string v)))
                             (cdr ftype)))
             parts))
     (when (or mn mx)
@@ -451,12 +451,13 @@ Returns a list of (fk-col-sql parent-table-sql parent-col-sql) triples."
              (col-type (sql-type ftype entity-name (string fname) enums))
              (modifiers nil)
              (comment (field-comment field)))
-        (when (string= col-name "id")
-          (push "PRIMARY KEY" modifiers))
-        (when (getf kwargs :required)
-          (push "NOT NULL" modifiers))
-        (when (getf kwargs :unique)
-          (push "UNIQUE" modifiers))
+        (let ((is-pk (string= col-name "id")))
+          (when is-pk
+            (push "PRIMARY KEY" modifiers))
+          (when (and (getf kwargs :required) (not is-pk))
+            (push "NOT NULL" modifiers))
+          (when (and (getf kwargs :unique) (not is-pk))
+            (push "UNIQUE" modifiers)))
         (when (getf kwargs :default)
           (let ((default (getf kwargs :default)))
             (push (format nil "DEFAULT ~A"
@@ -850,6 +851,32 @@ Unique/ID string fields are stamped with collision-free identifiers."
                   (setf (gethash key seen) t)
                   (push inst unique))))
             (setf (gethash ename entity-instances) (nreverse unique))))))
+    ;; Phase 4.5: top up any entity below rows-per-entity (scenario dedup
+    ;; or limited scenario-trials can leave entities short of the target)
+    (dolist (ename entities)
+      (let* ((current (gethash ename entity-instances))
+             (deficit (- rows-per-entity (length current))))
+        (when (plusp deficit)
+          (let ((fk-targets (entity-belongs-to-targets ename))
+                (ufields (unique-string-fields ename))
+                (new-instances nil))
+            (dotimes (_i deficit)
+              (let* ((overrides
+                       (loop for (fk-kw . target) in fk-targets
+                             for parent-ids = (let ((existing (gethash target entity-instances)))
+                                                (when existing
+                                                  (mapcar (lambda (i) (getf i :id))
+                                                          existing)))
+                             when parent-ids
+                               nconc (list fk-kw
+                                          (nth (random (length parent-ids))
+                                               parent-ids))))
+                     (inst (generate-instance ename overrides)))
+                (dolist (kw ufields)
+                  (setf (getf inst kw) (generate-seed-id ename)))
+                (push inst new-instances)))
+            (setf (gethash ename entity-instances)
+                  (append current (nreverse new-instances)))))))
     ;; Phase 5: emit INSERTs in dependency order
     (dolist (ename entities)
       (let ((instances (gethash ename entity-instances)))

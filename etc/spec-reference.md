@@ -180,10 +180,11 @@ For constraints the extractor can't handle, use `defgenerator`:
     inst))
 ```
 
-- `defgenerator` registers a generator function for an entity. It receives `overrides` (an alist of `(keyword . value)` or NIL) and must return a plist.
+- `defgenerator` registers a generator function for an entity. It receives `overrides` (a plist of `:keyword value ...` or NIL) and must return a plist. Use `override-val` / `override-present-p` to read values from it.
 - `default-generate-instance` is the constraint-aware generator — use it as a base, then fix up remaining dependencies.
 - `generate-value` is available for generating individual typed values (e.g. `(generate-value 'number :min 0.0 :max 10.0)`).
 - `clear-specs` also clears registered generators.
+- **Overrides vs inst**: To conditionally override a field, check `overrides` not `inst` — `default-generate-instance` always populates every field, so `(or (getf inst :field) (my-value))` never fires. Use: `(or (override-val overrides :field) (my-value))`.
 
 #### Custom scenario generators
 
