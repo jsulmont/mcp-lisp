@@ -12,7 +12,8 @@
   `(let ((mcp-lisp/src/spec/spec::*entities* (make-hash-table :test #'equal))
          (mcp-lisp/src/spec/spec::*rules* (make-hash-table :test #'equal))
          (mcp-lisp/src/spec/spec::*invariants* (make-hash-table :test #'equal))
-         (mcp-lisp/src/spec/spec::*generators* (make-hash-table :test #'equal)))
+         (mcp-lisp/src/spec/spec::*generators* (make-hash-table :test #'equal))
+         (mcp-lisp/src/spec/spec::*compiled-fn-cache* (make-hash-table :test #'equal)))
      ,@body))
 
 ;;; ---------------------------------------------------------------------------
@@ -347,3 +348,200 @@
       (name string)
       (weight number))
     (is (null (mcp-lisp:validate-transitions)))))
+
+;;; ---------------------------------------------------------------------------
+;;; Rule execution fixture — self-contained guards (no cross-entity refs)
+;;; ---------------------------------------------------------------------------
+
+(defmacro with-executable-order-specs (&body body)
+  "Order entity with rules whose guards only reference the entity's own fields."
+  `(with-fresh-specs
+     (mcp-lisp:defentity order ()
+       (id string :required t)
+       (instrument string :required t)
+       (quantity number :required t)
+       (price number :required t)
+       (state (member :pending :validated :filled :rejected :cancelled) :default :pending)
+       (fill-price number :default 0))
+
+     (mcp-lisp:defrule validate-order
+       :when (order :state :pending)
+       :requires ((> (order-quantity order) 0)
+                  (> (order-price order) 0))
+       :ensures ((eq (order-state order) :validated)))
+
+     (mcp-lisp:defrule fill-order
+       :when (order :state :validated)
+       :ensures ((eq (order-state order) :filled)))
+
+     (mcp-lisp:defrule reject-order
+       :when (order :state :pending)
+       :requires ((<= (order-quantity order) 0))
+       :ensures ((eq (order-state order) :rejected)))
+
+     (mcp-lisp:defrule cancel-pending
+       :when (order :state :pending)
+       :ensures ((eq (order-state order) :cancelled)))
+
+     (mcp-lisp:defrule cancel-validated
+       :when (order :state :validated)
+       :ensures ((eq (order-state order) :cancelled)))
+
+     ,@body))
+
+;;; ---------------------------------------------------------------------------
+;;; apply-rule
+;;; ---------------------------------------------------------------------------
+
+(test apply-rule-state-transition
+  "apply-rule transitions state on success"
+  (with-executable-order-specs
+    (let ((order (list :id "o1" :instrument "AAPL" :quantity 10 :price 50.0
+                       :state :pending :fill-price 0)))
+      (multiple-value-bind (new applied reason)
+          (mcp-lisp:apply-rule "order" order "validate-order")
+        (is (eq t applied))
+        (is (null reason))
+        (is (eq :validated (getf new :state)))))))
+
+(test apply-rule-when-mismatch
+  "apply-rule rejects when state doesn't match :when"
+  (with-executable-order-specs
+    (let ((order (list :id "o1" :instrument "AAPL" :quantity 10 :price 50.0
+                       :state :pending :fill-price 0)))
+      (multiple-value-bind (new applied reason)
+          (mcp-lisp:apply-rule "order" order "fill-order")
+        (is (null applied))
+        (is (eq :when-mismatch reason))
+        (is (eq :pending (getf new :state)))))))
+
+(test apply-rule-guard-failed
+  "apply-rule rejects when :requires guard fails"
+  (with-executable-order-specs
+    (let ((order (list :id "o1" :instrument "AAPL" :quantity -5 :price 50.0
+                       :state :pending :fill-price 0)))
+      (multiple-value-bind (new applied reason)
+          (mcp-lisp:apply-rule "order" order "validate-order")
+        (is (null applied))
+        (is (consp reason))
+        (is (eq :guard-failed (first reason)))
+        (is (eq :pending (getf new :state)))))))
+
+(test apply-rule-preserves-fields
+  "apply-rule only changes state field, not other fields"
+  (with-executable-order-specs
+    (let ((order (list :id "o1" :instrument "AAPL" :quantity 10 :price 50.0
+                       :state :pending :fill-price 0)))
+      (multiple-value-bind (new applied _reason)
+          (mcp-lisp:apply-rule "order" order "validate-order")
+        (declare (ignore _reason))
+        (is (eq t applied))
+        (is (equal "o1" (getf new :id)))
+        (is (= 10 (getf new :quantity)))
+        (is (= 50.0 (getf new :price)))
+        (is (= 0 (getf new :fill-price)))))))
+
+(test apply-rule-chain
+  "apply-rule can chain: pending → validated → filled"
+  (with-executable-order-specs
+    (let ((order (list :id "o1" :instrument "AAPL" :quantity 10 :price 50.0
+                       :state :pending :fill-price 0)))
+      (multiple-value-bind (new1 ok1 _r1)
+          (mcp-lisp:apply-rule "order" order "validate-order")
+        (declare (ignore _r1))
+        (is (eq t ok1))
+        (multiple-value-bind (new2 ok2 _r2)
+            (mcp-lisp:apply-rule "order" new1 "fill-order")
+          (declare (ignore _r2))
+          (is (eq t ok2))
+          (is (eq :filled (getf new2 :state))))))))
+
+(test apply-rule-unknown-rule
+  "apply-rule returns :unknown-rule for nonexistent rule"
+  (with-executable-order-specs
+    (let ((order (list :id "o1" :state :pending)))
+      (multiple-value-bind (_new applied reason)
+          (mcp-lisp:apply-rule "order" order "nonexistent-rule")
+        (declare (ignore _new))
+        (is (null applied))
+        (is (eq :unknown-rule reason))))))
+
+(test apply-rule-does-not-mutate-original
+  "apply-rule returns a new list, original is unchanged"
+  (with-executable-order-specs
+    (let ((order (list :id "o1" :instrument "AAPL" :quantity 10 :price 50.0
+                       :state :pending :fill-price 0)))
+      (mcp-lisp:apply-rule "order" order "validate-order")
+      (is (eq :pending (getf order :state))))))
+
+;;; ---------------------------------------------------------------------------
+;;; applicable-rules
+;;; ---------------------------------------------------------------------------
+
+(test applicable-rules-pending
+  "applicable-rules returns correct rules for :pending state"
+  (with-executable-order-specs
+    (let* ((order (list :id "o1" :state :pending :quantity 10 :price 50.0))
+           (rules (mcp-lisp:applicable-rules "order" order)))
+      (is (= 3 (length rules)))
+      (is (member "validate-order" rules :test #'string=))
+      (is (member "reject-order" rules :test #'string=))
+      (is (member "cancel-pending" rules :test #'string=)))))
+
+(test applicable-rules-validated
+  "applicable-rules returns correct rules for :validated state"
+  (with-executable-order-specs
+    (let* ((order (list :id "o1" :state :validated :quantity 10 :price 50.0))
+           (rules (mcp-lisp:applicable-rules "order" order)))
+      (is (= 2 (length rules)))
+      (is (member "fill-order" rules :test #'string=))
+      (is (member "cancel-validated" rules :test #'string=)))))
+
+(test applicable-rules-terminal
+  "applicable-rules returns empty for terminal state"
+  (with-executable-order-specs
+    (let ((order (list :id "o1" :state :filled)))
+      (is (null (mcp-lisp:applicable-rules "order" order))))))
+
+;;; ---------------------------------------------------------------------------
+;;; random-walk
+;;; ---------------------------------------------------------------------------
+
+(test random-walk-basic
+  "random-walk completes without error"
+  (with-executable-order-specs
+    (let ((result (mcp-lisp:random-walk "order" :steps 10 :trials 20 :verbose nil)))
+      (is (not (null result)))
+      (is (equal "order" (getf result :entity)))
+      (is (= 20 (getf result :trials)))
+      (is (= 10 (getf result :steps)))
+      (is (= 20 (+ (getf result :passed) (getf result :failed)))))))
+
+(test random-walk-catches-violation
+  "random-walk detects invariant violations caused by state transitions"
+  (with-fresh-specs
+    (mcp-lisp:defentity ticket ()
+      (id string :required t)
+      (state (member :open :assigned :resolved) :default :open)
+      (priority integer :required t :min 0 :max 10))
+
+    (mcp-lisp:defrule assign-ticket
+      :when (ticket :state :open)
+      :ensures ((eq (ticket-state ticket) :assigned)))
+
+    (mcp-lisp:defrule resolve-ticket
+      :when (ticket :state :assigned)
+      :ensures ((eq (ticket-state ticket) :resolved)))
+
+    ;; Invariant: resolved tickets must have priority 0.
+    ;; Since apply-rule only changes state (not priority), this WILL fire
+    ;; when a ticket with priority > 0 gets resolved.
+    (mcp-lisp:definvariant resolved-priority-zero
+      :on ticket
+      :check (if (eq (ticket-state ticket) :resolved)
+                 (= (ticket-priority ticket) 0)
+                 t))
+
+    (let ((result (mcp-lisp:random-walk "ticket" :steps 5 :trials 30 :verbose nil)))
+      ;; Should have failures since priority stays > 0 after resolve
+      (is (> (getf result :failed) 0)))))

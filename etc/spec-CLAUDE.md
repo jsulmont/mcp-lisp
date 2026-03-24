@@ -199,6 +199,7 @@ For constraints the extractor can't handle (e.g. neither side is a single field,
 
 - Returns a plist mapping binding keywords to instances (lists for plural bindings, single plist for cardinality=1).
 - `generate-scenario` dispatches to custom generator if registered, otherwise uses `default-generate-scenario`.
+- In `defscenario-generator`, use `(or (config :key) default)` since config values are only populated during PBT runs. Outside PBT, `(config :key)` returns the field's `:default` from `defconfig`, but if no default was declared it returns NIL.
 
 ### State machine analysis
 
@@ -221,6 +222,30 @@ Rules with `:when`/`:ensures` patterns implicitly define state machines. The tra
 
 A state field is a `(member ...)` field that appears as a source in at least one rule's `:when` AND as a target in at least one rule's `:ensures`. The analysis checks all entities automatically.
 
+### Rule execution
+
+Apply rules as state transitions and test invariants across rule sequences:
+
+```lisp
+;; Apply a single rule — returns (values new-instance applied-p reason)
+(apply-rule "order" instance "fill-order")
+;; → (values new-instance t nil)               ; applied: state changed
+;; → (values instance nil :when-mismatch)       ; wrong state
+;; → (values instance nil (:guard-failed form)) ; :requires failed
+;; → (values instance nil :unknown-rule)        ; rule doesn't exist
+
+;; Which rules can fire on this instance?
+(applicable-rules "order" instance)
+;; → ("validate-order" "reject-order" "cancel-pending")
+
+;; Random walk PBT: generate instances, apply random rules, check invariants
+(random-walk "order" :steps 20 :trials 50)
+```
+
+`apply-rule` performs state transitions only — non-state fields are unchanged. This is deliberate: state-dependent invariants (e.g. "fill-price must be positive when state is :filled") will fire when a rule changes state without the corresponding field update. These violations expose incomplete rules — the spec declares a state transition but doesn't account for fields that must change with it.
+
+`random-walk` generates instances in the initial state, then repeatedly picks a random applicable rule, applies it, and checks all invariants. It reports the first violation with the rule trace that caused it. Use this to find invariant violations that only surface through specific rule sequences.
+
 ### JSON persistence
 
 - `(specs-to-json)` — export all specs as a JSON string (conforms to JSON Schema 2020-12)
@@ -241,25 +266,28 @@ Example: `(zones (1 3) grid-zone)` → `zones` is always a list; use `(every (la
 
 1. User describes domain in natural language
 2. Define entities, variants, config, rules, invariants via `eval_lisp`
-3. **Inspect state machines.** For any entity with `(member ...)` state fields and rules, run `(analyze-state-machine "entity")`. Check for:
+3. **Verify completeness against the prompt.** If the prompt names specific invariants, rules, entities, or scenarios, verify every one was implemented. Run `(list-entities)`, `(list-rules)`, `(list-invariants)`, `(list-scenarios)` and diff against the prompt's named items. List any that appear in the prompt but are missing from the spec. **Implement all missing items before proceeding.** This catches the most common generation failure: silently dropping items from long lists, especially complex invariants in the middle-to-end of the prompt.
+4. **Inspect state machines.** For any entity with `(member ...)` state fields and rules, run `(analyze-state-machine "entity")`. Check for:
    - **Dead-end states**: non-terminal states with no outgoing transitions — usually a missing rule.
    - **Unreachable states**: states no transition leads to — either the state is unused or an inbound rule is missing.
    - **Missing terminal states**: if every real-world process has an end state, the machine should have at least one terminal state.
    - Use `(simulate-trace "entity" instance '("rule1" "rule2"))` to verify a concrete instance can walk through the full lifecycle. Each step shows which guards pass/fail and the resulting state.
    - Fix gaps in rules/states before proceeding — the state graph shapes what invariants and scenarios are needed.
-4. **Check invariant coverage.** Run `(invariant-coverage "entity")` for each entity. Fields with NIL have no invariant checking them. Decide whether each unconstrained field needs an invariant or is intentionally uncovered (e.g. `:id`, `:name`). Use `(field-index "entity" :field)` to see the full picture of what touches a specific field.
-5. **Audit for missing cross-entity invariants.** After per-entity invariants are defined, check for gaps:
+5. **Check invariant coverage.** Run `(invariant-coverage "entity")` for each entity. Fields with NIL have no invariant checking them. Decide whether each unconstrained field needs an invariant or is intentionally uncovered (e.g. `:id`, `:name`). Use `(field-index "entity" :field)` to see the full picture of what touches a specific field.
+6. **Audit for missing cross-entity invariants.** After per-entity invariants are defined, check for gaps:
    - **Bounding fields**: Any field whose purpose is to constrain another entity (e.g. `max-notional` on a risk-limit that should bound a trader's positions, `capacity` on a warehouse that should bound stored items) MUST have a cross-entity scenario testing that relationship. A per-entity invariant on such a field (e.g. "max-notional > 0") is necessary but not sufficient — the aggregate constraint is the one that matters.
    - **Relations as signals**: For every `has-many` relation, ask: does the parent entity have fields that should bound aggregate properties of the children (count, sum, max)? If yes, that's a scenario.
    - **Rules that reach across entities**: If a rule's `:requires` or `:let` accesses fields from related entities, the constraint it checks likely has a corresponding aggregate invariant that should hold at rest, not just at transition time.
    - If this audit finds gaps, define the scenarios before proceeding.
-6. Define scenarios with `defscenario` for cross-entity invariants
-7. **Check generation feasibility.** Run `(generation-feasibility "entity")` for each entity with invariants. If the verdict is `:needs-custom-generator` (conditional constraints that require correlated field values), write a `defgenerator` **before** running PBT — otherwise you'll waste trials on guaranteed failures.
-8. **Check scenario feasibility.** Run `(scenario-feasibility "scenario")` for each scenario. If `:needs-custom-generator` is T and `:has-custom-generator` is NIL, write a `defscenario-generator` before running PBT. See [Custom scenario generators](#custom-scenario-generators).
-9. Run `(validate-specs)` to catch dangling references, non-exhaustive variant handling, and invalid scenario bindings
-10. Run `(run-pbt :trials 500 :negative-trials 200)` to test per-entity invariants against random data (and random configs). The negative pass verifies invariants aren't trivially true.
-11. Run `(run-pbt :scenario "name" :trials 50)` to test cross-entity invariants
-12. Generate code artifacts (SQL, API routes, types, validation) from the spec
-13. Export with `(specs-to-json)` and save to a file
+7. Define scenarios with `defscenario` for cross-entity invariants
+8. **Check generation feasibility.** Run `(generation-feasibility "entity")` for each entity with invariants. If the verdict is `:needs-custom-generator` (conditional constraints that require correlated field values), write a `defgenerator` **before** running PBT — otherwise you'll waste trials on guaranteed failures.
+9. **Check scenario feasibility.** Run `(scenario-feasibility "scenario")` for each scenario. If `:needs-custom-generator` is T and `:has-custom-generator` is NIL, write a `defscenario-generator` before running PBT. See [Custom scenario generators](#custom-scenario-generators).
+10. Run `(validate-specs)` to catch dangling references, non-exhaustive variant handling, and invalid scenario bindings
+11. Run `(run-pbt :trials 500 :negative-trials 200)` to test per-entity invariants against random data (and random configs). The negative pass verifies invariants aren't trivially true.
+12. Run `(run-pbt :scenario "name" :trials 50)` to test cross-entity invariants
+13. Run `(random-walk "entity" :steps 20 :trials 50)` for entities with rules — tests that invariants hold across all reachable rule sequences, not just on freshly generated instances
+14. Generate SQL DDL: `(specs-to-sql)` produces PostgreSQL DDL (enums, tables, CHECK constraints, foreign keys, indexes, state machine triggers). Invariants that can't be translated to SQL are emitted as comments.
+15. Generate seed data: `(specs-to-sql-seed :rows-per-entity 20)` produces INSERT statements with invariant-consistent random data. Foreign keys reference previously generated parent rows. Every row passes the spec's invariants.
+16. Save the spec as a loadable `.lisp` file (all `defentity`, `defrule`, `definvariant`, `defscenario`, `defgenerator`, and helper forms). This is the canonical format — load with `(load "spec.lisp")` in future sessions.
 
 Always spec first, code second.

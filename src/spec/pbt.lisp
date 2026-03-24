@@ -7,6 +7,7 @@
   (:use #:cl)
   (:import-from #:mcp-lisp/src/spec/spec
                 #:*entities*
+                #:*rules*
                 #:*invariants*
                 #:*generators*
                 #:*generator-sources*
@@ -16,9 +17,12 @@
                 #:*scenarios*
                 #:*scenario-generators*
                 #:*scenario-generator-sources*
+                #:*compiled-fn-cache*
                 #:config
                 #:describe-entity
                 #:list-entities
+                #:describe-rule
+                #:list-rules
                 #:describe-invariant
                 #:list-invariants
                 #:describe-variant
@@ -28,10 +32,14 @@
                 #:list-scenarios
                 #:entity-fields
                 #:entity-relations)
+  (:import-from #:mcp-lisp/src/spec/transitions
+                #:detect-state-fields)
   (:export #:generate-value
            #:generate-instance
            #:default-generate-instance
            #:defgenerator
+           #:override-val
+           #:override-present-p
            #:ensure-entity-accessors
            #:ensure-variant-accessors
            #:generate-config
@@ -42,11 +50,32 @@
            #:generate-scenario
            #:default-generate-scenario
            #:defscenario-generator
+           #:current-config
+           #:shrink-scenario
            #:run-pbt
+           #:check-scenario
            #:extract-generation-constraints
-           #:getf-field-p))
+           #:getf-field-p
+           #:apply-rule
+           #:applicable-rules
+           #:random-walk
+           #:all-pairs-check
+           #:consecutive-pairs-check
+           #:haversine-distance-nm))
 
 (in-package #:mcp-lisp/src/spec/pbt)
+
+;;; ---------------------------------------------------------------------------
+;;; Compiled function cache
+;;; ---------------------------------------------------------------------------
+
+(defun get-compiled-fn (cache-key params body)
+  "Compile and memoize a lambda by its logical identity and source shape."
+  (let ((full-key (list cache-key params body)))
+    (or (gethash full-key *compiled-fn-cache*)
+        (setf (gethash full-key *compiled-fn-cache*)
+              (handler-bind ((warning #'muffle-warning))
+                (compile nil `(lambda ,params ,body)))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Value generators
@@ -59,7 +88,7 @@
 Optional MIN and MAX constrain numeric types."
   (cond
     ((eq type-spec 'string)
-     (let ((len (random 20)))
+     (let ((len (1+ (random 20))))
        (map 'string
             (lambda (x)
               (declare (ignore x))
@@ -97,6 +126,19 @@ Optional MIN and MAX constrain numeric types."
 (defun field-keyword (field-name-sym)
   "Convert a field name symbol to a keyword for plist access."
   (intern (symbol-name field-name-sym) :keyword))
+
+(defvar *override-sentinel* (gensym "OVERRIDE-SENTINEL"))
+
+(defun override-val (overrides key &optional default)
+  "Look up KEY in OVERRIDES plist. Returns the value if present, DEFAULT otherwise.
+Uses a sentinel to distinguish missing keys from nil/0/\"\" values.
+OVERRIDES is a plist (:key1 val1 :key2 val2 ...)."
+  (let ((val (getf overrides key *override-sentinel*)))
+    (if (eq val *override-sentinel*) default val)))
+
+(defun override-present-p (overrides key)
+  "Return T if KEY is present in OVERRIDES plist, even if its value is NIL/0/\"\"."
+  (not (eq (getf overrides key *override-sentinel*) *override-sentinel*)))
 
 (defun field-constraints (field)
   "Extract plist of generator constraints (:min :max :derived-from) from a field spec."
@@ -535,6 +577,7 @@ CONSTRAINT-MAP maps field keywords to lists of constraint plists."
 
 (defun default-generate-instance (entity-name &optional overrides)
   "Generate a random instance of ENTITY-NAME as a plist.
+OVERRIDES is a plist (:key1 val1 :key2 val2 ...) of pre-set field values.
 Uses invariant-extracted constraints for smarter generation:
 member/enum fields first, then numeric fields in dependency order
 with bounds derived from invariant check forms."
@@ -552,10 +595,9 @@ with bounds derived from invariant check forms."
     (dolist (field member-fields)
       (let* ((fname (first field))
              (ftype (second field))
-             (key (field-keyword fname))
-             (override (assoc key overrides)))
-        (if override
-            (progn (push (cdr override) instance) (push key instance))
+             (key (field-keyword fname)))
+        (if (override-present-p overrides key)
+            (progn (push (override-val overrides key) instance) (push key instance))
             (progn (push (generate-value ftype) instance) (push key instance)))))
     ;; Phase 2: generate non-member fields in dependency order
     (dolist (field sorted-others)
@@ -563,11 +605,10 @@ with bounds derived from invariant check forms."
              (ftype (second field))
              (key (field-keyword fname))
              (fc (field-constraints field))
-             (ic (gethash key inv-constraints))
-             (override (assoc key overrides)))
+             (ic (gethash key inv-constraints)))
         (cond
-          (override
-           (push (cdr override) instance) (push key instance))
+          ((override-present-p overrides key)
+           (push (override-val overrides key) instance) (push key instance))
           ((getf fc :derived-from)
            (push nil instance) (push key instance)
            (push (list key (getf fc :derived-from)) deferred))
@@ -590,8 +631,8 @@ with bounds derived from invariant check forms."
       (dolist (entry deferred)
         (destructuring-bind (key form) entry
           (let* ((inst-sym (find-symbol-named "INSTANCE" form))
-                 (fn (handler-bind ((warning #'muffle-warning))
-                       (compile nil `(lambda (,inst-sym) ,form)))))
+                 (fn (get-compiled-fn (cons entity-name key)
+                                      (list inst-sym) form)))
             (setf (getf instance key) (funcall fn instance))))))
     instance))
 
@@ -637,26 +678,48 @@ variant-specific fields."
                                (nth (random (length variants)) variants))))
                    (eff-overrides
                      (if variant
-                         (cons (cons (getf variant :discriminator)
-                                     (getf variant :value))
-                               (or overrides nil))
+                         (list* (getf variant :discriminator)
+                                (getf variant :value)
+                                (or overrides nil))
                          overrides))
                    (inst (default-generate-instance entity-name eff-overrides))
                    (full-inst (if variant
                                   (generate-variant-fields variant inst)
                                   inst))
-                   (violations (check-invariants entity-name full-inst))
-                   (n (length violations)))
+                   (result (check-invariants entity-name full-inst))
+                   (n (if (eq (car result) :pass) 0 (length (cdr result)))))
               (when (< n best-n)
                 (setf best full-inst best-n n))
               (when (zerop n)
                 (return-from generate-instance full-inst))))
           best))))
 
+(defun body-references-p (sym body)
+  "Check if BODY (a list of forms) references symbol SYM anywhere."
+  (labels ((walk (form)
+             (cond
+               ((eq form sym) t)
+               ((and (consp form) (eq (first form) 'quote)) nil)
+               ((consp form) (or (walk (car form)) (walk (cdr form))))
+               (t nil))))
+    (some #'walk body)))
+
+(defun body-declares-ignore-p (sym body)
+  "Check if BODY contains (declare (ignore SYM)) or (declare (ignorable SYM))."
+  (dolist (form body)
+    (when (and (consp form) (eq (first form) 'declare))
+      (dolist (decl (cdr form))
+        (when (and (consp decl)
+                   (member (first decl) '(ignore ignorable))
+                   (member sym (cdr decl)))
+          (return-from body-declares-ignore-p t)))))
+  nil)
+
 (defmacro defgenerator (entity-name (overrides-var) &body body)
   "Register a custom instance generator for ENTITY-NAME.
-The generator receives OVERRIDES (an alist of (keyword . value) or NIL)
-and must return a plist. GENERATE-VALUE and DEFAULT-GENERATE-INSTANCE
+The generator receives OVERRIDES (a plist of :key value pairs, or NIL)
+and must return a plist. Use OVERRIDE-VAL to look up override values
+(handles NIL/0/\"\" correctly). GENERATE-VALUE and DEFAULT-GENERATE-INSTANCE
 are available within the body for building instances.
 
   (defgenerator trader (overrides)
@@ -664,6 +727,12 @@ are available within the body for building instances.
       (when (getf inst :suspended)
         (setf (getf inst :margin-ratio) (random 0.5)))
       inst))"
+  (when (and (not (body-references-p overrides-var body))
+             (not (body-declares-ignore-p overrides-var body)))
+    (warn "defgenerator ~A: overrides parameter ~A is never used. ~
+           Scenario-generated overrides will be silently ignored. ~
+           Add (declare (ignore ~A)) if intentional."
+          entity-name overrides-var overrides-var))
   (let ((key (string-downcase (string entity-name))))
     `(progn
        (setf (gethash ,key *generators*)
@@ -748,7 +817,8 @@ Accessor names follow the pattern VARIANT-FIELD, e.g. BRANCH-CHILDREN."
 (defun check-invariants (entity-name instance)
   "Check all invariants for ENTITY-NAME against INSTANCE.
 Also checks variant-specific invariants when the discriminator matches.
-Returns a list of violated invariant name strings. Empty list = all pass."
+Returns (:PASS) when all invariants hold, or (:FAIL inv1 inv2 ...) with
+the names of violated invariants."
   (let ((violations nil))
     ;; Base entity invariants
     (dolist (entry (invariants-for entity-name))
@@ -756,8 +826,7 @@ Returns a list of violated invariant name strings. Empty list = all pass."
         (let ((on-sym (getf inv :on))
               (check-form (getf inv :check)))
           (handler-case
-              (let ((fn (handler-bind ((warning #'muffle-warning))
-                          (compile nil `(lambda (,on-sym) ,check-form)))))
+              (let ((fn (get-compiled-fn inv-name (list on-sym) check-form)))
                 (unless (funcall fn instance)
                   (push inv-name violations)))
             (error (e)
@@ -774,13 +843,14 @@ Returns a list of violated invariant name strings. Empty list = all pass."
               (let ((on-sym (getf inv :on))
                     (check-form (getf inv :check)))
                 (handler-case
-                    (let ((fn (handler-bind ((warning #'muffle-warning))
-                                (compile nil `(lambda (,on-sym) ,check-form)))))
+                    (let ((fn (get-compiled-fn inv-name (list on-sym) check-form)))
                       (unless (funcall fn instance)
                         (push inv-name violations)))
                   (error (e)
                     (push (format nil "~A (error: ~A)" inv-name e) violations)))))))))
-    (nreverse violations)))
+    (if violations
+        (cons :fail (nreverse violations))
+        '(:pass))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Scenario invariants
@@ -800,7 +870,7 @@ Returns a list of violated invariant name strings. Empty list = all pass."
 SCENARIO-INSTANCE is a plist mapping binding keywords to instances (or lists of instances).
 Invariant check forms receive bindings as variables via flat-binding:
 singular bindings (cardinality 1) are single plists, plural bindings are lists.
-Returns a list of violated invariant name strings."
+Returns (:PASS) when all invariants hold, or (:FAIL inv1 inv2 ...) with violation names."
   (let ((scenario (describe-scenario scenario-name))
         (violations nil))
     (when scenario
@@ -818,25 +888,55 @@ Returns a list of violated invariant name strings."
             (let ((check-form (getf inv :check)))
               (handler-case
                   (let* ((params (mapcar #'first bind-pairs))
-                         (fn (handler-bind ((warning #'muffle-warning))
-                               (compile nil `(lambda ,params ,check-form)))))
+                         (fn (get-compiled-fn inv-name params check-form)))
                     (unless (apply fn (mapcar #'second bind-pairs))
                       (push inv-name violations)))
                 (error (e)
                   (push (format nil "~A (error: ~A)" inv-name e) violations))))))))
-    (nreverse violations)))
+    (if violations
+        (cons :fail (nreverse violations))
+        '(:pass))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Scenario generation
 ;;; ---------------------------------------------------------------------------
 
+(defun scenario-fk-overrides (entity-name result scenario-entities)
+  "Compute FK override plist for ENTITY-NAME from already-generated RESULT.
+Looks up :belongs-to relations and finds matching parent entities in the scenario.
+SCENARIO-ENTITIES is the list of entity specs (to map entity names to bindings)."
+  (let ((rels (entity-relations entity-name))
+        (fk-overrides nil))
+    (dolist (rel rels)
+      (when (eq (first rel) :belongs-to)
+        (let* ((target-name (string-downcase (string (second rel))))
+               (fk-kw (intern (format nil "~A-ID"
+                                       (string-upcase (string (second rel))))
+                               :keyword))
+               (target-binding
+                 (loop for es in scenario-entities
+                       when (string= (getf es :entity) target-name)
+                         return (getf es :binding)))
+               (parent-val (when target-binding (getf result target-binding))))
+          (when parent-val
+            (let* ((parents (if (and (listp parent-val) (not (keywordp (car parent-val))))
+                                parent-val
+                                (list parent-val)))
+                   (parent (nth (random (length parents)) parents))
+                   (parent-id (getf parent :id)))
+              (when parent-id
+                (setf fk-overrides (list* fk-kw parent-id fk-overrides))))))))
+    fk-overrides))
+
 (defun default-generate-scenario (scenario-name &optional overrides)
   "Generate a scenario instance: a plist mapping binding keywords to entity instances.
 Iterates entity specs in declaration order, respecting cardinality and :per relations.
+Auto-wires FK fields from :belongs-to relations to parent entities in the scenario.
 OVERRIDES is a plist mapping binding keywords to pre-built instances."
   (let* ((scenario (describe-scenario scenario-name))
+         (entity-specs (getf scenario :entities))
          (result nil))
-    (dolist (espec (getf scenario :entities))
+    (dolist (espec entity-specs)
       (let* ((binding (getf espec :binding))
              (entity-name (getf espec :entity))
              (emin (getf espec :min))
@@ -848,25 +948,36 @@ OVERRIDES is a plist mapping binding keywords to pre-built instances."
             (if per
                 ;; Generate N instances per parent
                 (let ((parents (let ((p (getf result per)))
-                                 (if (listp p) p (list p))))
+                                 (if (and (listp p) (not (keywordp (car p))))
+                                     p (list p))))
                       (all-instances nil))
                   (dolist (parent parents)
-                    (declare (ignore parent))
-                    (let ((n (if (= emin emax) emin
-                                 (+ emin (random (1+ (- emax emin)))))))
-                      (dotimes (i n)
-                        (push (generate-instance entity-name) all-instances))))
+                    (let* ((fk-ov (scenario-fk-overrides entity-name result entity-specs))
+                           (parent-id (getf parent :id))
+                           (per-entity (loop for es in entity-specs
+                                             when (eq (getf es :binding) per)
+                                               return (getf es :entity)))
+                           (per-fk-kw (when per-entity
+                                        (intern (format nil "~A-ID"
+                                                         (string-upcase per-entity))
+                                                :keyword)))
+                           (full-ov (if (and per-fk-kw parent-id)
+                                        (list* per-fk-kw parent-id fk-ov)
+                                        fk-ov))
+                           (n (if (= emin emax) emin
+                                  (+ emin (random (1+ (- emax emin)))))))
+                      (dotimes (_i n)
+                        (push (generate-instance entity-name full-ov) all-instances))))
                   (setf (getf result binding) (nreverse all-instances)))
                 ;; Generate N instances (no parent)
-                (let ((n (if (= emin emax) emin
-                             (+ emin (random (1+ (- emax emin)))))))
+                (let* ((fk-ov (scenario-fk-overrides entity-name result entity-specs))
+                       (n (if (= emin emax) emin
+                              (+ emin (random (1+ (- emax emin)))))))
                   (if (and (= n 1) (= emin emax))
-                      ;; Singleton: cardinality spec is exactly 1
-                      (setf (getf result binding) (generate-instance entity-name))
-                      ;; Plural: always a list, even if n happens to be 1
+                      (setf (getf result binding) (generate-instance entity-name fk-ov))
                       (let ((instances nil))
-                        (dotimes (i n)
-                          (push (generate-instance entity-name) instances))
+                        (dotimes (_i n)
+                          (push (generate-instance entity-name fk-ov) instances))
                         (setf (getf result binding) (nreverse instances)))))))))
     result))
 
@@ -878,10 +989,17 @@ OVERRIDES is a plist mapping binding keywords to pre-built instances."
         (funcall custom overrides)
         (default-generate-scenario scenario-name overrides))))
 
+(defun current-config ()
+  "Return the active config plist during PBT. Outside PBT, returns NIL.
+Use (CONFIG :key) to read individual config values (returns defaults outside PBT)."
+  *current-config*)
+
 (defmacro defscenario-generator (scenario-name (overrides-var) &body body)
   "Register a custom scenario generator for SCENARIO-NAME.
 The generator receives OVERRIDES (a plist or NIL) and must return a plist
-mapping binding keywords to instances (or lists of instances)."
+mapping binding keywords to instances (or lists of instances).
+During PBT config trials, (CONFIG :key) and (CURRENT-CONFIG) are available
+to access the active config."
   (let ((key (string-downcase (string scenario-name))))
     `(progn
        (setf (gethash ,key *scenario-generators*)
@@ -940,17 +1058,112 @@ Invariants that never reject unconstrained data are flagged as suspicious."
                          (stats (gethash inv-name inv-stats)))
                     (incf (getf stats :tested))
                     (handler-case
-                        (let ((fn (handler-bind ((warning #'muffle-warning))
-                                    (compile nil `(lambda (,on-sym) ,check-form)))))
+                        (let ((fn (get-compiled-fn inv-name (list on-sym) check-form)))
                           (unless (funcall fn instance)
                             (incf (getf stats :rejected))))
                       (error ()
                         (incf (getf stats :rejected))))))))))))
     inv-stats))
 
+(defun run-negative-scenario-trials (trials)
+  "Run negative PBT for scenarios: generate uncorrelated random instances for each
+entity in each scenario and check that scenario invariants reject them.
+Returns per-invariant rejection stats merged into the same hash table format."
+  (let ((inv-stats (make-hash-table :test #'equal)))
+    (dolist (sname (list-scenarios))
+      (let ((invs (scenario-invariants-for sname)))
+        (when invs
+          (let ((scenario (describe-scenario sname)))
+            (dolist (entry invs)
+              (setf (gethash (first entry) inv-stats)
+                    (list :entity (format nil "scenario:~A" sname)
+                          :tested 0 :rejected 0)))
+            (dotimes (_i trials)
+              (let ((raw-instance nil))
+                (dolist (espec (getf scenario :entities))
+                  (let* ((binding (getf espec :binding))
+                         (entity-name (getf espec :entity))
+                         (emin (getf espec :min))
+                         (emax (getf espec :max))
+                         (n (if (= emin emax) emin
+                                (+ emin (random (1+ (- emax emin)))))))
+                    (if (and (= n 1) (= emin emax))
+                        (setf (getf raw-instance binding)
+                              (generate-raw-instance entity-name))
+                        (setf (getf raw-instance binding)
+                              (loop repeat n
+                                    collect (generate-raw-instance entity-name))))))
+                (dolist (entry invs)
+                  (destructuring-bind (inv-name inv) entry
+                    (let ((stats (gethash inv-name inv-stats)))
+                      (incf (getf stats :tested))
+                      (handler-case
+                          (let* ((bindings (getf scenario :entities))
+                                 (bind-pairs
+                                   (mapcar (lambda (es)
+                                             (let* ((bkw (getf es :binding))
+                                                    (sym (intern (symbol-name bkw)))
+                                                    (val (getf raw-instance bkw)))
+                                               (list sym val)))
+                                           bindings))
+                                 (params (mapcar #'first bind-pairs))
+                                 (fn (get-compiled-fn inv-name params (getf inv :check))))
+                            (unless (apply fn (mapcar #'second bind-pairs))
+                              (incf (getf stats :rejected))))
+                        (error ()
+                          (incf (getf stats :rejected)))))))))))))
+    inv-stats))
+
+(defun check-form-field-keys (check-form entity-name)
+  "Extract field keywords referenced in CHECK-FORM for ENTITY-NAME.
+Walks the form tree looking for accessor symbols (ENTITY-FIELD pattern)."
+  (let* ((entity (describe-entity entity-name))
+         (entity-sym (getf entity :name))
+         (fields (getf entity :fields))
+         (relations (getf entity :relations))
+         (field-map (make-hash-table :test #'equal))
+         (result nil))
+    (let ((prefix (symbol-name entity-sym)))
+      (dolist (field fields)
+        (let* ((fname (first field))
+               (acc (format nil "~A-~A" prefix (symbol-name fname))))
+          (setf (gethash acc field-map) (field-keyword fname))))
+      (dolist (rel relations)
+        (let* ((rname (second rel))
+               (acc (format nil "~A-~A" prefix (symbol-name rname))))
+          (setf (gethash acc field-map) (field-keyword rname)))))
+    (dolist (vkey (entity-variants entity-name))
+      (let* ((variant (describe-variant vkey))
+             (vsym (getf variant :name))
+             (vfields (getf variant :fields)))
+        (dolist (field vfields)
+          (let* ((fname (first field))
+                 (acc (format nil "~A-~A" (symbol-name vsym) (symbol-name fname))))
+            (setf (gethash acc field-map) (field-keyword fname))))))
+    (labels ((walk (form)
+               (cond
+                 ((symbolp form)
+                  (let ((key (gethash (symbol-name form) field-map)))
+                    (when (and key (not (member key result)))
+                      (push key result))))
+                 ((consp form)
+                  (walk (car form))
+                  (walk (cdr form))))))
+      (walk check-form))
+    (nreverse result)))
+
+(defun compact-instance (instance keys)
+  "Return a plist containing only KEYS from INSTANCE."
+  (let ((sentinel (gensym)))
+    (loop for key in keys
+          for val = (getf instance key sentinel)
+          unless (eq val sentinel)
+            nconc (list key val))))
+
 (defun run-pbt-trials (trials)
   "Run one round of entity trials with the current *CURRENT-CONFIG* binding.
-Returns (values results total-passed total-failed)."
+Returns (values results total-passed total-failed).
+Failures are grouped per-invariant with compact instances (relevant fields only)."
   (let ((results nil)
         (total-passed 0)
         (total-failed 0))
@@ -962,30 +1175,74 @@ Returns (values results total-passed total-failed)."
         (when all-relevant
           (let ((passed 0)
                 (failed 0)
-                (failures nil))
+                (inv-failures (make-hash-table :test #'equal)))
             (dotimes (i trials)
               (let* ((instance (generate-instance entity-name))
-                     (violations (check-invariants entity-name instance)))
+                     (result (check-invariants entity-name instance))
+                     (violations (when (eq (car result) :fail) (cdr result))))
                 (if violations
                     (progn
                       (incf failed)
-                      (when (< (length failures) 3)
-                        (push (list :instance instance :violations violations)
-                              failures)))
+                      (dolist (vname violations)
+                        (let ((examples (gethash vname inv-failures)))
+                          (when (< (length examples) 3)
+                            (let* ((base-name (let ((pos (search " (error:" vname)))
+                                                (if pos (subseq vname 0 pos) vname)))
+                                   (inv (or (describe-invariant vname)
+                                            (describe-invariant base-name)))
+                                   (keys (when inv
+                                           (check-form-field-keys
+                                            (getf inv :check) entity-name)))
+                                   (compact (if keys
+                                                (compact-instance instance keys)
+                                                instance)))
+                              (setf (gethash vname inv-failures)
+                                    (append examples (list compact))))))))
                     (incf passed))))
-            (incf total-passed passed)
-            (incf total-failed failed)
-            (push (list :entity entity-name
-                        :invariants (mapcar #'first all-relevant)
-                        :trials trials
-                        :passed passed
-                        :failed failed
-                        :failures (nreverse failures))
-                  results)))))
+            (let ((failures nil))
+              (maphash (lambda (k v) (push (cons k v) failures)) inv-failures)
+              (incf total-passed passed)
+              (incf total-failed failed)
+              (push (list :entity entity-name
+                          :invariants (length all-relevant)
+                          :trials trials
+                          :passed passed
+                          :failed failed
+                          :failures (nreverse failures))
+                    results))))))
     (values (nreverse results) total-passed total-failed)))
 
+(defun shrink-scenario (scenario-name instance)
+  "Attempt to minimize a failing scenario instance by removing list elements.
+For each list binding, try removing one element at a time. Keep removals that
+preserve the failure. Returns the shrunk scenario instance."
+  (let* ((scenario (describe-scenario scenario-name))
+         (entity-specs (getf scenario :entities))
+         (current (copy-list instance))
+         (changed t))
+    (loop while changed do
+      (setf changed nil)
+      (dolist (espec entity-specs)
+        (let* ((binding (getf espec :binding))
+               (val (getf current binding)))
+          (when (and (listp val) (> (length val) 1)
+                     (not (keywordp (car val))))
+            (dotimes (i (length val))
+              (let* ((without (append (subseq val 0 i) (subseq val (1+ i))))
+                     (trial (copy-list current)))
+                (setf (getf trial binding) without)
+                (let* ((sr (check-scenario-invariants scenario-name trial))
+                       (sv (when (eq (car sr) :fail) (cdr sr))))
+                  (when sv
+                    (setf current trial
+                          val without
+                          changed t)
+                    (return)))))))))
+    current))
+
 (defun run-scenario-trials (scenario-name trials)
-  "Run scenario PBT trials. Returns a result plist."
+  "Run scenario PBT trials. Returns a result plist.
+Failures store only violation descriptions, not full scenario instances."
   (let* ((invs (scenario-invariants-for scenario-name))
          (scenario (describe-scenario scenario-name))
          (entity-specs (getf scenario :entities))
@@ -994,9 +1251,9 @@ Returns (values results total-passed total-failed)."
          (failures nil))
     (dotimes (i trials)
       (let* ((instance (generate-scenario scenario-name))
-             ;; Check scenario-level invariants
-             (scenario-violations (check-scenario-invariants scenario-name instance))
-             ;; Check per-entity invariants on each generated instance
+             (scenario-result (check-scenario-invariants scenario-name instance))
+             (scenario-violations (when (eq (car scenario-result) :fail)
+                                    (cdr scenario-result)))
              (entity-violations nil))
         (dolist (espec entity-specs)
           (let* ((binding (getf espec :binding))
@@ -1004,39 +1261,34 @@ Returns (values results total-passed total-failed)."
                  (val (getf instance binding))
                  (instances (if (listp val)
                                 (if (and val (keywordp (car val)))
-                                    (list val)  ;; single plist
-                                    val)         ;; list of plists
+                                    (list val)
+                                    val)
                                 (list val))))
             (dolist (inst instances)
               (when inst
-                (let ((v (check-invariants entity-name inst)))
+                (let* ((r (check-invariants entity-name inst))
+                       (v (when (eq (car r) :fail) (cdr r))))
                   (when v
-                    (push (list :binding binding :entity entity-name
-                                :violations v)
+                    (push (format nil "~A.~A: ~{~A~^, ~}"
+                                  binding entity-name v)
                           entity-violations)))))))
-        (let ((all-v (append scenario-violations
-                             (when entity-violations
-                               (list (format nil "entity-violations: ~{~A~^, ~}"
-                                             (mapcar (lambda (ev)
-                                                       (format nil "~A.~A: ~{~A~^, ~}"
-                                                               (getf ev :binding)
-                                                               (getf ev :entity)
-                                                               (getf ev :violations)))
-                                                     entity-violations)))))))
+        (let ((all-v (remove-duplicates
+                      (append scenario-violations (nreverse entity-violations))
+                      :test #'string=)))
           (if all-v
               (progn
                 (incf failed)
                 (when (< (length failures) 3)
-                  (push (list :instance instance :violations all-v) failures)))
+                  (push all-v failures)))
               (incf passed)))))
     (list :entity (format nil "scenario:~A" scenario-name)
-          :invariants (mapcar #'first invs)
+          :invariants (length invs)
           :trials trials
           :passed passed
           :failed failed
           :failures (nreverse failures))))
 
-(defun run-pbt (&key (trials 100) (config-trials 5) scenario (negative-trials 0))
+(defun run-pbt (&key (trials 100) (config-trials 5) scenario (negative-trials 0) (verbose t))
   "Run property-based testing on all entities with invariants.
 Generates TRIALS random instances per entity and checks all applicable
 invariants. When *CONFIG* is defined, runs CONFIG-TRIALS rounds with
@@ -1044,6 +1296,7 @@ random configs to test across configuration space.
 When SCENARIO is provided (name string), runs only that scenario's PBT.
 When NEGATIVE-TRIALS is positive, also generates unconstrained random instances
 and verifies that invariants reject them (catches trivially-true invariants).
+When VERBOSE is NIL, prints only pass/fail counts (no counterexamples).
 Returns a list of result plists and prints a summary."
   ;; Set up accessors for all entities and variants
   (dolist (name (list-entities))
@@ -1105,55 +1358,451 @@ Returns a list of result plists and prints a summary."
                 (incf (getf existing :passed) (getf r :passed))
                 (incf (getf existing :failed) (getf r :failed))
                 (incf (getf existing :trials) (getf r :trials))
-                (let ((new-failures (getf r :failures)))
-                  (when (and new-failures (< (length (getf existing :failures)) 3))
-                    (setf (getf existing :failures)
-                          (append (getf existing :failures)
-                                  (subseq new-failures 0
-                                          (min (length new-failures)
-                                               (- 3 (length (getf existing :failures))))))))))
+                (let ((new-failures (getf r :failures))
+                      (existing-f (getf existing :failures))
+                      (is-scenario (and (stringp ename)
+                                        (>= (length ename) 9)
+                                        (string= "scenario:" ename :end2 9))))
+                  (when new-failures
+                    (if is-scenario
+                        ;; Scenario: append violation lists, cap at 3
+                        (when (< (length existing-f) 3)
+                          (setf (getf existing :failures)
+                                (append existing-f
+                                        (subseq new-failures 0
+                                                (min (length new-failures)
+                                                     (- 3 (length existing-f)))))))
+                        ;; Entity: merge per-invariant alist, cap 3 per invariant
+                        (dolist (nf new-failures)
+                          (let* ((inv-name (car nf))
+                                 (new-examples (cdr nf))
+                                 (ef (assoc inv-name (getf existing :failures)
+                                            :test #'string=)))
+                            (if ef
+                                (let ((need (- 3 (length (cdr ef)))))
+                                  (when (plusp need)
+                                    (setf (cdr ef)
+                                          (append (cdr ef)
+                                                  (subseq new-examples 0
+                                                          (min (length new-examples)
+                                                               need))))))
+                                (push nf (getf existing :failures)))))))))
               (setf (gethash ename merged) (copy-list r)))))
-      ;; Print summary
+      ;; Print compact summary
       (let ((final-results nil))
         (maphash (lambda (k v) (declare (ignore k)) (push v final-results)) merged)
         (setf final-results (nreverse final-results))
         (format t "~%=== PBT Results ===~%")
         (when *config*
-          (format t "(~A config trials x ~A entity trials)~%" config-trials trials))
+          (format t "(~A config x ~A trials)~%" config-trials trials))
         (dolist (r final-results)
-          (format t "~%~A (~A invariants)~%  ~A/~A passed"
-                  (getf r :entity)
-                  (length (getf r :invariants))
-                  (getf r :passed)
-                  (getf r :trials))
-          (when (plusp (getf r :failed))
-            (format t ", ~A FAILED" (getf r :failed))
-            (dolist (f (getf r :failures))
-              (format t "~%  counterexample: ~S~%    violated: ~{~A~^, ~}"
-                      (getf f :instance)
-                      (getf f :violations)))))
-        (format t "~%~%Total: ~A passed, ~A failed~%"
-                grand-passed grand-failed)
-        ;; Negative testing pass
+          (let ((entity (getf r :entity))
+                (inv-count (getf r :invariants))
+                (rpassed (getf r :passed))
+                (rtrials (getf r :trials))
+                (rfailed (getf r :failed))
+                (rfailures (getf r :failures)))
+            (if (zerop rfailed)
+                (format t "  ~A: ~A/~A passed (~A invariants)~%"
+                        entity rpassed rtrials inv-count)
+                (progn
+                  (format t "  ~A: ~A/~A passed, ~A FAILED (~A invariants)~%"
+                          entity rpassed rtrials rfailed inv-count)
+                  (when (and verbose rfailures)
+                    (let ((is-scenario (and (stringp entity)
+                                           (>= (length entity) 9)
+                                           (string= "scenario:" entity :end2 9))))
+                      (if is-scenario
+                          (let ((unique (remove-duplicates
+                                        (loop for f in rfailures nconc (copy-list f))
+                                        :test #'string=)))
+                            (dolist (v unique)
+                              (format t "    ~A~%" v)))
+                          (dolist (entry rfailures)
+                            (let ((inv-name (car entry))
+                                  (examples (cdr entry)))
+                              (dolist (ex examples)
+                                (format t "    ~A: ~S~%" inv-name ex)))))))))))
+        (format t "Total: ~A passed, ~A failed~%" grand-passed grand-failed)
+        ;; Negative testing
         (when (and (plusp negative-trials) (not scenario))
           (let ((neg-stats (run-negative-trials negative-trials))
+                (neg-scenario-stats (run-negative-scenario-trials negative-trials))
                 (suspicious nil))
-            (format t "~%=== Negative Testing (unconstrained generation) ===~%")
-            (let ((sorted-keys nil))
-              (maphash (lambda (k v) (declare (ignore v)) (push k sorted-keys))
-                       neg-stats)
-              (dolist (inv-name (nreverse sorted-keys))
-                (let* ((stats (gethash inv-name neg-stats))
-                       (tested (getf stats :tested))
-                       (rejected (getf stats :rejected))
-                       (pct (if (plusp tested)
-                                (round (* 100 (/ rejected tested)))
-                                0)))
-                  (format t "~%  ~A: ~A/~A rejected (~A%)" inv-name rejected tested pct)
-                  (when (zerop rejected)
-                    (push inv-name suspicious)))))
-            (if suspicious
-                (format t "~%~%WARNING: ~A invariant~:P never rejected random data: ~{~A~^, ~}~%"
-                        (length suspicious) (nreverse suspicious))
-                (format t "~%~%All invariants correctly reject unconstrained data.~%"))))
+            ;; Merge scenario stats into entity stats
+            (maphash (lambda (k v) (setf (gethash k neg-stats) v)) neg-scenario-stats)
+            (format t "~%=== Negative Testing ===~%")
+            (maphash (lambda (inv-name stats)
+                       (let* ((tested (getf stats :tested))
+                              (rejected (getf stats :rejected))
+                              (pct (if (plusp tested)
+                                       (round (* 100 (/ rejected tested)))
+                                       0)))
+                         (format t "  ~A: ~A% (~A/~A rejected)~%"
+                                 inv-name pct rejected tested)
+                         (when (zerop rejected)
+                           (push inv-name suspicious))))
+                     neg-stats)
+            (when suspicious
+              (format t "WARNING: never rejected: ~{~A~^, ~}~%"
+                      (nreverse suspicious)))))
         final-results))))
+
+;;; ---------------------------------------------------------------------------
+;;; check-scenario — convenience for debugging scenario generators
+;;; ---------------------------------------------------------------------------
+
+(defun check-scenario (scenario-name instance)
+  "Check a scenario instance for debugging generators.
+Returns a list of result plists, one per invariant:
+  ((:invariant \"name\" :pass t) (:invariant \"name\" :pass nil :value ...))"
+  (dolist (name (list-entities))
+    (ensure-entity-accessors name))
+  (dolist (name (list-variants))
+    (ensure-variant-accessors name))
+  (when *config*
+    (ensure-config-accessor))
+  (let* ((results nil)
+         (scenario (describe-scenario scenario-name))
+         (entity-specs (getf scenario :entities)))
+    ;; Scenario-level invariants
+    (let* ((bindings (getf scenario :entities))
+           (bind-pairs
+             (mapcar (lambda (espec)
+                       (let* ((binding-kw (getf espec :binding))
+                              (sym (intern (symbol-name binding-kw)))
+                              (val (getf instance binding-kw)))
+                         (list sym val)))
+                     bindings)))
+      (dolist (entry (scenario-invariants-for scenario-name))
+        (destructuring-bind (inv-name inv) entry
+          (let ((check-form (getf inv :check)))
+            (handler-case
+                (let* ((params (mapcar #'first bind-pairs))
+                       (fn (get-compiled-fn inv-name params check-form)))
+                  (if (apply fn (mapcar #'second bind-pairs))
+                      (push (list :invariant inv-name :pass t) results)
+                      (push (list :invariant inv-name :pass nil) results)))
+              (error (e)
+                (push (list :invariant inv-name :pass nil
+                            :error (princ-to-string e))
+                      results)))))))
+    ;; Per-entity invariants (including variant-specific) via check-invariants
+    (let ((seen (make-hash-table :test #'equal)))
+      (dolist (espec entity-specs)
+        (let* ((binding (getf espec :binding))
+               (entity-name (getf espec :entity))
+               (val (getf instance binding))
+               (instances (if (listp val)
+                              (if (and val (keywordp (car val)))
+                                  (list val)
+                                  val)
+                              (list val))))
+          (dolist (inst instances)
+            (when inst
+              (let* ((result (check-invariants entity-name inst))
+                     (violations (when (eq (car result) :fail) (cdr result))))
+                (dolist (inv-name violations)
+                  (unless (gethash inv-name seen)
+                    (setf (gethash inv-name seen) t)
+                    (let* ((base-name (let ((pos (search " (error:" inv-name)))
+                                        (if pos (subseq inv-name 0 pos) inv-name)))
+                           (inv (or (describe-invariant inv-name)
+                                    (describe-invariant base-name)))
+                           (keys (when inv
+                                   (check-form-field-keys
+                                    (getf inv :check) entity-name))))
+                      (push (list :invariant inv-name :pass nil
+                                  :binding binding
+                                  :value (if keys
+                                             (compact-instance inst keys)
+                                             inst))
+                            results))))))))
+      ;; Add passing entries for entity invariants not yet in results
+      (dolist (espec entity-specs)
+        (let ((entity-name (getf espec :entity)))
+          (dolist (entry (invariants-for entity-name))
+            (let ((inv-name (first entry)))
+              (unless (gethash inv-name seen)
+                (setf (gethash inv-name seen) t)
+                (push (list :invariant inv-name :pass t) results))))
+          (dolist (vkey (entity-variants entity-name))
+            (dolist (entry (variant-invariants-for vkey))
+              (let ((inv-name (first entry)))
+                (unless (gethash inv-name seen)
+                  (setf (gethash inv-name seen) t)
+                  (push (list :invariant inv-name :pass t) results))))))))
+    (nreverse results))))
+
+;;; ---------------------------------------------------------------------------
+;;; Built-in utility functions for invariant check forms
+;;; ---------------------------------------------------------------------------
+
+(defun all-pairs-check (lst pred)
+  "Check that PRED holds for every unordered pair in LST."
+  (loop for (a . rest) on lst
+        always (every (lambda (b) (funcall pred a b)) rest)))
+
+(defun consecutive-pairs-check (lst pred)
+  "Check that PRED holds for every consecutive pair in LST."
+  (loop for (a b) on lst
+        while b
+        always (funcall pred a b)))
+
+(declaim (ftype (function (real real real real) double-float) haversine-distance-nm))
+(defun haversine-distance-nm (lat1 lon1 lat2 lon2)
+  "Great-circle distance between two lat/lon points, in nautical miles."
+  (declare (optimize (speed 3) (safety 1)))
+  (let* ((to-rad (load-time-value (/ pi 180.0d0) t))
+         (rlat1 (* (coerce lat1 'double-float) to-rad))
+         (rlat2 (* (coerce lat2 'double-float) to-rad))
+         (dlat (- rlat2 rlat1))
+         (dlon (* (- (coerce lon2 'double-float) (coerce lon1 'double-float)) to-rad)))
+    (declare (type double-float to-rad rlat1 rlat2 dlat dlon))
+    (let* ((sdlat2 (sin (the double-float (/ dlat 2.0d0))))
+           (sdlon2 (sin (the double-float (/ dlon 2.0d0))))
+           (a (+ (* sdlat2 sdlat2)
+                  (* (cos rlat1) (cos rlat2) sdlon2 sdlon2)))
+           (c (* 2.0d0 (asin (sqrt (the (double-float 0.0d0 1.0d0) a))))))
+      (declare (type double-float sdlat2 sdlon2 a c))
+      (* 3440.065d0 c))))
+
+;;; ---------------------------------------------------------------------------
+;;; Rule execution
+;;; ---------------------------------------------------------------------------
+
+(defun rule-when-matches-p (when-clause entity-name instance)
+  "Check if a rule's :when clause matches ENTITY-NAME and INSTANCE's state.
+Returns (values match-p state-field expected-state) or (values nil nil nil)."
+  (when (and (consp when-clause) (>= (length when-clause) 3))
+    (let* ((entity-sym (first when-clause))
+           (field-kw (second when-clause))
+           (value-spec (third when-clause))
+           (ename (string-downcase (symbol-name entity-sym))))
+      (when (and (string-equal ename (string-downcase (string entity-name)))
+                 (keywordp field-kw))
+        (let ((current (getf instance field-kw)))
+          (cond
+            ((keywordp value-spec)
+             (values (eq current value-spec) field-kw value-spec))
+            ((and (consp value-spec) (eq (car value-spec) 'member))
+             (values (member current (cdr value-spec)) field-kw value-spec))
+            (t (values nil field-kw value-spec))))))))
+
+(defun extract-state-target (ensures entity-sym state-fields)
+  "Extract (state-field . target-value) from :ensures forms.
+Recognizes (eq accessor :keyword) patterns for state field assignments."
+  (dolist (ens ensures)
+    (when (and (consp ens) (eq (first ens) 'eq) (= (length ens) 3))
+      (let ((lhs (second ens))
+            (rhs (third ens)))
+        (flet ((match-accessor (form)
+                 (cond
+                   ((and (consp form) (eq (first form) 'getf)
+                         (= (length form) 3) (keywordp (third form))
+                         (member (third form) state-fields))
+                    (third form))
+                   (t (let ((field (getf-field-p form entity-sym)))
+                        (when (and field (member field state-fields))
+                          field))))))
+          (let ((lf (match-accessor lhs))
+                (rf (match-accessor rhs)))
+            (cond
+              ((and lf (keywordp rhs)) (return (cons lf rhs)))
+              ((and rf (keywordp lhs)) (return (cons rf lhs))))))))))
+
+(defun extract-field-assignments (ensures entity-sym state-fields)
+  "Extract non-state field assignments from :ensures forms.
+Returns list of (field . value) for (= accessor constant) or (eq accessor constant)
+patterns where field is NOT a state field."
+  (let ((assignments nil))
+    (dolist (ens ensures)
+      (when (and (consp ens) (member (first ens) '(= eq)) (= (length ens) 3))
+        (let ((lhs (second ens))
+              (rhs (third ens)))
+          (flet ((match-field (form)
+                   (cond
+                     ((and (consp form) (eq (first form) 'getf)
+                           (= (length form) 3) (keywordp (third form))
+                           (not (member (third form) state-fields)))
+                      (third form))
+                     (t (let ((field (getf-field-p form entity-sym)))
+                          (when (and field (not (member field state-fields)))
+                            field))))))
+            (let ((lf (match-field lhs))
+                  (rf (match-field rhs)))
+              (cond
+                ((and lf (atom rhs) (not (symbolp rhs)))
+                 (push (cons lf rhs) assignments))
+                ((and lf (keywordp rhs))
+                 (push (cons lf rhs) assignments))
+                ((and rf (atom lhs) (not (symbolp lhs)))
+                 (push (cons rf lhs) assignments))
+                ((and rf (keywordp lhs))
+                 (push (cons rf lhs) assignments))))))))
+    (nreverse assignments)))
+
+(defun applicable-rules (entity-name instance)
+  "Return list of rule name strings whose :when clause matches INSTANCE's current state."
+  (let ((result nil))
+    (dolist (rname (list-rules))
+      (let* ((rule (describe-rule rname))
+             (when-clause (getf rule :when)))
+        (when (rule-when-matches-p when-clause entity-name instance)
+          (push rname result))))
+    (nreverse result)))
+
+(defun apply-rule (entity-name instance rule-name)
+  "Apply a rule to an entity instance, performing the state transition.
+Returns (values new-instance applied-p rejection-reason).
+  applied-p is T if the rule fired, NIL otherwise.
+  rejection-reason is :when-mismatch, (:guard-failed form), or NIL."
+  (ensure-entity-accessors entity-name)
+  (let* ((rname (string-downcase (string rule-name)))
+         (rule (describe-rule rname)))
+    (unless rule
+      (return-from apply-rule (values instance nil :unknown-rule)))
+    (let* ((when-clause (getf rule :when))
+           (requires (getf rule :requires))
+           (ensures (getf rule :ensures))
+           (let-bindings (getf rule :let))
+           (entity-sym (intern (string-upcase (string entity-name))))
+           (state-fields (detect-state-fields entity-name)))
+      ;; 1. Check :when
+      (unless (rule-when-matches-p when-clause entity-name instance)
+        (return-from apply-rule (values instance nil :when-mismatch)))
+      ;; 2. Evaluate :let bindings (best-effort; cross-entity refs will error)
+      (let ((let-vars nil)
+            (let-vals nil))
+        (dolist (binding let-bindings)
+          (when (and (consp binding) (= (length binding) 2))
+            (let ((var (first binding))
+                  (expr (second binding)))
+              (handler-case
+                  (let ((fn (handler-bind ((warning #'muffle-warning))
+                              (compile nil `(lambda (,entity-sym)
+                                              (declare (ignorable ,entity-sym))
+                                              ,expr)))))
+                    (push var let-vars)
+                    (push (funcall fn instance) let-vals))
+                (error () nil)))))
+        ;; 3. Check :requires
+        (dolist (req requires)
+          (handler-case
+              (let* ((params (cons entity-sym (reverse let-vars)))
+                     (fn (handler-bind ((warning #'muffle-warning))
+                           (compile nil `(lambda ,params
+                                           (declare (ignorable ,@params))
+                                           ,req)))))
+                (unless (apply fn instance (reverse let-vals))
+                  (return-from apply-rule
+                    (values instance nil (list :guard-failed req)))))
+            (error ()
+              (return-from apply-rule
+                (values instance nil (list :guard-failed req)))))))
+      ;; 4. Apply state transition and field assignments from :ensures
+      (let* ((target (extract-state-target ensures entity-sym state-fields))
+             (field-assignments (extract-field-assignments ensures entity-sym state-fields))
+             (new (copy-list instance)))
+        (when target
+          (setf (getf new (car target)) (cdr target)))
+        (dolist (assignment field-assignments)
+          (setf (getf new (car assignment)) (cdr assignment)))
+        (values new t nil)))))
+
+(defun random-walk (entity-name &key (steps 20) (trials 50) (verbose t))
+  "Random walk PBT: generate instances and apply random applicable rules,
+checking invariants at each step. Reports violations with the rule trace
+that led to them.
+Returns a result plist:
+  :entity — entity name
+  :trials — number of trials
+  :steps — max steps per trial
+  :passed — trials with no violations
+  :failed — trials with at least one violation
+  :failures — list of failure plists (:trace :violation :instance)"
+  (ensure-entity-accessors entity-name)
+  (dolist (vname (entity-variants entity-name))
+    (ensure-variant-accessors vname))
+  (when *config*
+    (ensure-config-accessor))
+  (let ((passed 0)
+        (failed 0)
+        (failures nil))
+    (dotimes (_trial trials)
+      (let ((instance (generate-instance entity-name))
+            (trace nil)
+            (violation nil))
+        ;; Check initial invariants
+        (let* ((result (check-invariants entity-name instance))
+               (violations (when (eq (car result) :fail) (cdr result))))
+          (when violations
+            (setf violation (list :step 0
+                                  :after "initial"
+                                  :violated violations
+                                  :instance (copy-list instance)))))
+        ;; Walk
+        (unless violation
+          (loop for step from 1 to steps
+                for rules = (applicable-rules entity-name instance)
+                while (and rules (not violation))
+                do (let ((shuffled (let ((v (coerce (copy-list rules) 'vector)))
+                                      (loop for i from (1- (length v)) downto 1
+                                            for j = (random (1+ i))
+                                            do (rotatef (aref v i) (aref v j)))
+                                      (coerce v 'list)))
+                         (applied nil))
+                     ;; Try rules in random order until one applies
+                     (dolist (rname shuffled)
+                       (multiple-value-bind (new ok _reason)
+                           (apply-rule entity-name instance rname)
+                         (declare (ignore _reason))
+                         (when ok
+                           (push rname trace)
+                           (setf instance new
+                                 applied t)
+                           ;; Check invariants after transition
+                           (let* ((r2 (check-invariants entity-name instance))
+                                  (violations (when (eq (car r2) :fail) (cdr r2))))
+                             (when violations
+                               (setf violation
+                                     (list :step step
+                                           :after rname
+                                           :violated violations
+                                           :instance (copy-list instance)
+                                           :trace (reverse trace)))))
+                           (return))))
+                     (unless applied (return)))))
+        (if violation
+            (progn
+              (incf failed)
+              (when (< (length failures) 10)
+                (push violation failures)))
+            (incf passed))))
+    ;; Print results
+    (let* ((inv-count (length (invariants-for entity-name)))
+           (result (list :entity entity-name
+                         :trials trials
+                         :steps steps
+                         :invariants inv-count
+                         :passed passed
+                         :failed failed
+                         :failures (nreverse failures))))
+      (when verbose
+        (format t "~%=== Random Walk Results ===~%")
+        (format t "  ~A (~A invariants, ~A steps/trial)~%"
+                entity-name inv-count steps)
+        (if (zerop failed)
+            (format t "    ~A/~A passed~%" passed trials)
+            (progn
+              (format t "    ~A/~A passed, ~A FAILED~%" passed trials failed)
+              (dolist (f (getf result :failures))
+                (let ((after (getf f :after))
+                      (violated (getf f :violated))
+                      (trace (getf f :trace))
+                      (inst (getf f :instance)))
+                  (format t "    after ~A~@[ (trace: ~{~A~^ → ~})~]:~%"
+                          after trace)
+                  (dolist (v violated)
+                    (format t "      ~A: ~S~%" v inst)))))))
+      result)))

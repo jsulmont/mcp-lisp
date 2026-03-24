@@ -203,6 +203,7 @@
                 #:*scenarios*
                 #:*scenario-generators*
                 #:defscenario
+                #:defhelper
                 #:list-scenarios
                 #:describe-scenario
                 #:clear-specs
@@ -211,7 +212,12 @@
                 #:ast-to-form
                 #:specs-to-json
                 #:json-to-specs
-                #:spec-json-schema)
+                #:spec-json-schema
+                #:specs-to-lisp
+                #:specs-to-data
+                #:data-to-specs
+                #:write-specs
+                #:read-specs)
   ;; Spec transitions
   (:import-from #:mcp-lisp/src/spec/transitions
                 #:detect-state-fields
@@ -237,7 +243,14 @@
                 #:default-generate-scenario
                 #:defscenario-generator
                 #:run-pbt
-                #:extract-generation-constraints)
+                #:check-scenario
+                #:extract-generation-constraints
+                #:apply-rule
+                #:applicable-rules
+                #:random-walk
+                #:all-pairs-check
+                #:consecutive-pairs-check
+                #:haversine-distance-nm)
   ;; Spec analysis
   (:import-from #:mcp-lisp/src/spec/analysis
                 #:invariant-coverage
@@ -245,6 +258,10 @@
                 #:generation-feasibility
                 #:simulate-trace
                 #:scenario-feasibility)
+  ;; Spec codegen
+  (:import-from #:mcp-lisp/src/spec/codegen
+                #:specs-to-sql
+                #:specs-to-sql-seed)
   ;; Export everything
   (:export ;; Core
    #:+protocol-version+
@@ -420,6 +437,7 @@
    #:*scenarios*
    #:*scenario-generators*
    #:defscenario
+   #:defhelper
    #:list-scenarios
    #:describe-scenario
    #:clear-specs
@@ -429,6 +447,11 @@
    #:specs-to-json
    #:json-to-specs
    #:spec-json-schema
+   #:specs-to-lisp
+   #:specs-to-data
+   #:data-to-specs
+   #:write-specs
+   #:read-specs
    ;; Spec transitions
    #:detect-state-fields
    #:extract-transitions
@@ -452,12 +475,22 @@
    #:default-generate-scenario
    #:defscenario-generator
    #:run-pbt
+   #:check-scenario
    #:extract-generation-constraints
+   #:apply-rule
+   #:applicable-rules
+   #:random-walk
+   #:all-pairs-check
+   #:consecutive-pairs-check
+   #:haversine-distance-nm
    ;; Spec analysis
    #:invariant-coverage
    #:field-index
    #:generation-feasibility
    #:simulate-trace
-   #:scenario-feasibility))
+   #:scenario-feasibility
+   ;; Spec codegen
+   #:specs-to-sql
+   #:specs-to-sql-seed))
 
 (in-package #:mcp-lisp/main)

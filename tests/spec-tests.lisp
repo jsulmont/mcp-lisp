@@ -17,6 +17,7 @@
          (mcp-lisp/src/spec/spec::*variants* (make-hash-table :test #'equal))
          (mcp-lisp/src/spec/spec::*scenarios* (make-hash-table :test #'equal))
          (mcp-lisp/src/spec/spec::*scenario-generators* (make-hash-table :test #'equal))
+         (mcp-lisp/src/spec/spec::*compiled-fn-cache* (make-hash-table :test #'equal))
          (mcp-lisp/src/spec/spec::*config* nil)
          (mcp-lisp/src/spec/spec::*current-config* nil))
      ,@body))
@@ -333,6 +334,50 @@
       :check (if (trader-suspended trader)
                  (< (trader-margin-ratio trader) 0.5)
                  t))
+    (let ((warnings (mcp-lisp:validate-specs)))
+      (is (null (remove-if (lambda (w) (search "defgenerator" w)) warnings))))))
+
+(test validate-specs-loop-hash-iteration-ok
+  "validate-specs does not warn about loop hash iteration keywords"
+  (with-fresh-specs
+    (mcp-lisp:defentity account ()
+      (balance number :required t))
+    (mcp-lisp:definvariant all-positive
+      :on account
+      :check (loop for k being the hash-keys of (account-balance account)
+                   always (> k 0)))
+    (is (null (mcp-lisp:validate-specs)))))
+
+(test validate-specs-loop-binds-vars
+  "validate-specs recognises loop for-var as bound"
+  (with-fresh-specs
+    (mcp-lisp:defentity portfolio ()
+      (items list :required t))
+    (mcp-lisp:definvariant items-positive
+      :on portfolio
+      :check (loop for item in (portfolio-items portfolio)
+                   always (> item 0)))
+    (is (null (mcp-lisp:validate-specs)))))
+
+(test validate-specs-return-from-ok
+  "validate-specs does not flag return-from block name as free variable"
+  (with-fresh-specs
+    (mcp-lisp:defentity account ()
+      (balance number :required t))
+    (mcp-lisp:definvariant balance-check
+      :on account
+      :check (block check
+               (return-from check (> (account-balance account) 0))))
+    (is (null (mcp-lisp:validate-specs)))))
+
+(test validate-specs-declare-in-lambda-ok
+  "validate-specs does not flag declare forms inside lambdas"
+  (with-fresh-specs
+    (mcp-lisp:defentity account ()
+      (balance number :required t))
+    (mcp-lisp:definvariant balance-check
+      :on account
+      :check (funcall (lambda (x) (declare (ignore x)) t) (account-balance account)))
     (is (null (mcp-lisp:validate-specs)))))
 
 ;;; ---------------------------------------------------------------------------
@@ -918,3 +963,55 @@
         (is (hash-table-p (gethash "discriminator" expr)))
         (is (string= "node" (gethash "propertyName"
                                       (gethash "discriminator" expr))))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Regression: specs-to-lisp derived round-trip
+;;; ---------------------------------------------------------------------------
+
+(test specs-to-lisp-derived-round-trip
+  "specs-to-lisp emits (:derived name expr), not (:derived :derived name)"
+  (with-fresh-specs
+    (mcp-lisp:defentity user ()
+      (id string :required t)
+      (email string :required t)
+      (:derived display-name (lambda (u) (or (user-name u) (user-email u)))))
+    (let ((lisp-str (mcp-lisp:specs-to-lisp)))
+      (is (search ":derived" lisp-str))
+      (is (search "display-name" lisp-str))
+      (is (search "lambda" lisp-str))
+      ;; Must NOT have (:derived :derived ...)
+      (is (null (search ":derived :derived" lisp-str))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Regression: JSON round-trip resolves pbt helper symbols
+;;; ---------------------------------------------------------------------------
+
+(test json-round-trip-pbt-helper-symbols
+  "ast-to-form resolves all-pairs-check to pbt package after JSON round-trip"
+  (with-fresh-specs
+    (mcp-lisp:defentity segment ()
+      (id string :required t)
+      (value number :required t))
+
+    (mcp-lisp:defscenario segment-check
+      :entities ((segments (2 4) segment)))
+
+    ;; Invariant that calls all-pairs-check — a pbt-package function
+    (mcp-lisp:definvariant segments-distinct
+      :on segment-check
+      :check (all-pairs-check segments
+               (lambda (a b)
+                 (not (equal (getf a :id) (getf b :id))))))
+
+    (let* ((json (mcp-lisp:specs-to-json))
+           (_ (mcp-lisp:clear-specs))
+           (__ (mcp-lisp:json-to-specs json)))
+      (declare (ignore _ __))
+      ;; After round-trip, the call head must resolve to the pbt symbol
+      ;; (not a dead symbol in the spec package)
+      (let* ((inv (mcp-lisp:describe-invariant "segments-distinct"))
+             (head (car (getf inv :check))))
+        (is (not (null inv)))
+        (is (fboundp head))
+        (is (eq (find-symbol "ALL-PAIRS-CHECK" :mcp-lisp/src/spec/pbt)
+                head))))))

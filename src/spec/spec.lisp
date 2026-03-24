@@ -44,10 +44,15 @@
            #:*scenarios*
            #:*scenario-generators*
            #:*scenario-generator-sources*
+           #:*compiled-fn-cache*
+           #:*helpers*
+           #:*helper-sources*
            #:defscenario
+           #:defhelper
            #:list-scenarios
            #:describe-scenario
            ;; Utilities
+           #:register-entity-accessors
            #:clear-specs
            #:validate-specs
            ;; AST
@@ -56,7 +61,14 @@
            ;; JSON
            #:specs-to-json
            #:json-to-specs
-           #:spec-json-schema))
+           #:spec-json-schema
+           ;; Lisp serialization
+           #:specs-to-lisp
+           ;; S-expression data serialization
+           #:specs-to-data
+           #:data-to-specs
+           #:write-specs
+           #:read-specs))
 
 (in-package #:mcp-lisp/src/spec/spec)
 
@@ -77,6 +89,9 @@
 (defvar *scenarios* (make-hash-table :test #'equal))
 (defvar *scenario-generators* (make-hash-table :test #'equal))
 (defvar *scenario-generator-sources* (make-hash-table :test #'equal))
+(defvar *compiled-fn-cache* (make-hash-table :test #'equal))
+(defvar *helpers* (make-hash-table :test #'equal))
+(defvar *helper-sources* (make-hash-table :test #'equal))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Known keywords for validation at macroexpand time
@@ -84,6 +99,29 @@
 
 (defparameter +known-field-keys+ '(:required :default :unique :min :max :derived-from))
 (defparameter +relation-types+ '(:has-many :has-one :belongs-to))
+
+;;; ---------------------------------------------------------------------------
+;;; Entity accessor generation
+;;; ---------------------------------------------------------------------------
+
+(defun register-entity-accessors (name fields relations)
+  "Define accessor functions for an entity's fields and relations.
+Accessor names follow the pattern ENTITY-FIELD, e.g. ACCOUNT-BALANCE.
+Called automatically by DEFENTITY so accessors exist immediately."
+  (let ((entity-name (string name)))
+    (dolist (field fields)
+      (let* ((field-sym (first field))
+             (accessor (intern (format nil "~A-~A" entity-name (symbol-name field-sym))))
+             (key (intern (symbol-name field-sym) :keyword)))
+        (setf (symbol-function accessor)
+              (let ((k key)) (lambda (instance) (getf instance k))))))
+    (dolist (rel relations)
+      (let* ((rel-name (second rel))
+             (accessor (intern (format nil "~A-~A" entity-name (symbol-name rel-name))))
+             (key (intern (symbol-name rel-name) :keyword)))
+        (unless (fboundp accessor)
+          (setf (symbol-function accessor)
+                (let ((k key)) (lambda (instance) (getf instance k)))))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; defentity
@@ -128,6 +166,7 @@ Returns (values fields relations derived)."
                      :fields ',fields
                      :relations ',relations
                      :derived ',derived))
+         (register-entity-accessors ',name ',fields ',relations)
          ',name))))
 
 ;;; ---------------------------------------------------------------------------
@@ -170,6 +209,7 @@ Returns (values fields relations derived)."
              (list :name ',name
                    :on ',on
                    :check ',check))
+       (clrhash *compiled-fn-cache*)
        ',name)))
 
 ;;; ---------------------------------------------------------------------------
@@ -256,13 +296,36 @@ Returns (values fields relations derived)."
        ',name)))
 
 ;;; ---------------------------------------------------------------------------
+;;; defhelper — persistent utility functions
+;;; ---------------------------------------------------------------------------
+
+(defmacro defhelper (name lambda-list &body body)
+  "Define a helper function that persists across JSON round-trips.
+Use for utility functions referenced by invariant check forms.
+
+  (defhelper haversine-distance-nm (lat1 lon1 lat2 lon2)
+    ...)"
+  (let ((key (string-downcase (string name))))
+    `(progn
+       (defun ,name ,lambda-list ,@body)
+       (setf (gethash ,key *helpers*) #',name)
+       (setf (gethash ,key *helper-sources*)
+             '(defhelper ,name ,lambda-list ,@body))
+       ',name)))
+
+;;; ---------------------------------------------------------------------------
 ;;; Config accessor
 ;;; ---------------------------------------------------------------------------
 
 (defun config (key)
   "Read config parameter KEY from the current config instance.
-Bound dynamically during PBT via *CURRENT-CONFIG*."
-  (getf *current-config* key))
+During PBT, reads from *CURRENT-CONFIG*. Outside PBT, returns the
+field's :default value from the defconfig spec."
+  (if *current-config*
+      (getf *current-config* key)
+      (let ((field (find key *config*
+                         :key (lambda (f) (intern (symbol-name (first f)) :keyword)))))
+        (when field (getf (cddr field) :default)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Introspection
@@ -349,8 +412,11 @@ Bound dynamically during PBT via *CURRENT-CONFIG*."
   (clrhash *scenarios*)
   (clrhash *scenario-generators*)
   (clrhash *scenario-generator-sources*)
+  (clrhash *helpers*)
+  (clrhash *helper-sources*)
   (setf *config* nil)
   (setf *current-config* nil)
+  (clrhash *compiled-fn-cache*)
   (values))
 
 (defun entity-accessor-p (sym)
@@ -427,16 +493,18 @@ Returns NIL if SYM is not a recognized accessor."
                      ((eq head 'quote) nil)
                      ;; #'fn / (function fn) — not a call
                      ((eq head 'function) nil)
-                     ;; (lambda ...) — walk body, skip params
+                     ;; (lambda ...) — walk body, skip params and declares
                      ((eq head 'lambda)
                       (dolist (body-form (cddr f))
-                        (walk body-form)))
+                        (unless (and (consp body-form) (eq (car body-form) 'declare))
+                          (walk body-form))))
                      ;; (let/let* ((var init)...) body) — walk inits and body, skip var names
                      ((member head '(let let*))
                       (dolist (b (second f))
                         (when (consp b) (walk (second b))))
                       (dolist (body-form (cddr f))
-                        (walk body-form)))
+                        (unless (and (consp body-form) (eq (car body-form) 'declare))
+                          (walk body-form))))
                      ;; (dolist (var list [result]) body...) — walk list, result, body
                      ((eq head 'dolist)
                       (let ((spec (second f)))
@@ -450,6 +518,37 @@ Returns NIL if SYM is not a recognized accessor."
                         (when (consp clause)
                           (dolist (form clause)
                             (walk form)))))
+                     ;; (declare ...) — metadata, skip entirely
+                     ((eq head 'declare) nil)
+                     ;; (return-from name value) — walk value, skip block name
+                     ((eq head 'return-from)
+                      (when (cddr f) (walk (third f))))
+                     ;; (block name body...) — walk body, skip block name
+                     ((eq head 'block)
+                      (dolist (body-form (cddr f))
+                        (walk body-form)))
+                     ;; loop — walk sub-forms, skip keywords and bound vars
+                     ((eq head 'loop)
+                      (let ((tokens (cdr f))
+                            (kw-names '("FOR" "AS" "WITH" "INTO" "USING" "NAMED"
+                                        "IN" "ON" "ACROSS" "FROM" "TO" "BELOW"
+                                        "ABOVE" "DOWNTO" "DOWNFROM" "UPFROM" "BY"
+                                        "BEING" "THE" "EACH"
+                                        "HASH-KEY" "HASH-KEYS" "HASH-VALUE" "HASH-VALUES" "OF"
+                                        "=" "THEN"
+                                        "COLLECT" "COLLECTING" "APPEND" "APPENDING"
+                                        "NCONC" "NCONCING" "COUNT" "COUNTING"
+                                        "SUM" "SUMMING" "MAXIMIZE" "MAXIMIZING"
+                                        "MINIMIZE" "MINIMIZING" "DO" "DOING"
+                                        "WHILE" "UNTIL" "WHEN" "IF" "UNLESS"
+                                        "ALWAYS" "NEVER" "THEREIS"
+                                        "REPEAT" "RETURN" "INITIALLY" "FINALLY"
+                                        "END" "ELSE")))
+                        (dolist (tok tokens)
+                          (unless (and (symbolp tok)
+                                       (member (symbol-name tok) kw-names
+                                               :test #'string=))
+                            (walk tok)))))
                      (t
                       (when (symbolp head)
                         (pushnew head syms :test #'eq))
@@ -491,13 +590,14 @@ Handles QUOTE, LAMBDA, LET, LET* binding forms."
                       ;; #'fn / (function fn) — not a variable reference
                       ((eq head 'function) nil)
                       ((eq head 'lambda)
-                       ;; bind params, walk body
+                       ;; bind params, walk body (skip declares)
                        (let ((params (remove-if (lambda (s) (member s '(&optional &rest &key &body)))
                                                 (second f))))
                          (dolist (body-form (cddr f))
-                           (walk body-form (append params env)))))
+                           (unless (and (consp body-form) (eq (car body-form) 'declare))
+                             (walk body-form (append params env))))))
                       ((member head '(let let*))
-                       ;; walk init forms, then body with bindings
+                       ;; walk init forms, then body with bindings (skip declares)
                        (let ((bindings (second f))
                              (new-env env))
                          (dolist (b bindings)
@@ -506,7 +606,8 @@ Handles QUOTE, LAMBDA, LET, LET* binding forms."
                              (when init (walk init (if (eq head 'let*) new-env env)))
                              (push var new-env)))
                          (dolist (body-form (cddr f))
-                           (walk body-form new-env))))
+                           (unless (and (consp body-form) (eq (car body-form) 'declare))
+                             (walk body-form new-env)))))
                       ;; (dolist (var list [result]) body...) — bind loop var
                       ((eq head 'dolist)
                        (let* ((spec (second f))
@@ -521,6 +622,54 @@ Handles QUOTE, LAMBDA, LET, LET* binding forms."
                          (when (consp clause)
                            (dolist (form clause)
                              (walk form env)))))
+                      ;; (declare ...) — metadata, skip entirely
+                      ((eq head 'declare) nil)
+                      ;; (return-from name value) — skip block name, walk value
+                      ((eq head 'return-from)
+                       (when (cddr f) (walk (third f) env)))
+                      ;; (block name body...) — skip block name, walk body
+                      ((eq head 'block)
+                       (dolist (body-form (cddr f))
+                         (walk body-form env)))
+                      ;; loop — extract bound vars, walk expression sub-forms
+                      ((eq head 'loop)
+                       (let ((tokens (cdr f))
+                             (loop-vars nil)
+                             (kw-names '("FOR" "AS" "WITH" "INTO" "USING" "NAMED"
+                                         "IN" "ON" "ACROSS" "FROM" "TO" "BELOW"
+                                         "ABOVE" "DOWNTO" "DOWNFROM" "UPFROM" "BY"
+                                         "BEING" "THE" "EACH"
+                                         "HASH-KEY" "HASH-KEYS" "HASH-VALUE" "HASH-VALUES" "OF"
+                                         "=" "THEN"
+                                         "COLLECT" "COLLECTING" "APPEND" "APPENDING"
+                                         "NCONC" "NCONCING" "COUNT" "COUNTING"
+                                         "SUM" "SUMMING" "MAXIMIZE" "MAXIMIZING"
+                                         "MINIMIZE" "MINIMIZING" "DO" "DOING"
+                                         "WHILE" "UNTIL" "WHEN" "IF" "UNLESS"
+                                         "ALWAYS" "NEVER" "THEREIS"
+                                         "REPEAT" "RETURN" "INITIALLY" "FINALLY"
+                                         "END" "ELSE"))
+                             (binding-names '("FOR" "AS" "WITH" "INTO")))
+                         (do ((rest tokens (cdr rest)))
+                             ((null rest))
+                           (let ((tok (car rest)))
+                             (when (and (symbolp tok)
+                                        (member (symbol-name tok) binding-names
+                                                :test #'string=)
+                                        (cdr rest) (symbolp (cadr rest)))
+                               (push (cadr rest) loop-vars))
+                             (when (and (symbolp tok)
+                                        (string= (symbol-name tok) "USING")
+                                        (cdr rest) (consp (cadr rest))
+                                        (cdadr rest) (symbolp (cadadr rest)))
+                               (push (cadadr rest) loop-vars))))
+                         (let ((loop-env (append loop-vars env)))
+                           (dolist (tok tokens)
+                             (unless (and (symbolp tok)
+                                          (or (member (symbol-name tok) kw-names
+                                                      :test #'string=)
+                                              (member tok loop-vars :test #'eq)))
+                               (walk tok loop-env))))))
                       (t
                        ;; head is function position — skip it, walk args
                        (dolist (arg (cdr f))
@@ -678,7 +827,54 @@ Returns a list of warning strings. Empty list = all clear."
                          (push (format nil "scenario ~A: :per ~A references unknown binding (must be declared before use)"
                                        key per)
                                warnings))))))
-               *scenarios*))
+               *scenarios*)
+      ;; Check generator coverage — warn when custom generators are likely needed
+      ;; Scenarios with aggregate invariants need custom scenario generators
+      (maphash (lambda (skey _splist)
+                 (declare (ignore _splist))
+                 (unless (gethash skey *scenario-generators*)
+                   (maphash (lambda (_ikey iplist)
+                              (declare (ignore _ikey))
+                              (when (and (getf iplist :on)
+                                         (string-equal (string-downcase
+                                                         (symbol-name (getf iplist :on)))
+                                                        skey))
+                                (let ((check (getf iplist :check)))
+                                  (when (and (consp check)
+                                             (labels ((uses-aggregate (f)
+                                                        (when (consp f)
+                                                          (or (member (first f)
+                                                                      '(reduce mapcar every some
+                                                                        count remove-if remove-if-not
+                                                                        loop length))
+                                                              (some #'uses-aggregate (cdr f))))))
+                                               (uses-aggregate check)))
+                                    (push (format nil "scenario ~A: invariant uses aggregates but no defscenario-generator is registered"
+                                                  skey)
+                                          warnings)))))
+                            *invariants*)))
+               *scenarios*)
+      ;; Entities with conditional invariants (if/when on member fields) need custom generators
+      (maphash (lambda (ekey _eplist)
+                 (declare (ignore _eplist))
+                 (unless (gethash ekey *generators*)
+                   (let ((has-conditional nil))
+                     (maphash (lambda (_ikey iplist)
+                                (declare (ignore _ikey))
+                                (when (and (getf iplist :on)
+                                           (string-equal (string-downcase
+                                                           (symbol-name (getf iplist :on)))
+                                                          ekey))
+                                  (let ((check (getf iplist :check)))
+                                    (when (and (consp check)
+                                               (member (first check) '(if when cond)))
+                                      (setf has-conditional t)))))
+                              *invariants*)
+                     (when has-conditional
+                       (push (format nil "entity ~A: has conditional invariants but no defgenerator is registered"
+                                     ekey)
+                             warnings)))))
+               *entities*))
     (nreverse warnings)))
 
 ;;; ---------------------------------------------------------------------------
@@ -734,6 +930,8 @@ if, member, lambda, let, call."
      (dict "node" "literal" "value" form))
     ((stringp form)
      (dict "node" "literal" "value" form))
+    ((characterp form)
+     (dict "node" "literal" "type" "char" "value" (char-code form)))
     ((symbolp form)
      (dict "node" "var" "name" (string-downcase (symbol-name form))))
     ((consp form)
@@ -747,6 +945,11 @@ if, member, lambda, let, call."
                (dict "node" "keyword" "name" (string-downcase (symbol-name val))))
               ((symbolp val)
                (dict "node" "literal" "value" (string-downcase (symbol-name val))))
+              ((listp val)
+               (dict "node" "quote"
+                     "elements" (coerce (mapcar #'form-to-ast
+                                                (mapcar (lambda (x) (list 'quote x)) val))
+                                        'vector)))
               (t (dict "node" "literal" "value" val)))))
          ;; (and ...)
          ((eq head 'and)
@@ -776,15 +979,15 @@ if, member, lambda, let, call."
           (dict "node" "eq"
                 "left" (form-to-ast (second form))
                 "right" (form-to-ast (third form))))
-         ;; (member val set)
-         ((eq head 'member)
-          (let* ((val (second form))
-                 (set-form (third form))
-                 (set-items (if (and (consp set-form) (eq (car set-form) 'quote))
-                                (second set-form)
-                                set-form)))
+         ;; (member val '(items...)) — only for literal quoted sets
+         ;; with no extra keyword args; other forms fall through to call
+         ((and (eq head 'member)
+               (= (length form) 3)
+               (let ((set-form (third form)))
+                 (and (consp set-form) (eq (car set-form) 'quote))))
+          (let ((set-items (second (third form))))
             (dict "node" "member"
-                  "value" (form-to-ast val)
+                  "value" (form-to-ast (second form))
                   "set" (coerce (mapcar #'form-to-ast
                                         (if (listp set-items) set-items
                                             (list set-items)))
@@ -860,16 +1063,34 @@ if, member, lambda, let, call."
                   "args" (coerce (mapcar #'form-to-ast (cdr form)) 'vector))))))
     (t (dict "node" "literal" "value" nil))))
 
+(defun resolve-fn-symbol (name-string)
+  "Resolve a function name string to a symbol, preferring packages where
+the function is already defined. Checks the CL package and the PBT package
+before falling back to *PACKAGE*."
+  (let ((uname (string-upcase name-string)))
+    (or (multiple-value-bind (sym status) (find-symbol uname :cl)
+          (when (and status (fboundp sym)) sym))
+        (let ((pbt-pkg (find-package '#:mcp-lisp/src/spec/pbt)))
+          (when pbt-pkg
+            (multiple-value-bind (sym status) (find-symbol uname pbt-pkg)
+              (when (and status (fboundp sym)) sym))))
+        (intern uname))))
+
 (defun ast-to-form (ast)
   "Convert a portable AST hash table back to a CL form."
   (cond
     ((null ast) nil)
-    ((vectorp ast) (map 'list #'ast-to-form ast))
+    ((and (vectorp ast) (not (stringp ast))) (map 'list #'ast-to-form ast))
     ((hash-table-p ast)
      (let ((node (gethash "node" ast)))
        (cond
          ((string= node "literal")
-          (gethash "value" ast))
+          (let ((typ (gethash "type" ast))
+                (val (gethash "value" ast)))
+            (cond
+              ((and typ (string= typ "char")) (code-char val))
+              ((and (vectorp val) (not (stringp val))) (coerce val 'list))
+              (t val))))
 
          ((string= node "keyword")
           (intern (string-upcase (gethash "name" ast)) :keyword))
@@ -917,6 +1138,9 @@ if, member, lambda, let, call."
                 (ast-to-form (gethash "value" ast))
                 (list 'quote (map 'list #'ast-to-form (gethash "set" ast)))))
 
+         ((string= node "quote")
+          (list 'quote (map 'list #'ast-to-form (gethash "elements" ast))))
+
          ((string= node "lambda")
           (list 'lambda
                 (map 'list (lambda (p) (intern (string-upcase p)))
@@ -932,7 +1156,7 @@ if, member, lambda, let, call."
                 (ast-to-form (gethash "body" ast))))
 
          ((string= node "call")
-          (cons (intern (string-upcase (gethash "fn" ast)))
+          (cons (resolve-fn-symbol (gethash "fn" ast))
                 (map 'list #'ast-to-form (gethash "args" ast))))
 
          (t (error "Unknown AST node type: ~A" node)))))
@@ -1054,7 +1278,8 @@ Includes generator source forms as compact s-expression strings."
         (variants (dict))
         (scenarios (dict))
         (generators (dict))
-        (scenario-generators (dict)))
+        (scenario-generators (dict))
+        (helpers (dict)))
     (maphash (lambda (k v) (setf (gethash k entities) (entity-to-ht v))) *entities*)
     (maphash (lambda (k v) (setf (gethash k rules) (rule-to-ht v))) *rules*)
     (maphash (lambda (k v) (setf (gethash k invariants) (invariant-to-ht v))) *invariants*)
@@ -1084,7 +1309,213 @@ Includes generator source forms as compact s-expression strings."
         (setf (gethash "generators" result) generators))
       (when (plusp (hash-table-count scenario-generators))
         (setf (gethash "scenario-generators" result) scenario-generators))
+      (maphash (lambda (k v)
+                 (declare (ignore v))
+                 (let ((src (gethash k *helper-sources*)))
+                   (when src
+                     (setf (gethash k helpers) (form-to-compact-string src)))))
+               *helpers*)
+      (when (plusp (hash-table-count helpers))
+        (setf (gethash "helpers" result) helpers))
       (encode-json result))))
+
+;;; ---------------------------------------------------------------------------
+;;; Lisp serialization
+;;; ---------------------------------------------------------------------------
+
+(defun specs-to-lisp ()
+  "Serialize all spec registries to evaluable Lisp source.
+Returns a string of (defentity ...), (defrule ...), etc. forms."
+  (let ((*print-pretty* t)
+        (*print-right-margin* 100)
+        (*print-case* :downcase)
+        (out (make-string-output-stream)))
+    (labels ((emit (form) (prin1 form out) (terpri out) (terpri out))
+             (field-to-form (f)
+               (let ((name (first f))
+                     (type (second f))
+                     (rest (cddr f)))
+                 `(,name ,type ,@rest)))
+             (relation-to-form (r) r)
+             (derived-to-form (d) `(:derived ,(second d) ,(third d))))
+      ;; Helpers first — everything else may reference them
+      (maphash (lambda (k v)
+                 (declare (ignore k v))
+                 nil)
+               *helper-sources*)
+      (let ((helper-forms nil))
+        (maphash (lambda (k v)
+                   (declare (ignore k))
+                   (push v helper-forms))
+                 *helper-sources*)
+        (dolist (form (nreverse helper-forms))
+          (emit form)))
+      ;; Entities
+      (maphash (lambda (k v)
+                 (declare (ignore k))
+                 (let ((name (getf v :name))
+                       (supers (getf v :supers))
+                       (fields (mapcar #'field-to-form (getf v :fields)))
+                       (relations (mapcar #'relation-to-form (getf v :relations)))
+                       (derived (mapcar #'derived-to-form (getf v :derived))))
+                   (emit `(defentity ,name (,@supers) ,@fields ,@relations ,@derived))))
+               *entities*)
+      ;; Config
+      (when *config*
+        (emit `(defconfig ,@(mapcar #'field-to-form *config*))))
+      ;; Variants
+      (maphash (lambda (k v)
+                 (declare (ignore k))
+                 (let ((name (getf v :name))
+                       (parent (getf v :parent))
+                       (disc (getf v :discriminator))
+                       (val (getf v :value))
+                       (fields (mapcar #'field-to-form (getf v :fields))))
+                   (emit `(defvariant ,name (,(intern (string-upcase parent)) ,disc ,val) ,@fields))))
+               *variants*)
+      ;; Rules
+      (maphash (lambda (k v)
+                 (declare (ignore k))
+                 (let ((form `(defrule ,(getf v :name))))
+                   (when (getf v :when) (setf form (append form `(:when ,(getf v :when)))))
+                   (when (getf v :let) (setf form (append form `(:let ,(getf v :let)))))
+                   (when (getf v :requires) (setf form (append form `(:requires ,(getf v :requires)))))
+                   (when (getf v :ensures) (setf form (append form `(:ensures ,(getf v :ensures)))))
+                   (emit form)))
+               *rules*)
+      ;; Invariants (non-scenario)
+      (maphash (lambda (k v)
+                 (declare (ignore k))
+                 (let ((on-name (string-downcase (symbol-name (getf v :on)))))
+                   (unless (gethash on-name *scenarios*)
+                     (emit `(definvariant ,(getf v :name)
+                              :on ,(getf v :on)
+                              :check ,(getf v :check))))))
+               *invariants*)
+      ;; Scenarios
+      (maphash (lambda (k v)
+                 (declare (ignore k))
+                 (let ((name (getf v :name))
+                       (entities (mapcar (lambda (e)
+                                           (let ((binding (intern (string (getf e :binding))))
+                                                 (entity (intern (string-upcase (getf e :entity))))
+                                                 (mn (getf e :min))
+                                                 (mx (getf e :max))
+                                                 (per (getf e :per)))
+                                             (let ((card (if (= mn mx) mn `(,mn ,mx)))
+                                                   (base `(,binding ,nil ,entity)))
+                                               (setf (second base) card)
+                                               (when per
+                                                 (setf base (append base `(:per ,(intern (string per))))))
+                                               base)))
+                                         (getf v :entities))))
+                   (emit `(defscenario ,name :entities ,entities))))
+               *scenarios*)
+      ;; Scenario invariants
+      (maphash (lambda (k v)
+                 (declare (ignore k))
+                 (let ((on-name (string-downcase (symbol-name (getf v :on)))))
+                   (when (gethash on-name *scenarios*)
+                     (emit `(definvariant ,(getf v :name)
+                              :on ,(getf v :on)
+                              :check ,(getf v :check))))))
+               *invariants*)
+      ;; Generators
+      (maphash (lambda (k v)
+                 (declare (ignore k))
+                 (emit v))
+               *generator-sources*)
+      ;; Scenario generators
+      (maphash (lambda (k v)
+                 (declare (ignore k))
+                 (emit v))
+               *scenario-generator-sources*))
+    (get-output-stream-string out)))
+
+;;; ---------------------------------------------------------------------------
+;;; S-expression data serialization
+;;; ---------------------------------------------------------------------------
+
+(defun specs-to-data ()
+  "Serialize all spec registries to a plist suitable for PRINT/READ round-trip.
+No code execution needed on load — use DATA-TO-SPECS to reconstruct."
+  (let ((entities nil) (rules nil) (invariants nil) (variants nil)
+        (scenarios nil) (generators nil) (scenario-generators nil) (helpers nil))
+    (maphash (lambda (k v) (push (cons k v) entities)) *entities*)
+    (maphash (lambda (k v) (push (cons k v) rules)) *rules*)
+    (maphash (lambda (k v) (push (cons k v) invariants)) *invariants*)
+    (maphash (lambda (k v) (push (cons k v) variants)) *variants*)
+    (maphash (lambda (k v) (push (cons k v) scenarios)) *scenarios*)
+    (maphash (lambda (k v)
+               (declare (ignore v))
+               (let ((src (gethash k *generator-sources*)))
+                 (when src (push (cons k src) generators))))
+             *generators*)
+    (maphash (lambda (k v)
+               (declare (ignore v))
+               (let ((src (gethash k *scenario-generator-sources*)))
+                 (when src (push (cons k src) scenario-generators))))
+             *scenario-generators*)
+    (maphash (lambda (k v)
+               (declare (ignore v))
+               (let ((src (gethash k *helper-sources*)))
+                 (when src (push (cons k src) helpers))))
+             *helpers*)
+    (list :entities entities :rules rules :invariants invariants
+          :variants variants :scenarios scenarios
+          :config *config*
+          :generators generators :scenario-generators scenario-generators
+          :helpers helpers)))
+
+(defun data-to-specs (data)
+  "Reconstruct spec registries from a plist produced by SPECS-TO-DATA.
+Uses EVAL only for generator/helper source forms (which are defmacro calls)."
+  ;; Helpers first — generators may reference them
+  (dolist (entry (getf data :helpers))
+    (eval (cdr entry)))
+  ;; Entities
+  (dolist (entry (getf data :entities))
+    (setf (gethash (car entry) *entities*) (cdr entry)))
+  ;; Rules
+  (dolist (entry (getf data :rules))
+    (setf (gethash (car entry) *rules*) (cdr entry)))
+  ;; Invariants
+  (dolist (entry (getf data :invariants))
+    (setf (gethash (car entry) *invariants*) (cdr entry)))
+  ;; Variants
+  (dolist (entry (getf data :variants))
+    (setf (gethash (car entry) *variants*) (cdr entry)))
+  ;; Scenarios
+  (dolist (entry (getf data :scenarios))
+    (setf (gethash (car entry) *scenarios*) (cdr entry)))
+  ;; Config
+  (setf *config* (getf data :config))
+  ;; Generators — must eval source forms
+  (dolist (entry (getf data :generators))
+    (eval (cdr entry)))
+  ;; Scenario generators
+  (dolist (entry (getf data :scenario-generators))
+    (eval (cdr entry)))
+  (clrhash *compiled-fn-cache*)
+  (values))
+
+(defun write-specs (pathname)
+  "Write specs to PATHNAME as readable s-expression data."
+  (with-open-file (out pathname :direction :output :if-exists :supersede)
+    (let ((*print-pretty* t)
+          (*print-right-margin* 100)
+          (*print-case* :downcase)
+          (*print-circle* nil))
+      (prin1 (specs-to-data) out)
+      (terpri out)))
+  pathname)
+
+(defun read-specs (pathname)
+  "Read specs from PATHNAME (written by WRITE-SPECS). Merges into current registries."
+  (let ((data (with-open-file (in pathname)
+                (let ((*read-eval* nil))
+                  (read in)))))
+    (data-to-specs data)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; JSON deserialization
@@ -1210,6 +1641,13 @@ Merges with existing specs — call CLEAR-SPECS first for a clean import."
                                              (intern (string-upcase per) :keyword)))))
                             (or (gethash "entities" ht) #())))))
          scenarios)))
+    ;; Helpers first — generators/invariants may reference them
+    (let ((helpers-ht (gethash "helpers" data)))
+      (when helpers-ht
+        (maphash (lambda (key src-string)
+                   (declare (ignore key))
+                   (eval (read-from-string src-string)))
+                 helpers-ht)))
     ;; Generators — eval stringified source forms
     (let ((gens (gethash "generators" data)))
       (when gens
@@ -1223,6 +1661,7 @@ Merges with existing specs — call CLEAR-SPECS first for a clean import."
                    (declare (ignore key))
                    (eval (read-from-string src-string)))
                  sgens)))
+    (clrhash *compiled-fn-cache*)
     (values)))
 
 ;;; ---------------------------------------------------------------------------
