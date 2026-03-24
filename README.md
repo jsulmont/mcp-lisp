@@ -216,53 +216,36 @@ swarm> create and register a new MCP tool called add-n -- that should take
 
 The coder defines the tool, unit-tests it with `pp`, then `test_tool` spawns a fresh agent that only sees `add_n` in its tool list — verifying the schema and description work end-to-end.
 
-## Behavioral Specs
+## Behavioral Spec Engine
 
-A specification DSL for capturing domain models as structured metadata — entities, rules, and invariants — queryable and testable at the REPL or via MCP tools. Inspired by [JUXT Allium](https://github.com/juxt/allium) but executable from day one. See [mcp-lisp vs allium v3](mcp-lisp-vs-allium-v3.md) for a detailed comparison.
+A specification DSL for capturing domain models — entities, rules, invariants — with property-based testing, state machine analysis, and PostgreSQL codegen. Define the domain once; the engine validates completeness, tests correctness across random data and state transitions, and generates DDL with CHECK constraints and transition triggers derived from your spec.
 
 ```lisp
-(defentity account ()
+(defentity end-device ()
   (id string :required t :unique t)
-  (balance number :required t :default 0)
-  (:belongs-to owner :of user))
+  (lfdi string :required t :unique t)
+  (lifecycle (member :active :soft-deleted :hard-deleted) :default :active)
+  (enabled boolean :default t)
+  (:belongs-to aggregator :of end-device :optional t))
 
-(defrule withdraw
-  :when (account :state :active)
-  :requires ((>= (account-balance account) amount))
-  :ensures ((= (account-balance account) (- old-balance amount))))
+(defrule soft-delete-device
+  :when (end-device :lifecycle :active)
+  :sets ((end-device-enabled end-device) nil)
+  :ensures ((eq (end-device-lifecycle end-device) :soft-deleted)))
 
-(definvariant non-negative-balance
-  :on account
-  :check (>= (account-balance account) 0))
+(definvariant active-means-enabled
+  :on end-device
+  :check (if (eq (end-device-lifecycle end-device) :active)
+             (end-device-enabled end-device) t))
+
+(run-pbt :trials 500 :negative-trials 200)  ;; 40,000 trials, 0 failures
+(random-walk "end-device" :steps 20 :trials 50)
+(specs-to-sql)  ;; → DDL with CHECK constraints + state transition triggers
 ```
 
-### Property-Based Testing
+See [etc/spec-engine.md](etc/spec-engine.md) for the full guide, [etc/spec-reference.md](etc/spec-reference.md) for the API reference, and [`examples/`](examples/) for specs across domains (utility servers, power grids, trading, Kubernetes, Raft, railway signaling).
 
-Generate random entity instances and check invariants — with counterexamples on failure:
-
-```lisp
-(run-pbt :trials 200)
-
-;; === PBT Results ===
-;;
-;; account (1 invariants)
-;;   104/200 passed, 96 FAILED
-;;   counterexample: (:BALANCE -876.8)
-;;     violated: non-negative-balance
-```
-
-### JSON Persistence
-
-Export specs as JSON (conforming to JSON Schema 2020-12) for version control and cross-session persistence:
-
-```lisp
-(specs-to-json)    ;; => JSON string
-(json-to-specs s)  ;; import from JSON
-```
-
-### Claude Code Integration
-
-Copy [`etc/spec-CLAUDE.md`](etc/spec-CLAUDE.md) into your project's `CLAUDE.md` to teach Claude Code the spec-first workflow. Claude will then define specs via `eval_lisp` before generating code.
+Copy [`etc/spec-CLAUDE.md`](etc/spec-CLAUDE.md) into your project's `CLAUDE.md` to teach Claude Code the spec-first workflow.
 
 ## A2A (Agent-to-Agent Protocol)
 
