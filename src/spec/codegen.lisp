@@ -369,20 +369,30 @@ Returns the SQL string or NIL if the form can't be translated."
     (when parts
       (format nil "~{~A~^; ~}" (nreverse parts)))))
 
+(defun fk-field-optional-p (field)
+  "Return T if FIELD has a default of empty string, making it unsuitable for FK."
+  (let* ((kwargs (cddr field))
+         (default (getf kwargs :default)))
+    (and (stringp default) (string= default ""))))
+
 (defun infer-fk-constraints (entity-name)
-  "Infer foreign key constraints for ENTITY-NAME by scanning has-many/has-one
-relations from other entities that point at this entity. Returns a list of
-(fk-col-sql parent-table-sql parent-col-sql) triples."
+  "Infer foreign key constraints for ENTITY-NAME. Uses two strategies:
+1. Scan has-many/has-one relations from other entities that point here.
+2. Scan this entity's own *-id/*-lfdi fields for names matching known entities
+   and their unique fields (covers 1:1 relationships without has-many).
+Skips FK generation for optional fields with empty-string defaults.
+Returns a list of (fk-col-sql parent-table-sql parent-col-sql) triples."
   (let ((result nil)
-        (ename-down (string-downcase (string entity-name))))
-    (dolist (other-name (list-entities))
+        (ename-down (string-downcase (string entity-name)))
+        (all-entities (list-entities)))
+    ;; Strategy 1: has-many/has-one from other entities pointing at us
+    (dolist (other-name all-entities)
       (dolist (rel (entity-relations other-name))
         (when (and (member (first rel) '(:has-many :has-one))
                    (>= (length rel) 4)
                    (eq (third rel) :of))
           (let ((target (string-downcase (string (fourth rel)))))
             (when (string= target ename-down)
-              ;; Find the unique fields of the parent entity
               (let ((parent-unique-fields
                       (loop for f in (entity-fields other-name)
                             for fname = (string-downcase (string (first f)))
@@ -390,7 +400,6 @@ relations from other entities that point at this entity. Returns a list of
                             when (or (string= fname "id")
                                      (getf kwargs :unique))
                               collect fname)))
-                ;; For each unique field, look for a matching FK field in this entity
                 (dolist (puf parent-unique-fields)
                   (let* ((expected-fk (format nil "~A-~A"
                                               (string-downcase (string other-name))
@@ -398,11 +407,31 @@ relations from other entities that point at this entity. Returns a list of
                          (match (find expected-fk (entity-fields entity-name)
                                       :key (lambda (f) (string-downcase (string (first f))))
                                       :test #'string=)))
-                    (when match
+                    (when (and match (not (fk-field-optional-p match)))
                       (pushnew (list (lisp-to-sql expected-fk)
                                      (lisp-to-sql other-name)
                                      (lisp-to-sql puf))
                                result :test #'equal))))))))))
+    ;; Strategy 2: scan own fields for *-id/*-lfdi patterns matching known entities
+    (dolist (field (entity-fields entity-name))
+      (let* ((fname (string-downcase (string (first field))))
+             (seen-cols (mapcar #'first result)))
+        (dolist (other-name all-entities)
+          (let ((other-down (string-downcase (string other-name))))
+            (unless (string= other-down ename-down)
+              (dolist (ufield (entity-fields other-name))
+                (let* ((ufname (string-downcase (string (first ufield))))
+                       (ukwargs (cddr ufield))
+                       (expected-fk (format nil "~A-~A" other-down ufname)))
+                  (when (and (or (string= ufname "id") (getf ukwargs :unique))
+                             (string= fname expected-fk)
+                             (not (fk-field-optional-p field))
+                             (not (member (lisp-to-sql expected-fk) seen-cols
+                                          :test #'string=)))
+                    (pushnew (list (lisp-to-sql expected-fk)
+                                   (lisp-to-sql other-name)
+                                   (lisp-to-sql ufname))
+                             result :test #'equal)))))))))
     (nreverse result)))
 
 (defun emit-table (entity-name enums out)

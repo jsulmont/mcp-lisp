@@ -134,7 +134,8 @@ When file_path is provided, the full untruncated result is written to that file.
            (result-str (when last-result (result-to-string last-result)))
            (max-len 4000))
       (if (and file-path (plusp (length file-path)))
-          (progn
+          (let* ((raw-value (and last-result (stringp last-result) last-result))
+                 (file-content (or raw-value result-str)))
             (with-open-file (f file-path :direction :output :if-exists :supersede)
               (when (and printed-output (plusp (length printed-output)))
                 (format f "Output:~%~a~%" printed-output))
@@ -144,10 +145,10 @@ When file_path is provided, the full untruncated result is written to that file.
                   (format f "  ~a~%" w)))
               (when error-msg
                 (format f "Error: ~a~%" error-msg))
-              (when result-str
-                (format f "=> ~a" result-str)))
+              (when file-content
+                (write-string file-content f)))
             (format nil "Result written to ~A (~:d chars)" file-path
-                    (+ (or (length result-str) 0)
+                    (+ (or (length file-content) 0)
                        (or (length printed-output) 0))))
           (with-output-to-string (out)
             (when (and printed-output (plusp (length printed-output)))
