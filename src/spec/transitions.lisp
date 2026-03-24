@@ -15,6 +15,7 @@
                 #:describe-rule
                 #:decompose-accessor)
   (:export #:detect-state-fields
+           #:field-default
            #:extract-transitions
            #:unreachable-states
            #:terminal-states

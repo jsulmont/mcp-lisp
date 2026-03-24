@@ -902,7 +902,7 @@ Returns a list of warning strings. Empty list = all clear."
                                    key check (if check "true" "false"))
                            warnings))))
                *invariants*)
-      ;; Flag entities with >2 non-identifier fields but zero invariants
+      ;; Flag entities with non-identifier fields but zero invariants
       (maphash (lambda (ekey eplist)
                  (let* ((fields (getf eplist :fields))
                         (non-id-fields
@@ -912,7 +912,7 @@ Returns a list of warning strings. Empty list = all clear."
                                              (alexandria:ends-with-subseq "-mrid" n)
                                              (string= n "mrid"))))
                                      fields)))
-                   (when (> (length non-id-fields) 2)
+                   (when (> (length non-id-fields) 0)
                      (let ((has-invariant nil))
                        (maphash (lambda (_ik iplist)
                                   (declare (ignore _ik))

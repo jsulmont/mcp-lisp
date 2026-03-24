@@ -35,7 +35,8 @@
                 #:entity-fields
                 #:entity-relations)
   (:import-from #:mcp-lisp/src/spec/transitions
-                #:detect-state-fields)
+                #:detect-state-fields
+                #:field-default)
   (:export #:generate-value
            #:generate-instance
            #:default-generate-instance
@@ -976,12 +977,10 @@ OVERRIDES is a plist mapping binding keywords to pre-built instances."
                 (let* ((fk-ov (scenario-fk-overrides entity-name result entity-specs))
                        (n (if (= emin emax) emin
                               (+ emin (random (1+ (- emax emin)))))))
-                  (if (and (= n 1) (= emin emax))
-                      (setf (getf result binding) (generate-instance entity-name fk-ov))
-                      (let ((instances nil))
-                        (dotimes (_i n)
-                          (push (generate-instance entity-name fk-ov) instances))
-                        (setf (getf result binding) (nreverse instances)))))))))
+                  (let ((instances nil))
+                    (dotimes (_i n)
+                      (push (generate-instance entity-name fk-ov) instances))
+                    (setf (getf result binding) (nreverse instances))))))))
     result))
 
 (defun generate-scenario (scenario-name &optional overrides)
@@ -1842,7 +1841,16 @@ Returns a result plist:
         (failed 0)
         (failures nil))
     (dotimes (_trial trials)
-      (let ((instance (generate-instance entity-name))
+      (let ((instance (let ((state-fields (detect-state-fields entity-name)))
+                        (if state-fields
+                            (let ((overrides nil))
+                              (dolist (sf state-fields)
+                                (let ((default (field-default entity-name sf)))
+                                  (when default
+                                    (push default overrides)
+                                    (push sf overrides))))
+                              (generate-instance entity-name overrides))
+                            (generate-instance entity-name))))
             (trace nil)
             (violation nil))
         ;; Check initial invariants

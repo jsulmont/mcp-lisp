@@ -208,6 +208,7 @@
                 #:describe-scenario
                 #:clear-specs
                 #:validate-specs
+                #:suggest-invariants
                 #:form-to-ast
                 #:ast-to-form
                 #:specs-to-json
@@ -495,6 +496,7 @@
    #:generation-feasibility
    #:simulate-trace
    #:scenario-feasibility
+   #:suggest-invariants
    ;; Spec codegen
    #:specs-to-sql
    #:specs-to-sql-seed))
