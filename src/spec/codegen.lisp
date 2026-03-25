@@ -45,9 +45,32 @@
 ;;; Name conversion
 ;;; ---------------------------------------------------------------------------
 
+(defvar *pg-reserved-words*
+  '("all" "analyse" "analyze" "and" "any" "array" "as" "asc" "asymmetric"
+    "authorization" "between" "binary" "both" "case" "cast" "check" "collate"
+    "collation" "column" "concurrently" "constraint" "create" "cross"
+    "current_catalog" "current_date" "current_role" "current_schema"
+    "current_time" "current_timestamp" "current_user" "default" "deferrable"
+    "desc" "distinct" "do" "else" "end" "except" "false" "fetch" "for"
+    "foreign" "freeze" "from" "full" "grant" "group" "having" "ilike" "in"
+    "initially" "inner" "intersect" "into" "is" "isnull" "join" "lateral"
+    "leading" "left" "like" "limit" "localtime" "localtimestamp" "natural"
+    "not" "notnull" "null" "offset" "on" "only" "or" "order" "outer"
+    "overlaps" "placing" "primary" "references" "returning" "right" "select"
+    "session_user" "similar" "some" "symmetric" "table" "tablesample" "then"
+    "to" "trailing" "true" "union" "unique" "user" "using" "variadic"
+    "verbose" "when" "where" "window" "with")
+  "PostgreSQL reserved words that must be quoted as column names.")
+
 (defun lisp-to-sql (name)
   "Convert kebab-case NAME (string or symbol) to snake_case SQL identifier."
   (substitute #\_ #\- (string-downcase (string name))))
+
+(defun quote-ident (name)
+  "Double-quote NAME if it collides with a PostgreSQL reserved word."
+  (if (member name *pg-reserved-words* :test #'string=)
+      (format nil "\"~A\"" name)
+      name))
 
 (defun belongs-to-target (rel)
   "Extract the target entity name (lowercase string) from a :belongs-to relation.
@@ -59,6 +82,34 @@ Handles both short form (:belongs-to target) and long form (:belongs-to name :of
       ((>= len 2)
        (string-downcase (string (second rel))))
       (t nil))))
+
+(defun entity-pk-column (entity-name)
+  "Find the primary key column for ENTITY-NAME. Returns the SQL column name.
+Prefers a field named 'id', otherwise uses the first :unique field.
+Falls back to a synthetic 'id' if nothing qualifies."
+  (let ((fields (entity-fields entity-name)))
+    (or (loop for f in fields
+              for fname = (string-downcase (string (first f)))
+              when (string= fname "id")
+                return (lisp-to-sql fname))
+        (loop for f in fields
+              for fname = (string-downcase (string (first f)))
+              for kwargs = (cddr f)
+              when (getf kwargs :unique)
+                return (lisp-to-sql fname))
+        "id")))
+
+(defun entity-pk-sql-type (entity-name enums)
+  "Return the SQL type of the PK column for ENTITY-NAME.
+For synthetic 'id' PKs returns INTEGER; otherwise looks up the field type."
+  (let ((fields (entity-fields entity-name)))
+    (or (loop for f in fields
+              for fname = (string-downcase (string (first f)))
+              for ftype = (second f)
+              for kwargs = (cddr f)
+              when (or (string= fname "id") (getf kwargs :unique))
+                return (sql-type ftype entity-name fname enums))
+        "INTEGER")))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Enum collection
@@ -164,7 +215,7 @@ Returns the SQL string or NIL if the form can't be translated."
                 (when fr fr)))
              ((not (consp f)) nil)
              ;; Field access
-             ((field-ref f) (field-ref f))
+             ((field-ref f) (quote-ident (field-ref f)))
              ;; Comparisons
              ((and (member (first f) '(>= <= > < =)) (= (length f) 3))
               (let ((l (xlate (second f)))
@@ -205,7 +256,7 @@ Returns the SQL string or NIL if the form can't be translated."
                      (when (and l r) (format nil "~A <> ~A" l r))))
                   ;; (not (accessor entity)) where accessor is a field ref → field IS NULL
                   ((field-ref inner)
-                   (format nil "NOT (~A)" (field-ref inner)))
+                   (format nil "NOT (~A)" (quote-ident (field-ref inner))))
                   (t
                    (let ((sql (xlate inner)))
                      (when sql (format nil "NOT (~A)" sql)))))))
@@ -224,7 +275,7 @@ Returns the SQL string or NIL if the form can't be translated."
                      (negated-test
                        (when test
                          (if (and test-field test-ftype (not (eq test-ftype 'boolean)))
-                             (format nil "~A IS NULL" test-field)
+                             (format nil "~A IS NULL" (quote-ident test-field))
                              (format nil "NOT (~A)" test)))))
                 (cond
                   ;; (if test consequent t) → negated-test OR (consequent)
@@ -311,7 +362,7 @@ Returns the SQL string or NIL if the form can't be translated."
     (format out "-- Enum types~%")
     (dolist (enum enums)
       (format out "CREATE TYPE ~A AS ENUM (~{~A~^, ~});~%"
-              (car enum)
+              (quote-ident (car enum))
               (mapcar (lambda (v) (format nil "'~A'" v)) (cdr enum))))
     (format out "~%")))
 
@@ -440,7 +491,13 @@ Returns a list of (fk-col-sql parent-table-sql parent-col-sql) triples."
          (variants (entity-variants entity-name))
          (invariants (invariants-for entity-name))
          (table-name (lisp-to-sql entity-name))
+         (pk-col (entity-pk-column entity-name))
+         (has-explicit-pk (not (string= pk-col "id")))
          (lines nil))
+    ;; Synthetic PK if no field qualifies
+    (unless (or has-explicit-pk
+                (find "id" fields :key (lambda (f) (string-downcase (string (first f)))) :test #'string=))
+      (push (list "    id SERIAL PRIMARY KEY" nil) lines))
     ;; Columns from fields
     (dolist (field fields)
       (let* ((fname (first field))
@@ -450,7 +507,7 @@ Returns a list of (fk-col-sql parent-table-sql parent-col-sql) triples."
              (col-type (sql-type ftype entity-name (string fname) enums))
              (modifiers nil)
              (comment (field-comment field)))
-        (let ((is-pk (string= col-name "id")))
+        (let ((is-pk (string= col-name pk-col)))
           (when is-pk
             (push "PRIMARY KEY" modifiers))
           (when (and (getf kwargs :required) (not is-pk))
@@ -467,25 +524,29 @@ Returns a list of (fk-col-sql parent-table-sql parent-col-sql) triples."
                             ((stringp default) (format nil "'~A'" default))
                             (t (format nil "~A" default))))
                   modifiers)))
-        (push (list (format nil "    ~A ~A~{~^ ~A~}" col-name col-type (nreverse modifiers))
+        (push (list (format nil "    ~A ~A~{~^ ~A~}" (quote-ident col-name) col-type (nreverse modifiers))
                     comment)
               lines)))
     ;; Foreign keys from :belongs-to
     (dolist (rel relations)
       (when (eq (first rel) :belongs-to)
         (let* ((target (belongs-to-target rel))
-               (fk-col (format nil "~A_id" (lisp-to-sql target))))
-          (push (list (format nil "    ~A TEXT REFERENCES ~A(id)" fk-col (lisp-to-sql target))
+               (parent-pk (entity-pk-column target))
+               (parent-pk-type (entity-pk-sql-type target enums))
+               (fk-col (format nil "~A_~A" (lisp-to-sql target) parent-pk)))
+          (push (list (format nil "    ~A ~A REFERENCES ~A(~A)"
+                              (quote-ident fk-col) parent-pk-type
+                              (quote-ident (lisp-to-sql target))
+                              (quote-ident parent-pk))
                       nil)
                 lines))))
     ;; Foreign keys inferred from has-many/has-one relations on other entities
     (dolist (fk (infer-fk-constraints entity-name))
       (destructuring-bind (fk-col parent-table parent-col) fk
-        ;; Only add REFERENCES if the column is already declared (from fields above)
-        ;; We emit it as a standalone CONSTRAINT to avoid duplicating the column definition
         (let ((constraint-name (format nil "fk_~A_~A" table-name fk-col)))
           (push (list (format nil "    CONSTRAINT ~A FOREIGN KEY (~A) REFERENCES ~A(~A)"
-                              constraint-name fk-col parent-table parent-col)
+                              constraint-name (quote-ident fk-col)
+                              (quote-ident parent-table) (quote-ident parent-col))
                       nil)
                 lines))))
     ;; Variant fields (nullable — only valid for matching discriminator)
@@ -500,7 +561,7 @@ Returns a list of (fk-col-sql parent-table-sql parent-col-sql) triples."
                  (vcomment (if comment
                                (format nil "~A (variant: ~A)" comment vname)
                                (format nil "variant: ~A" vname))))
-            (push (list (format nil "    ~A ~A" col-name col-type)
+            (push (list (format nil "    ~A ~A" (quote-ident col-name) col-type)
                         vcomment)
                   lines)))))
     ;; CHECK constraints from invariants
@@ -517,7 +578,7 @@ Returns a list of (fk-col-sql parent-table-sql parent-col-sql) triples."
                 (push (format nil "    -- inv: ~A (not translatable to SQL)" inv-name)
                       comments)))))
       ;; Emit
-      (format out "CREATE TABLE ~A (~%" table-name)
+      (format out "CREATE TABLE ~A (~%" (quote-ident table-name))
       (let ((rlines (nreverse lines)))
         (loop for entry in rlines
               for i from 0
@@ -538,19 +599,23 @@ Returns a list of (fk-col-sql parent-table-sql parent-col-sql) triples."
     (dolist (rel (entity-relations entity-name))
       (when (eq (first rel) :belongs-to)
         (let* ((target (belongs-to-target rel))
-               (fk-col (format nil "~A_id" (lisp-to-sql target))))
+               (parent-pk (entity-pk-column target))
+               (fk-col (format nil "~A_~A" (lisp-to-sql target) parent-pk)))
           (format out "CREATE INDEX idx_~A_~A ON ~A(~A);~%"
-                  table-name (lisp-to-sql target) table-name fk-col))))
+                  table-name (lisp-to-sql target)
+                  (quote-ident table-name) (quote-ident fk-col)))))
     ;; Foreign key indexes from inferred has-many/has-one relations
     (dolist (fk (infer-fk-constraints entity-name))
       (let ((fk-col (first fk)))
         (format out "CREATE INDEX idx_~A_~A ON ~A(~A);~%"
-                table-name fk-col table-name fk-col)))
+                table-name fk-col
+                (quote-ident table-name) (quote-ident fk-col))))
     ;; State field indexes
     (dolist (state-field (detect-state-fields entity-name))
       (let ((col-name (lisp-to-sql (symbol-name state-field))))
         (format out "CREATE INDEX idx_~A_~A ON ~A(~A);~%"
-                table-name col-name table-name col-name)))))
+                table-name col-name
+                (quote-ident table-name) (quote-ident col-name))))))
 
 (defun emit-triggers (entity-name out)
   (dolist (state-field (detect-state-fields entity-name))
@@ -562,25 +627,25 @@ Returns a list of (fk-col-sql parent-table-sql parent-col-sql) triples."
         (format out "CREATE OR REPLACE FUNCTION ~A()~%" fn-name)
         (format out "RETURNS TRIGGER AS $$~%")
         (format out "BEGIN~%")
-        (format out "    IF OLD.~A = NEW.~A THEN~%" col-name col-name)
+        (format out "    IF OLD.~A = NEW.~A THEN~%" (quote-ident col-name) (quote-ident col-name))
         (format out "        RETURN NEW;~%")
         (format out "    END IF;~%")
         (format out "    IF NOT (~%")
         (loop for tr in transitions
               for i from 0
               do (format out "        (OLD.~A = '~A' AND NEW.~A = '~A')~A~%"
-                         col-name (lisp-to-sql (symbol-name (getf tr :from)))
-                         col-name (lisp-to-sql (symbol-name (getf tr :to)))
+                         (quote-ident col-name) (lisp-to-sql (symbol-name (getf tr :from)))
+                         (quote-ident col-name) (lisp-to-sql (symbol-name (getf tr :to)))
                          (if (= i (1- (length transitions))) "" " OR")))
         (format out "    ) THEN~%")
         (format out "        RAISE EXCEPTION 'invalid ~A transition: % → %', OLD.~A, NEW.~A;~%"
-                table-name col-name col-name)
+                table-name (quote-ident col-name) (quote-ident col-name))
         (format out "    END IF;~%")
         (format out "    RETURN NEW;~%")
         (format out "END;~%")
         (format out "$$ LANGUAGE plpgsql;~%~%")
         (format out "CREATE TRIGGER trg_~A_~A~%" table-name col-name)
-        (format out "    BEFORE UPDATE OF ~A ON ~A~%" col-name table-name)
+        (format out "    BEFORE UPDATE OF ~A ON ~A~%" (quote-ident col-name) (quote-ident table-name))
         (format out "    FOR EACH ROW EXECUTE FUNCTION ~A();~%~%" fn-name)))))
 
 ;;; ---------------------------------------------------------------------------
@@ -600,11 +665,11 @@ Only :postgresql dialect is currently supported."
       (format out "-- Drop existing objects~%")
       (dolist (ename rev-entities)
         (format out "DROP TABLE IF EXISTS ~A CASCADE;~%"
-                (lisp-to-sql ename)))
+                (quote-ident (lisp-to-sql ename))))
       (when *config*
         (format out "DROP TABLE IF EXISTS config CASCADE;~%"))
       (dolist (enum enums)
-        (format out "DROP TYPE IF EXISTS ~A CASCADE;~%" (car enum)))
+        (format out "DROP TYPE IF EXISTS ~A CASCADE;~%" (quote-ident (car enum))))
       (format out "~%"))
     (emit-enums enums out)
     (emit-config out)
@@ -702,7 +767,10 @@ Only :postgresql dialect is currently supported."
     (dolist (rel (entity-relations entity-name))
       (when (eq (first rel) :belongs-to)
         (let* ((target (belongs-to-target rel))
-               (fk-kw (intern (format nil "~A-ID" (string-upcase target)) :keyword)))
+               (parent-pk (entity-pk-column target))
+               (fk-kw (intern (format nil "~A-~A" (string-upcase target)
+                                       (string-upcase parent-pk))
+                              :keyword)))
           (push (cons fk-kw target) result))))
     (nreverse result)))
 
@@ -720,8 +788,11 @@ col-field-specs is a list of (keyword type-spec) pairs matching col-names order.
           (push (lisp-to-sql (string (first f))) col-names)
           (push (list (intern (string (first f)) :keyword) (second f)) col-specs))))
     (dolist (fk (entity-belongs-to-targets entity-name))
-      (push (format nil "~A_id" (lisp-to-sql (cdr fk))) col-names)
-      (push (list (car fk) 'string) col-specs))
+      (let* ((target (cdr fk))
+             (parent-pk (entity-pk-column target))
+             (fk-col (format nil "~A_~A" (lisp-to-sql target) parent-pk)))
+        (push fk-col col-names)
+        (push (list (car fk) 'string) col-specs)))
     (values (nreverse col-names) (nreverse col-specs))))
 
 (defun instance-to-row (instance col-specs)
@@ -737,7 +808,8 @@ col-field-specs is a list of (keyword type-spec) pairs matching col-names order.
     (multiple-value-bind (col-names col-specs) (entity-col-spec entity-name)
       (let ((rows (mapcar (lambda (inst) (instance-to-row inst col-specs)) instances)))
         (format out "INSERT INTO ~A (~{~A~^, ~}) VALUES~%"
-                (lisp-to-sql entity-name) col-names)
+                (quote-ident (lisp-to-sql entity-name))
+                (mapcar #'quote-ident col-names))
         (loop for row in rows
               for i from 0
               do (format out "    (~{~A~^, ~})~A~%"
@@ -799,27 +871,36 @@ Unique/ID string fields are stamped with collision-free identifiers."
       (unless (gethash ename covered)
         (let ((id-pool (make-hash-table :test #'equal))
               (instances nil))
-          ;; Collect parent IDs from already-generated instances
+          ;; Collect parent PK values from already-generated instances
           (maphash (lambda (k v)
-                     (dolist (inst v)
-                       (let ((id (getf inst :id)))
-                         (when id
-                           (pushnew id (gethash k id-pool) :test #'equal)))))
+                     (let ((pk-kw (intern (string-upcase (entity-pk-column k))
+                                          :keyword)))
+                       (dolist (inst v)
+                         (let ((id (getf inst pk-kw)))
+                           (when id
+                             (pushnew id (gethash k id-pool) :test #'equal))))))
                    entity-instances)
           (let ((fk-targets (entity-belongs-to-targets ename)))
             (dotimes (_i rows-per-entity)
               (let ((overrides
                       (loop for (fk-kw . target) in fk-targets
+                            for parent-pk-kw = (intern (string-upcase
+                                                         (entity-pk-column target))
+                                                       :keyword)
                             for parent-ids = (or (gethash target id-pool)
                                                  (let ((existing (gethash target entity-instances)))
                                                    (when existing
-                                                     (mapcar (lambda (i) (getf i :id))
+                                                     (mapcar (lambda (i) (getf i parent-pk-kw))
                                                              existing))))
                             when parent-ids
                               nconc (list fk-kw
                                          (nth (random (length parent-ids))
                                               parent-ids)))))
-                (push (generate-instance ename overrides) instances))))
+                (let ((inst (generate-instance ename overrides)))
+                  ;; Inject FK values — not declared fields, but needed by instance-to-row
+                  (loop for (k v) on overrides by #'cddr
+                        do (setf (getf inst k) v))
+                  (push inst instances)))))
           (setf (gethash ename entity-instances) (nreverse instances)))))
     ;; Phase 3: stamp unique IDs on independently generated entities only.
     ;; Scenario-generated data has coherent cross-references by construction.
@@ -871,15 +952,20 @@ Unique/ID string fields are stamped with collision-free identifiers."
             (dotimes (_i deficit)
               (let* ((overrides
                        (loop for (fk-kw . target) in fk-targets
+                             for parent-pk-kw = (intern (string-upcase
+                                                          (entity-pk-column target))
+                                                        :keyword)
                              for parent-ids = (let ((existing (gethash target entity-instances)))
                                                 (when existing
-                                                  (mapcar (lambda (i) (getf i :id))
+                                                  (mapcar (lambda (i) (getf i parent-pk-kw))
                                                           existing)))
                              when parent-ids
                                nconc (list fk-kw
                                           (nth (random (length parent-ids))
                                                parent-ids))))
                      (inst (generate-instance ename overrides)))
+                (loop for (k v) on overrides by #'cddr
+                      do (setf (getf inst k) v))
                 (dolist (kw ufields)
                   (setf (getf inst kw) (generate-seed-id ename)))
                 (push inst new-instances)))
