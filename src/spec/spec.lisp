@@ -908,26 +908,38 @@ Returns a list of warning strings. Empty list = all clear."
                                           warnings)))))
                             *invariants*)))
                *scenarios*)
-      ;; Entities with conditional invariants (if/when on member fields) need custom generators
-      (maphash (lambda (ekey _eplist)
-                 (declare (ignore _eplist))
-                 (unless (gethash ekey *generators*)
-                   (let ((has-conditional nil))
-                     (maphash (lambda (_ikey iplist)
-                                (declare (ignore _ikey))
+      ;; Entity-level invariants referencing has-many relation accessors
+      (maphash (lambda (ekey eplist)
+                 (let* ((relations (getf eplist :relations))
+                        (has-many-accessors
+                          (loop for rel in relations
+                                when (eq (first rel) :has-many)
+                                  collect (format nil "~A-~A"
+                                                  ekey
+                                                  (string-downcase
+                                                    (symbol-name (second rel)))))))
+                   (when has-many-accessors
+                     (maphash (lambda (ikey iplist)
                                 (when (and (getf iplist :on)
                                            (string-equal (string-downcase
                                                            (symbol-name (getf iplist :on)))
-                                                          ekey))
-                                  (let ((check (getf iplist :check)))
-                                    (when (and (consp check)
-                                               (member (first check) '(if when cond)))
-                                      (setf has-conditional t)))))
-                              *invariants*)
-                     (when has-conditional
-                       (push (format nil "entity ~A: has conditional invariants but no defgenerator is registered"
-                                     ekey)
-                             warnings)))))
+                                                         ekey)
+                                           (not (gethash ekey *scenarios*)))
+                                  (labels ((mentions-accessor-p (form)
+                                             (cond
+                                               ((and (symbolp form)
+                                                     (member (string-downcase
+                                                               (symbol-name form))
+                                                             has-many-accessors
+                                                             :test #'string=))
+                                                t)
+                                               ((consp form)
+                                                (some #'mentions-accessor-p form)))))
+                                    (when (mentions-accessor-p (getf iplist :check))
+                                      (push (format nil "invariant ~A: references has-many accessor on entity ~A — only testable via scenario"
+                                                    ikey ekey)
+                                            warnings)))))
+                              *invariants*))))
                *entities*)
       ;; Warn about trivially-true/false invariant :check forms
       (maphash (lambda (key plist)

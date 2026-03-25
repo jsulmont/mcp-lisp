@@ -582,6 +582,57 @@ CONSTRAINT-MAP maps field keywords to lists of constraint plists."
 ;;; Instance generation
 ;;; ---------------------------------------------------------------------------
 
+(defvar *generation-depth* 0
+  "Current nesting depth during recursive instance generation.
+Used to prevent infinite recursion when has-many relations form cycles.")
+
+(defparameter *max-generation-depth* 3
+  "Maximum depth for recursive has-many population in generate-instance.")
+
+(defun find-child-fk-key (child-entity-name parent-entity-name)
+  "Find the FK keyword on CHILD-ENTITY-NAME that points to PARENT-ENTITY-NAME.
+Returns a keyword like :TEAM-ID, or NIL if no belongs-to relation found."
+  (let ((child-rels (entity-relations child-entity-name)))
+    (dolist (cr child-rels)
+      (when (eq (first cr) :belongs-to)
+        (let ((target (string-downcase (string (second cr)))))
+          (when (string= target (string-downcase (string parent-entity-name)))
+            (return (intern (format nil "~A-ID"
+                                    (string-upcase (string (second cr))))
+                            :keyword))))))))
+
+(defun populate-has-many (entity-name instance)
+  "Populate has-many relations on INSTANCE that have :cardinality specs.
+Generates child instances and wires FK fields back to the parent.
+Skips when *generation-depth* exceeds *max-generation-depth*."
+  (when (>= *generation-depth* *max-generation-depth*)
+    (return-from populate-has-many instance))
+  (let* ((entity (describe-entity entity-name))
+         (relations (getf entity :relations))
+         (parent-id (getf instance :id)))
+    (dolist (rel relations)
+      (when (eq (first rel) :has-many)
+        (let* ((rel-name (second rel))
+               (rel-key (field-keyword rel-name))
+               (child-entity (getf (cddr rel) :of))
+               (cardinality (getf (cddr rel) :cardinality)))
+          (when (and child-entity cardinality)
+            (let* ((cmin (first cardinality))
+                   (cmax (second cardinality))
+                   (n (if (= cmin cmax) cmin
+                          (+ cmin (random (1+ (- cmax cmin))))))
+                   (child-name (string-downcase (string child-entity)))
+                   (fk-kw (when parent-id
+                            (find-child-fk-key child-name entity-name))))
+              (let ((*generation-depth* (1+ *generation-depth*)))
+                (setf (getf instance rel-key)
+                      (loop repeat n
+                            collect (let ((child (generate-instance child-name)))
+                                      (when (and fk-kw parent-id)
+                                        (setf (getf child fk-kw) parent-id))
+                                      child)))))))))
+    instance))
+
 (defun default-generate-instance (entity-name &optional overrides)
   "Generate a random instance of ENTITY-NAME as a plist.
 OVERRIDES is a plist (:key1 val1 :key2 val2 ...) of pre-set field values.
@@ -641,7 +692,8 @@ with bounds derived from invariant check forms."
                  (fn (get-compiled-fn (cons entity-name key)
                                       (list inst-sym) form)))
             (setf (getf instance key) (funcall fn instance))))))
-    instance))
+    ;; Phase 4: populate has-many relations with cardinality
+    (populate-has-many entity-name instance)))
 
 (defun generate-config ()
   "Generate a random config plist from *CONFIG* field specs."
@@ -1077,9 +1129,10 @@ All fields are independently random — used for negative testing."
         (push key instance)))
     instance))
 
-(defun classify-zero-rejection (check-form)
+(defun classify-zero-rejection (check-form &optional entity-name)
   "Classify why an invariant might never reject unconstrained data.
-Returns a string label or NIL."
+Returns a string label or NIL. ENTITY-NAME, if provided, enables
+field-aware analysis (required/min/max, has-many accessors)."
   (when (consp check-form)
     (labels ((uses-p (syms form)
                (cond
@@ -1093,13 +1146,51 @@ Returns a string label or NIL."
                        (symbolp (first form))
                        (string-equal (symbol-name (first form)) "CONFIG"))
                   t)
-                 ((consp form) (some #'uses-config-p form)))))
+                 ((consp form) (some #'uses-config-p form))))
+             (has-many-accessor-p ()
+               (when entity-name
+                 (let ((rels (entity-relations entity-name)))
+                   (some (lambda (rel)
+                           (when (eq (first rel) :has-many)
+                             (let ((acc (format nil "~A-~A"
+                                                (string-upcase (string entity-name))
+                                                (symbol-name (second rel)))))
+                               (uses-p (list acc) check-form))))
+                         rels))))
+             (all-fields-bounded-p ()
+               (when entity-name
+                 (let ((fields (entity-fields entity-name))
+                       (all-bounded t))
+                   (when fields
+                     (dolist (field fields)
+                       (let* ((ftype (second field))
+                              (kwargs (cddr field))
+                              (required (getf kwargs :required))
+                              (has-min (getf kwargs :min))
+                              (has-max (getf kwargs :max))
+                              (is-member (member-type-p ftype)))
+                         (unless (or required has-min has-max is-member)
+                           (setf all-bounded nil)
+                           (return))))
+                     all-bounded)))))
       (cond
+        ((has-many-accessor-p)
+         "requires scenario-level testing — uses has-many accessor")
         ((uses-p '("REMOVE-DUPLICATES" "DELETE-DUPLICATES") check-form)
          "structurally untestable — uniqueness over high-entropy field")
         ((and (uses-p '("<" ">" "<=" ">=" "PLUSP") check-form)
               (uses-config-p check-form))
          "weak bounds — test with extreme config values")
+        ((and (uses-p '("NOT" "NULL") check-form)
+              (all-fields-bounded-p))
+         "enforced by schema — all fields required or typed")
+        ((and (uses-p '("<" ">" "<=" ">=" "PLUSP") check-form)
+              (not (uses-config-p check-form))
+              (all-fields-bounded-p))
+         "enforced by field bounds — :min/:max or :required constraints")
+        ((and (uses-p '("IF" "WHEN" "COND") check-form)
+              (uses-p '("EQ" "MEMBER") check-form))
+         "conditional — needs targeted negative generator (defscenario-negative-generator)")
         (t nil)))))
 
 (defun run-negative-trials (trials)
@@ -1554,7 +1645,10 @@ Returns a list of result plists and prints a summary."
                 (dolist (inv-name (nreverse suspicious))
                   (let* ((inv (describe-invariant inv-name))
                          (check (when inv (getf inv :check)))
-                         (classification (classify-zero-rejection check)))
+                         (entity (when inv
+                                   (let ((on (getf inv :on)))
+                                     (when on (string-downcase (symbol-name on))))))
+                         (classification (classify-zero-rejection check entity)))
                     (format t "  ~A~A~%" inv-name
                             (if classification
                                 (format nil " (~A)" classification)

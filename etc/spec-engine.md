@@ -37,7 +37,7 @@ Each step catches a different class of problem. The order matters — `validate-
 - FK-like fields with no scenario testing the relationship
 - Scenarios using aggregates but missing a `defscenario-generator`
 - Config keys referenced in scenario invariants but not in their generators
-- Conditional invariants on entities without a `defgenerator`
+- Entity-level invariants referencing has-many relation accessors (only testable via scenario when no `:cardinality`)
 - Rules whose `:sets` touch `:immutable` fields
 
 ### State machine defects (analyze-state-machine)
@@ -49,7 +49,7 @@ Each step catches a different class of problem. The order matters — `validate-
 ### Invariant violations (run-pbt, random-walk)
 
 - Positive testing: does the generator produce data that satisfies all invariants?
-- Negative testing: do invariants actually reject random (unconstrained) data? Invariants that pass 100% of random data are classified as structurally untestable (high-entropy uniqueness) or weak bounds (config-dependent)
+- Negative testing: do invariants actually reject random (unconstrained) data? Invariants that pass 100% of random data are classified: requires scenario-level testing (has-many accessor), structurally untestable (high-entropy uniqueness), weak bounds (config-dependent), enforced by schema (required/typed fields), enforced by field bounds (min/max), or conditional (needs targeted negative generator)
 - Random walk testing: do invariants hold after arbitrary sequences of state transitions? This catches correlated-field bugs that static generation misses — e.g. a rule that sets `lifecycle = :soft-deleted` without clearing `enabled`
 
 ## Defining Specs
@@ -73,7 +73,7 @@ Typed fields with constraints, relations, and derived values:
   (:belongs-to aggregator :of end-device :optional t))
 ```
 
-Field types: `string`, `number`, `boolean`, `list`, `(member :a :b :c)`. Relations: `:has-many`, `:belongs-to`. Fields can be `:required`, `:unique`, have `:default` values, or be `:immutable t` (write-once — `apply-rule` rejects changes after initial set, `validate-specs` warns, codegen emits a `BEFORE UPDATE` trigger). Member fields become PostgreSQL enums in codegen. `:has-many` relations support `:cardinality (min max)` — codegen emits a trigger enforcing the max on the child table.
+Field types: `string`, `number`, `boolean`, `list`, `(member :a :b :c)`. Relations: `:has-many`, `:belongs-to`. Fields can be `:required`, `:unique`, have `:default` values, or be `:immutable t` (write-once — `apply-rule` rejects changes after initial set, `validate-specs` warns, codegen emits a `BEFORE UPDATE` trigger). Member fields become PostgreSQL enums in codegen. `:has-many` relations support `:cardinality (min max)` — `generate-instance` automatically populates them with child instances (wiring FK fields via `:belongs-to`), and codegen emits a trigger enforcing the max on the child table.
 
 ### Config
 

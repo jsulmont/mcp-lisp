@@ -867,3 +867,144 @@
                   (and (string= "branch-has-children" (getf r :invariant))
                        (not (getf r :pass))))
                 results)))))
+
+;;; ---------------------------------------------------------------------------
+;;; classify-zero-rejection
+;;; ---------------------------------------------------------------------------
+
+(test classify-zero-rejection-uniqueness
+  "classify-zero-rejection detects uniqueness patterns"
+  (let ((form '(= (length items)
+                  (length (remove-duplicates items :key (lambda (i) (getf i :code)))))))
+    (is (search "uniqueness" (mcp-lisp/src/spec/pbt::classify-zero-rejection form)))))
+
+(test classify-zero-rejection-config-bounds
+  "classify-zero-rejection detects config-dependent bounds"
+  (let ((form '(<= (position-leverage position) (config :max-leverage))))
+    (is (search "config" (mcp-lisp/src/spec/pbt::classify-zero-rejection form)))))
+
+(test classify-zero-rejection-has-many-accessor
+  "classify-zero-rejection detects has-many accessor usage"
+  (with-fresh-specs
+    (mcp-lisp:defentity curve ()
+      (id string :required t)
+      (:has-many data-points :of data-point :cardinality (2 6)))
+    (mcp-lisp:defentity data-point ()
+      (id string :required t))
+    (let ((form '(>= (length (curve-data-points curve)) 2)))
+      (is (search "has-many" (mcp-lisp/src/spec/pbt::classify-zero-rejection form "curve"))))))
+
+(test classify-zero-rejection-field-bounds
+  "classify-zero-rejection detects field-bound-enforced invariants"
+  (with-fresh-specs
+    (mcp-lisp:defentity sensor ()
+      (id string :required t)
+      (reading number :required t :min 0 :max 100))
+    (let ((form '(> (sensor-reading sensor) -1)))
+      (is (search "field bounds" (mcp-lisp/src/spec/pbt::classify-zero-rejection form "sensor"))))))
+
+(test classify-zero-rejection-conditional
+  "classify-zero-rejection detects conditional patterns"
+  (let ((form '(if (eq (getf device :state) :active)
+                   (not (null (getf device :timestamp)))
+                   t)))
+    (is (search "conditional" (mcp-lisp/src/spec/pbt::classify-zero-rejection form)))))
+
+(test classify-zero-rejection-nil-for-unknown
+  "classify-zero-rejection returns nil for unrecognized patterns"
+  (let ((form '(custom-check (getf x :data))))
+    (is (null (mcp-lisp/src/spec/pbt::classify-zero-rejection form)))))
+
+;;; ---------------------------------------------------------------------------
+;;; Has-many population in generate-instance
+;;; ---------------------------------------------------------------------------
+
+(test has-many-populates-children
+  "generate-instance populates has-many relations with cardinality"
+  (with-fresh-specs
+    (mcp-lisp:defentity parent ()
+      (id string :required t)
+      (name string :required t)
+      (:has-many children :of child :cardinality (2 4)))
+    (mcp-lisp:defentity child ()
+      (id string :required t)
+      (value number :required t))
+    (mcp-lisp:ensure-entity-accessors "parent")
+    (mcp-lisp:ensure-entity-accessors "child")
+    (dotimes (i 20)
+      (let* ((inst (mcp-lisp:generate-instance "parent"))
+             (children (getf inst :children)))
+        (is (listp children))
+        (is (<= 2 (length children) 4))
+        (dolist (c children)
+          (is (stringp (getf c :id)))
+          (is (numberp (getf c :value))))))))
+
+(test has-many-wires-fk-to-parent
+  "generate-instance sets FK fields on children pointing to parent"
+  (with-fresh-specs
+    (mcp-lisp:defentity team ()
+      (id string :required t)
+      (:has-many members :of player :cardinality (1 3)))
+    (mcp-lisp:defentity player ()
+      (id string :required t)
+      (skill number :required t)
+      (:belongs-to team))
+    (mcp-lisp:ensure-entity-accessors "team")
+    (mcp-lisp:ensure-entity-accessors "player")
+    (dotimes (i 20)
+      (let* ((inst (mcp-lisp:generate-instance "team"))
+             (parent-id (getf inst :id))
+             (members (getf inst :members)))
+        (is (not (null members)))
+        (dolist (m members)
+          (is (string= parent-id (getf m :team-id))))))))
+
+(test has-many-no-cardinality-skips
+  "generate-instance does not populate has-many without cardinality"
+  (with-fresh-specs
+    (mcp-lisp:defentity container ()
+      (id string :required t)
+      (:has-many items :of item))
+    (mcp-lisp:defentity item ()
+      (id string :required t))
+    (mcp-lisp:ensure-entity-accessors "container")
+    (mcp-lisp:ensure-entity-accessors "item")
+    (let ((inst (mcp-lisp:generate-instance "container")))
+      (is (null (getf inst :items))))))
+
+(test has-many-depth-limit-prevents-infinite-recursion
+  "has-many population stops at max depth to prevent cycles"
+  (with-fresh-specs
+    (mcp-lisp:defentity node-a ()
+      (id string :required t)
+      (:has-many bs :of node-b :cardinality (1 1)))
+    (mcp-lisp:defentity node-b ()
+      (id string :required t)
+      (:has-many as :of node-a :cardinality (1 1)))
+    (mcp-lisp:ensure-entity-accessors "node-a")
+    (mcp-lisp:ensure-entity-accessors "node-b")
+    ;; Should not hang or stack overflow
+    (let ((inst (mcp-lisp:generate-instance "node-a")))
+      (is (not (null inst)))
+      (is (stringp (getf inst :id))))))
+
+(test has-many-invariant-on-children
+  "entity-level invariant on has-many accessor works after population"
+  (with-fresh-specs
+    (mcp-lisp:defentity curve ()
+      (id string :required t)
+      (:has-many data-points :of data-point :cardinality (2 6)))
+    (mcp-lisp:defentity data-point ()
+      (id string :required t)
+      (x-value number :required t)
+      (:belongs-to curve))
+    (mcp-lisp:definvariant curve-min-two-points
+      :on curve
+      :check (>= (length (curve-data-points curve)) 2))
+    (mcp-lisp:ensure-entity-accessors "curve")
+    (mcp-lisp:ensure-entity-accessors "data-point")
+    (let ((results (mcp-lisp:run-pbt :trials 50)))
+      (is (= 1 (length results)))
+      (is (string= "curve" (getf (first results) :entity)))
+      (is (= 0 (getf (first results) :failed))))))

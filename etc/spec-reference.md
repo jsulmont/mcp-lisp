@@ -121,7 +121,7 @@ The `:sets` clause takes alternating `(accessor-form value-form)` pairs. Each ac
 - `(list-variants)`, `(describe-variant name)`, `(entity-variants entity-name)`
 - `(list-scenarios)`, `(describe-scenario name)`
 - `(describe-config)`, `(config-fields)`
-- `(validate-specs)` — catches dangling entity references, undefined functions, free variables, non-exhaustive variant handling, invalid scenario bindings, entities with zero invariant coverage, uncovered FK-like fields/belongs-to relations, config keys referenced by scenario invariants but missing from their generators, and rules whose `:sets` touch `:immutable` fields
+- `(validate-specs)` — catches dangling entity references, undefined functions, free variables, non-exhaustive variant handling, invalid scenario bindings, entities with zero invariant coverage, uncovered FK-like fields/belongs-to relations, config keys referenced by scenario invariants but missing from their generators, rules whose `:sets` touch `:immutable` fields, and entity-level invariants that reference has-many relation accessors (only testable via scenario when no `:cardinality` is set)
 - `(suggest-invariants)` — proposes `defscenario` + `definvariant` skeletons for relations and config fields
 - `(compliance-matrix)` — returns requirement-to-invariant mapping from `:reqs` metadata; groups by requirement ID, collects untagged invariants under `:uncategorized`
 - `(clear-specs)` — reset all registries
@@ -181,8 +181,12 @@ Use `(check-invariants "entity-name" instance)` for targeted checking and `(gene
 #### Negative trials
 
 The negative pass generates unconstrained random instances (no constraint extraction, no retry) and checks that each invariant correctly rejects them. Invariants that pass 100% of random data are classified:
+- **Requires scenario-level testing** — invariant uses a has-many relation accessor that `generate-raw-instance` does not populate
 - **Structurally untestable** — uniqueness checks over high-entropy fields (collision probability ~0); safe to ignore
 - **Weak bounds** — comparison operators referencing `(config :key)` where the generation range is too narrow to violate; test with extreme config values
+- **Enforced by schema** — null/presence checks on fields that are all `:required` or typed; random generation always satisfies them
+- **Enforced by field bounds** — numeric comparisons where `:min`/`:max` field constraints prevent violation
+- **Conditional** — `if`/`when`/`cond` with `eq`/`member` tests; needs a `defscenario-negative-generator` to produce targeted violations
 
 #### Invariant-aware generation
 
@@ -198,6 +202,8 @@ The default generator automatically extracts constraints from invariant `:check`
 - **Config references**: `(<= (position-leverage position) (config :max-leverage))` → resolves bound from current config at generation time
 
 Member/enum and boolean fields are generated first, then numeric fields in topologically sorted dependency order (expression deps and conditional deps are both tracked). A retry loop (10 attempts) catches constraints too complex for static extraction.
+
+After fields are generated, **has-many relations with `:cardinality (min max)` are automatically populated**: the generator creates N child instances (N random in [min, max]), wires FK fields back to the parent via `:belongs-to` relations, and stores them under the relation keyword. This means entity-level invariants like `(>= (length (parent-children parent)) 2)` work without a custom generator. Population is depth-limited (default 3) to handle cyclic relations. Has-many relations without `:cardinality` are not populated.
 
 The extractor cannot solve constraints where neither side of a comparison is a single field access (e.g. `(= (+ a b) (* c c))`). Use `defgenerator` for those cases.
 

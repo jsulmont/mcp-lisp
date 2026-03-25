@@ -1056,3 +1056,41 @@
       :check 42)
     (let ((warnings (mcp-lisp:validate-specs)))
       (is (some (lambda (w) (search "constant" w)) warnings)))))
+
+;;; ---------------------------------------------------------------------------
+;;; validate-specs: has-many accessor in entity invariants
+;;; ---------------------------------------------------------------------------
+
+(test validate-specs-has-many-accessor-warning
+  "validate-specs warns when entity-level invariant uses has-many accessor"
+  (with-fresh-specs
+    (mcp-lisp:defentity curve ()
+      (id string :required t)
+      (:has-many data-points :of data-point :cardinality (2 100)))
+    (mcp-lisp:defentity data-point ()
+      (id string :required t)
+      (x-value number :required t))
+    (mcp-lisp:definvariant curve-min-two-points
+      :on curve
+      :check (>= (length (curve-data-points curve)) 2))
+    (let ((warnings (mcp-lisp:validate-specs)))
+      (is (some (lambda (w) (search "has-many accessor" w)) warnings))
+      (is (some (lambda (w) (search "only testable via scenario" w)) warnings)))))
+
+(test validate-specs-has-many-accessor-no-false-positive
+  "validate-specs does not warn about has-many accessor in scenario invariants"
+  (with-fresh-specs
+    (mcp-lisp:defentity team ()
+      (id string :required t)
+      (:has-many members :of player :cardinality (1 5)))
+    (mcp-lisp:defentity player ()
+      (id string :required t)
+      (:belongs-to team))
+    (mcp-lisp:defscenario roster
+      :entities ((team 1 team)
+                 (players (1 5) player)))
+    (mcp-lisp:definvariant has-players
+      :on roster
+      :check (>= (length players) 1))
+    (let ((warnings (mcp-lisp:validate-specs)))
+      (is (notany (lambda (w) (search "has-many accessor" w)) warnings)))))
