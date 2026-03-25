@@ -114,7 +114,7 @@
 ;;; Known keywords for validation at macroexpand time
 ;;; ---------------------------------------------------------------------------
 
-(defparameter +known-field-keys+ '(:required :default :unique :min :max :derived-from :immutable))
+(defparameter +known-field-keys+ '(:required :default :unique :min :max :derived-from :immutable :nullable))
 (defparameter +relation-types+ '(:has-many :has-one :belongs-to))
 
 ;;; ---------------------------------------------------------------------------
@@ -145,9 +145,9 @@ Called automatically by DEFENTITY so accessors exist immediately."
 ;;; ---------------------------------------------------------------------------
 
 (defun parse-entity-slots (slots)
-  "Classify SLOTS into fields, relations, and derived entries.
-Returns (values fields relations derived)."
-  (let (fields relations derived)
+  "Classify SLOTS into fields, relations, derived entries, and constraints.
+Returns (values fields relations derived constraints)."
+  (let (fields relations derived constraints)
     (dolist (slot slots)
       (let ((head (car slot)))
         (cond
@@ -155,6 +155,8 @@ Returns (values fields relations derived)."
            (push slot relations))
           ((eq head :derived)
            (push slot derived))
+          ((eq head :unique-together)
+           (push (cdr slot) constraints))
           (t
            ;; Regular field: (name type &key ...)
            (let ((kwargs (cddr slot)))
@@ -162,7 +164,7 @@ Returns (values fields relations derived)."
                    unless (member k +known-field-keys+)
                      do (error "defentity: unknown field keyword ~S in slot ~S" k slot)))
            (push slot fields)))))
-    (values (nreverse fields) (nreverse relations) (nreverse derived))))
+    (values (nreverse fields) (nreverse relations) (nreverse derived) (nreverse constraints))))
 
 (defmacro defentity (name (&rest supers) &body slots)
   "Define a specification entity. Stores metadata in *entities* — no class generation.
@@ -172,8 +174,9 @@ Returns (values fields relations derived)."
     (email string :required t)
     (role (member :admin :member :guest) :default :member)
     (:has-many orders :of order)
+    (:unique-together email role)
     (:derived display-name (lambda (u) (or (name u) (email u)))))"
-  (multiple-value-bind (fields relations derived)
+  (multiple-value-bind (fields relations derived constraints)
       (parse-entity-slots slots)
     (let ((key (string-downcase (string name))))
       `(progn
@@ -182,7 +185,8 @@ Returns (values fields relations derived)."
                      :supers ',supers
                      :fields ',fields
                      :relations ',relations
-                     :derived ',derived))
+                     :derived ',derived
+                     ,@(when constraints `(:constraints ',constraints))))
          (register-entity-accessors ',name ',fields ',relations)
          ',name))))
 
@@ -494,20 +498,35 @@ Invariants without :reqs are collected under :uncategorized."
       (maphash (lambda (req invs)
                  (push (list :req req :invariants (nreverse invs) :status :covered) result))
                req-map)
-      ;; Include defreq entries (non-invariant requirements)
+      ;; Include defreq entries — merge metadata into existing invariant entries
       (maphash (lambda (key plist)
                  (declare (ignore key))
                  (let* ((id (string (getf plist :id)))
                         (existing (find id result
                                         :key (lambda (e) (getf e :req))
-                                        :test #'string-equal)))
-                   (unless existing
-                     (push (list :req id
-                                 :description (getf plist :description)
-                                 :category (getf plist :category)
-                                 :invariants nil
-                                 :status (getf plist :status))
-                           result))))
+                                        :test #'string-equal))
+                        (defreq-status (getf plist :status)))
+                   (if existing
+                       ;; Merge defreq metadata into the invariant-derived entry
+                       (progn
+                         (when (getf plist :description)
+                           (nconc existing (list :description (getf plist :description))))
+                         (when (getf plist :category)
+                           (nconc existing (list :category (getf plist :category))))
+                         ;; If defreq says :partial or :not-expressible but invariants
+                         ;; exist, the combined status is :partial
+                         (when defreq-status
+                           (setf (getf existing :status)
+                                 (if (and (getf existing :invariants)
+                                          (member defreq-status '(:partial :not-expressible)))
+                                     :partial
+                                     defreq-status))))
+                       (push (list :req id
+                                   :description (getf plist :description)
+                                   :category (getf plist :category)
+                                   :invariants nil
+                                   :status (or defreq-status :not-expressible))
+                             result))))
                *requirements*)
       (setf result (sort result #'string<
                          :key (lambda (e) (let ((r (getf e :req)))
@@ -1202,6 +1221,18 @@ Returns a list of warning strings. Empty list = all clear."
                                                     rkey field-name entity-name)
                                             warnings)))))))
                    *rules*))))
+      ;; Validate :unique-together constraints reference existing fields
+      (maphash (lambda (ekey eplist)
+                 (let ((field-names (mapcar (lambda (f) (string-downcase (symbol-name (first f))))
+                                           (getf eplist :fields))))
+                   (dolist (constraint (getf eplist :constraints))
+                     (dolist (field-sym constraint)
+                       (unless (member (string-downcase (symbol-name field-sym))
+                                       field-names :test #'string=)
+                         (push (format nil "entity ~A: :unique-together references unknown field ~A"
+                                       ekey field-sym)
+                               warnings))))))
+               *entities*)
     (nreverse warnings)))
 
 ;;; ---------------------------------------------------------------------------
@@ -1556,7 +1587,8 @@ before falling back to *PACKAGE*."
                (:min          (setf (gethash "min" ht) v))
                (:max          (setf (gethash "max" ht) v))
                (:derived-from (setf (gethash "derived-from" ht) (form-to-ast v)))
-               (:immutable    (when v (setf (gethash "immutable" ht) t)))))
+               (:immutable    (when v (setf (gethash "immutable" ht) t)))
+               (:nullable     (when v (setf (gethash "nullable" ht) t)))))
     ht))
 
 (defun relation-to-ht (rel-spec)
@@ -1579,13 +1611,21 @@ before falling back to *PACKAGE*."
         "expression" (form-to-ast (third derived-spec))))
 
 (defun entity-to-ht (plist)
-  (dict "name" (string-downcase (symbol-name (getf plist :name)))
-        "supers" (coerce (mapcar (lambda (s) (string-downcase (symbol-name s)))
-                                 (getf plist :supers))
-                         'vector)
-        "fields" (coerce (mapcar #'field-to-ht (getf plist :fields)) 'vector)
-        "relations" (coerce (mapcar #'relation-to-ht (getf plist :relations)) 'vector)
-        "derived" (coerce (mapcar #'derived-to-ht (getf plist :derived)) 'vector)))
+  (let ((ht (dict "name" (string-downcase (symbol-name (getf plist :name)))
+                  "supers" (coerce (mapcar (lambda (s) (string-downcase (symbol-name s)))
+                                           (getf plist :supers))
+                                   'vector)
+                  "fields" (coerce (mapcar #'field-to-ht (getf plist :fields)) 'vector)
+                  "relations" (coerce (mapcar #'relation-to-ht (getf plist :relations)) 'vector)
+                  "derived" (coerce (mapcar #'derived-to-ht (getf plist :derived)) 'vector))))
+    (when (getf plist :constraints)
+      (setf (gethash "constraints" ht)
+            (coerce (mapcar (lambda (c)
+                              (coerce (mapcar (lambda (s) (string-downcase (symbol-name s))) c)
+                                      'vector))
+                            (getf plist :constraints))
+                    'vector)))
+    ht))
 
 (defun binding-to-ast (binding)
   "Convert a rule :let binding form (VAR INIT) to a structured AST object."
@@ -1787,8 +1827,10 @@ Returns a string of (defentity ...), (defrule ...), etc. forms."
                        (supers (getf v :supers))
                        (fields (mapcar #'field-to-form (getf v :fields)))
                        (relations (mapcar #'relation-to-form (getf v :relations)))
-                       (derived (mapcar #'derived-to-form (getf v :derived))))
-                   (emit `(defentity ,name (,@supers) ,@fields ,@relations ,@derived))))
+                       (derived (mapcar #'derived-to-form (getf v :derived)))
+                       (constraints (mapcar (lambda (c) `(:unique-together ,@c))
+                                            (getf v :constraints))))
+                   (emit `(defentity ,name (,@supers) ,@fields ,@relations ,@constraints ,@derived))))
                *entities*)
       ;; Config
       (when *config*

@@ -594,7 +594,7 @@ Returns a list of (fk-col-sql parent-table-sql parent-col-sql) triples."
         (let ((is-pk (string= col-name pk-col)))
           (when is-pk
             (push "PRIMARY KEY" modifiers))
-          (when (and (getf kwargs :required) (not is-pk))
+          (when (and (getf kwargs :required) (not is-pk) (not (getf kwargs :nullable)))
             (push "NOT NULL" modifiers))
           (when (and (getf kwargs :unique) (not is-pk))
             (push "UNIQUE" modifiers)))
@@ -648,6 +648,10 @@ Returns a list of (fk-col-sql parent-table-sql parent-col-sql) triples."
             (push (list (format nil "    ~A ~A" (quote-ident col-name) col-type)
                         vcomment)
                   lines)))))
+    ;; UNIQUE constraints from :unique-together
+    (dolist (constraint (getf entity :constraints))
+      (let ((cols (mapcar (lambda (s) (quote-ident (lisp-to-sql (string s)))) constraint)))
+        (push (list (format nil "    UNIQUE (~{~A~^, ~})" cols) nil) lines)))
     ;; CHECK constraints from invariants
     (let ((comments nil))
       (dolist (entry invariants)

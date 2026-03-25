@@ -671,16 +671,21 @@ with bounds derived from invariant check forms."
              (kwargs (cddr field))
              (default (getf kwargs :default))
              (is-state (member key state-fields)))
-        (if (override-present-p overrides key)
-            (progn (push (override-val overrides key) instance) (push key instance))
-            (if (and is-state default)
-                (progn (push default instance) (push key instance))
-                (progn (push (generate-value ftype) instance) (push key instance))))))
+        (cond
+          ((override-present-p overrides key)
+           (push (override-val overrides key) instance) (push key instance))
+          ((and (getf kwargs :nullable) (< (random 10) 3))
+           (push nil instance) (push key instance))
+          ((and is-state default)
+           (push default instance) (push key instance))
+          (t
+           (push (generate-value ftype) instance) (push key instance)))))
     ;; Phase 2: generate non-member fields in dependency order
     (dolist (field sorted-others)
       (let* ((fname (first field))
              (ftype (second field))
              (key (field-keyword fname))
+             (kwargs (cddr field))
              (fc (field-constraints field))
              (ic (gethash key inv-constraints)))
         (cond
@@ -689,6 +694,11 @@ with bounds derived from invariant check forms."
           ((getf fc :derived-from)
            (push nil instance) (push key instance)
            (push (list key (getf fc :derived-from)) deferred))
+          ((and (getf kwargs :nullable) (< (random 10) 3))
+           (push nil instance) (push key instance))
+          ;; Boolean fields with :default use the default value (like member state fields)
+          ((and (eq ftype 'boolean) (member :default kwargs))
+           (push (getf kwargs :default) instance) (push key instance))
           (t
            (let* ((bounds (resolve-field-bounds key ic fc instance
                                                           (getf entity :name)))

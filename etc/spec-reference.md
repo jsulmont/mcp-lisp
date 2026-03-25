@@ -14,11 +14,13 @@ All macros and functions are available in the `eval_lisp` sandbox with no import
   (:has-many orders :of order)
   (:derived display-name (lambda (u) (or (name u) (email u)))))
 
-;; Field modifiers: :required, :unique, :default, :min, :max, :derived-from, :immutable
+;; Field modifiers: :required, :unique, :default, :min, :max, :derived-from, :immutable, :nullable
 ;; :immutable t — field cannot be changed after initial set (apply-rule rejects,
 ;; validate-specs warns, specs-to-sql emits trigger)
+;; :nullable t — generator produces nil ~30% of the time; suppresses NOT NULL in SQL even if :required
 ;;
-;; Field types: string, number, integer, boolean, (member :a :b ...), (list-of type)
+;; Field types: string, number, integer, boolean, (member :a :b ...), (member 0 1 2 3), (list-of type)
+;; (member ...) works with keywords AND integers
 ;; (list-of number) — ordered list of typed values; generates as Lisp list, maps to JSONB in SQL
 (defentity event ()
   (id string :required t)
@@ -62,6 +64,15 @@ All macros and functions are available in the `eval_lisp` sandbox with no import
 (defentity device ()
   (id string :required t)
   (:has-many group-assignments :of assignment :cardinality (1 15)))
+
+;; Composite unique constraints — multi-column uniqueness
+(defentity assignment ()
+  (id string :required t)
+  (device-id string :required t)
+  (group-id string :required t)
+  (:unique-together device-id group-id))
+;; validate-specs warns if referenced fields don't exist
+;; specs-to-sql emits UNIQUE (device_id, group_id)
 
 ;; Invariants — properties that must always hold
 (definvariant non-negative-balance
@@ -155,9 +166,9 @@ The `:sets` clause takes alternating `(accessor-form value-form)` pairs. Each ac
 - `(list-requirements)` — non-invariant requirements from `defreq`
 - `(list-scenarios)`, `(describe-scenario name)`
 - `(describe-config)`, `(config-fields)`
-- `(validate-specs)` — catches dangling entity references, undefined functions, free variables, non-exhaustive variant handling, invalid scenario bindings, entities with zero invariant coverage, uncovered FK-like fields/belongs-to relations, config keys referenced by scenario invariants but missing from their generators, rules whose `:sets` touch `:immutable` fields, and entity-level invariants that reference has-many relation accessors (only testable via scenario when no `:cardinality` is set)
+- `(validate-specs)` — catches dangling entity references, undefined functions, free variables, non-exhaustive variant handling, invalid scenario bindings, `:unique-together` fields that don't exist, entities with zero invariant coverage, uncovered FK-like fields/belongs-to relations, config keys referenced by scenario invariants but missing from their generators, rules whose `:sets` touch `:immutable` fields, and entity-level invariants that reference has-many relation accessors (only testable via scenario when no `:cardinality` is set)
 - `(suggest-invariants)` — proposes `defscenario` + `definvariant` skeletons for relations and config fields
-- `(compliance-matrix)` — returns requirement-to-invariant mapping from `:reqs` metadata; groups by requirement ID, collects untagged invariants under `:uncategorized`
+- `(compliance-matrix)` — returns requirement-to-invariant mapping from `:reqs` metadata and `defreq` entries; when a requirement has both invariants and a `defreq`, they are merged into a single row with the defreq's description, category, and status (`:partial` when invariants exist but defreq says `:not-expressible`). Collects untagged invariants under `:uncategorized`
 - `(clear-specs)` — reset all registries
 
 ### Spec analysis
@@ -235,7 +246,7 @@ The default generator automatically extracts constraints from invariant `:check`
 - **Disjunctive state patterns**: `(or (and (eq state :idle) (= rate 0)) (and (eq state :charging) (< rate 0)))` → per-state constraints
 - **Config references**: `(<= (position-leverage position) (config :max-leverage))` → resolves bound from current config at generation time
 
-Member/enum and boolean fields are generated first, then numeric fields in topologically sorted dependency order (expression deps and conditional deps are both tracked). **State fields** (member fields used in `:when`/`:ensures` of rules) use their `:default` value instead of random selection — this prevents scenario generators from producing instances in terminal states. Non-state member fields are still random. A retry loop (10 attempts) catches constraints too complex for static extraction.
+Member/enum and boolean fields are generated first, then numeric fields in topologically sorted dependency order (expression deps and conditional deps are both tracked). **State fields** (member fields used in `:when`/`:ensures` of rules) use their `:default` value instead of random selection — this prevents scenario generators from producing instances in terminal states. Non-state member fields are still random. **Boolean fields with `:default`** always generate at their default value (e.g. `(enabled boolean :default t)` always generates `t`). **Nullable fields** (`:nullable t`) generate nil ~30% of the time. A retry loop (10 attempts) catches constraints too complex for static extraction.
 
 After fields are generated, **FK fields from `:belongs-to` relations are automatically populated**: for each `(:belongs-to parent :of parent-entity)`, a `:parent-id` field is generated with a random string value. Overrides are respected. This means custom `defscenario-generator` functions can wire FK fields via `generate-instance` overrides without manual `setf`.
 
