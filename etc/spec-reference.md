@@ -79,11 +79,17 @@ All macros and functions are available in the `eval_lisp` sandbox with no import
   :on account
   :check (>= (account-balance account) 0))
 
-;; :reqs maps invariants to requirement IDs for compliance traceability
+;; :reqs maps invariants and rules to requirement IDs for compliance traceability
 (definvariant non-negative-balance-req
   :on account
   :reqs ("REQ-ACCT-001")
   :check (>= (account-balance account) 0))
+
+;; Rules also support :reqs for tracing state transitions to requirements
+(defrule place-order
+  :when (order :state :draft)
+  :ensures ((eq (order-state order) :placed))
+  :reqs ("REQ-ORD-001"))
 
 ;; Invariants can reference config via (config :key)
 (definvariant leverage-limit
@@ -145,7 +151,7 @@ For requirements that cannot be expressed as `definvariant` (API behavior, autho
   :notes "HTTP-level behavior, not a data property")
 ```
 
-These appear in `(compliance-matrix)` alongside invariant-backed requirements, giving a complete view of requirement coverage.
+These appear in `(compliance-matrix)` alongside invariant-backed and rule-backed requirements, giving a complete view of requirement coverage.
 
 #### `:sets` clause
 
@@ -168,7 +174,7 @@ The `:sets` clause takes alternating `(accessor-form value-form)` pairs. Each ac
 - `(describe-config)`, `(config-fields)`
 - `(validate-specs)` — catches dangling entity references, undefined functions, free variables, non-exhaustive variant handling, invalid scenario bindings, `:unique-together` fields that don't exist, entities with zero invariant coverage, uncovered FK-like fields/belongs-to relations, config keys referenced by scenario invariants but missing from their generators, rules whose `:sets` touch `:immutable` fields, and entity-level invariants that reference has-many relation accessors (only testable via scenario when no `:cardinality` is set)
 - `(suggest-invariants)` — proposes `defscenario` + `definvariant` skeletons for relations and config fields
-- `(compliance-matrix)` — returns requirement-to-invariant mapping from `:reqs` metadata and `defreq` entries; when a requirement has both invariants and a `defreq`, they are merged into a single row with the defreq's description, category, and status (`:partial` when invariants exist but defreq says `:not-expressible`). Collects untagged invariants under `:uncategorized`
+- `(compliance-matrix)` — returns requirement-to-invariant-and-rule mapping from `:reqs` metadata on invariants, rules, and `defreq` entries; when a requirement has both invariants and a `defreq`, they are merged into a single row with the defreq's description, category, and status (`:partial` when invariants exist but defreq says `:not-expressible`). Collects untagged invariants under `:uncategorized`
 - `(clear-specs)` — reset all registries
 
 ### Spec analysis

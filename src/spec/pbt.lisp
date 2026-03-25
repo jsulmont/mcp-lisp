@@ -1097,12 +1097,16 @@ OVERRIDES is a plist mapping binding keywords to pre-built instances."
                   ;; Generate N instances (no parent)
                   (let* ((fk-ov (append ref-ov
                                         (scenario-fk-overrides entity-name result entity-specs)))
+                         (singular (getf espec :singular))
                          (n (if (= emin emax) emin
                                 (+ emin (random (1+ (- emax emin)))))))
                     (let ((instances nil))
                       (dotimes (_i n)
                         (push (generate-instance entity-name fk-ov) instances))
-                      (setf (getf result binding) (nreverse instances)))))))))
+                      (setf (getf result binding)
+                            (if (and singular (= n 1))
+                                (first instances)
+                                (nreverse instances))))))))))
     result))
 
 (defun generate-scenario (scenario-name &optional overrides)

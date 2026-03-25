@@ -469,3 +469,57 @@
       (:unique-together device-id group-id))
     (let ((lisp-src (mcp-lisp:specs-to-lisp)))
       (is (search "unique-together" lisp-src)))))
+
+;;; ---------------------------------------------------------------------------
+;;; Issue 15: Scenario cardinality=1 produces bare plist, not wrapped list
+;;; ---------------------------------------------------------------------------
+
+(test issue-15-scenario-singular-cardinality
+  "Bare cardinality 1 in defscenario produces a single plist, not a list"
+  (with-fresh-specs
+    (mcp-lisp:defentity warehouse ()
+      (id string :required t)
+      (capacity integer :required t :min 1 :max 100))
+    (mcp-lisp:defentity config-entry ()
+      (id string :required t)
+      (value number :required t :min 0 :max 100))
+    (mcp-lisp:defscenario dispatch
+      :entities ((warehouses (1 3) warehouse)
+                 (cfg 1 config-entry)))
+    (let ((instance (mcp-lisp:generate-scenario "dispatch")))
+      (is (keywordp (car (getf instance :cfg))))
+      (is (listp (getf instance :warehouses)))
+      (is (not (keywordp (car (getf instance :warehouses))))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Issue 16: :reqs on defrule for compliance traceability
+;;; ---------------------------------------------------------------------------
+
+(test issue-16-defrule-reqs-stored
+  ":reqs metadata is stored on rules"
+  (with-fresh-specs
+    (mcp-lisp:defentity order ()
+      (id string :required t)
+      (state (member :draft :placed) :default :draft))
+    (mcp-lisp:defrule place-order
+      :when (order :state :draft)
+      :ensures ((eq (order-state order) :placed))
+      :reqs ("REQ-ORD-001"))
+    (let ((rule (mcp-lisp:describe-rule "place-order")))
+      (is (equal '("REQ-ORD-001") (getf rule :reqs))))))
+
+(test issue-16-defrule-reqs-in-compliance-matrix
+  "Rule :reqs appear in compliance-matrix"
+  (with-fresh-specs
+    (mcp-lisp:defentity order ()
+      (id string :required t)
+      (state (member :draft :placed) :default :draft))
+    (mcp-lisp:defrule place-order
+      :when (order :state :draft)
+      :ensures ((eq (order-state order) :placed))
+      :reqs ("REQ-ORD-001"))
+    (let* ((matrix (mcp-lisp:compliance-matrix))
+           (entry (find "REQ-ORD-001" matrix
+                        :key (lambda (e) (getf e :req)) :test #'string=)))
+      (is (not (null entry)))
+      (is (equal '("place-order") (getf entry :rules))))))

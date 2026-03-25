@@ -194,7 +194,7 @@ Returns (values fields relations derived constraints)."
 ;;; defrule
 ;;; ---------------------------------------------------------------------------
 
-(defmacro defrule (name &key when let requires sets ensures)
+(defmacro defrule (name &key when let requires sets ensures reqs)
   "Define a behavioral rule. Metadata-only — nothing is compiled or executed.
 
   (defrule place-order
@@ -203,7 +203,8 @@ Returns (values fields relations derived constraints)."
     :requires ((active-account-p customer)
                (pos (account-balance customer)))
     :sets ((order-placed-at order) (get-universal-time))
-    :ensures ((eq (order-state order) :placed)))"
+    :ensures ((eq (order-state order) :placed))
+    :reqs (\"REQ-ORD-001\"))"
   (let ((key (string-downcase (string name))))
     `(progn
        (setf (gethash ,key *rules*)
@@ -212,7 +213,8 @@ Returns (values fields relations derived constraints)."
                    :let ',let
                    :requires ',requires
                    :sets ',sets
-                   :ensures ',ensures))
+                   :ensures ',ensures
+                   ,@(when reqs `(:reqs ',reqs))))
        ',name)))
 
 ;;; ---------------------------------------------------------------------------
@@ -289,10 +291,11 @@ Optional :reqs maps to requirement IDs for compliance traceability.
 ;;; ---------------------------------------------------------------------------
 
 (defun parse-scenario-cardinality (card)
-  "Parse cardinality spec: N → (N N), (MIN MAX) → (MIN MAX)."
+  "Parse cardinality spec: N → (N N), (MIN MAX) → (MIN MAX).
+Returns (values min max singular-p) where singular-p is T for bare N."
   (if (consp card)
-      (list (first card) (second card))
-      (list card card)))
+      (values (first card) (second card) nil)
+      (values card card t)))
 
 (defmacro defscenario (name &key entities)
   "Define a multi-entity test scenario for cross-entity PBT.
@@ -306,13 +309,15 @@ Optional :reqs maps to requirement IDs for compliance traceability.
         (parsed-entities
           (mapcar (lambda (spec)
                     (destructuring-bind (binding card entity-name &key per refs) spec
-                      (let ((minmax (parse-scenario-cardinality card)))
+                      (multiple-value-bind (cmin cmax singular-p)
+                          (parse-scenario-cardinality card)
                         (let ((result (list :binding (intern (string binding) :keyword)
                                             :entity (string-downcase (string entity-name))
-                                            :min (first minmax)
-                                            :max (second minmax)
+                                            :min cmin
+                                            :max cmax
                                             :per (when per
-                                                   (intern (string per) :keyword)))))
+                                                   (intern (string per) :keyword))
+                                            :singular singular-p)))
                           (when refs
                             (setf (getf result :refs)
                                   (mapcar (lambda (ref)
@@ -482,10 +487,11 @@ field's :default value from the defconfig spec."
 
 (defun compliance-matrix ()
   "Return a requirement-to-invariant mapping from :reqs metadata on invariants
-and :id from defreq entries.
-Each entry is (:req REQ-ID :invariants (inv-name1 ...) :status :covered/:not-expressible).
+and rules, and :id from defreq entries.
+Each entry is (:req REQ-ID :invariants (inv-name1 ...) :rules (rule-name1 ...) :status :covered/:not-expressible).
 Invariants without :reqs are collected under :uncategorized."
   (let ((req-map (make-hash-table :test #'equal))
+        (rule-map (make-hash-table :test #'equal))
         (uncategorized nil))
     (maphash (lambda (key plist)
                (let ((reqs (getf plist :reqs)))
@@ -494,10 +500,28 @@ Invariants without :reqs are collected under :uncategorized."
                        (push key (gethash req req-map)))
                      (push key uncategorized))))
              *invariants*)
+    (maphash (lambda (key plist)
+               (let ((reqs (getf plist :reqs)))
+                 (when reqs
+                   (dolist (req reqs)
+                     (push key (gethash req rule-map))))))
+             *rules*)
     (let ((result nil))
+      ;; Build initial entries from invariant :reqs
       (maphash (lambda (req invs)
                  (push (list :req req :invariants (nreverse invs) :status :covered) result))
                req-map)
+      ;; Merge rule :reqs
+      (maphash (lambda (req rules)
+                 (let ((existing (find req result
+                                       :key (lambda (e) (getf e :req))
+                                       :test #'string-equal)))
+                   (if existing
+                       (nconc existing (list :rules (nreverse rules)))
+                       (push (list :req req :invariants nil
+                                   :rules (nreverse rules) :status :covered)
+                             result))))
+               rule-map)
       ;; Include defreq entries — merge metadata into existing invariant entries
       (maphash (lambda (key plist)
                  (declare (ignore key))
@@ -1685,6 +1709,8 @@ before falling back to *PACKAGE*."
     (when (getf espec :per)
       (setf (gethash "per" ht)
             (string-downcase (symbol-name (getf espec :per)))))
+    (when (getf espec :singular)
+      (setf (gethash "singular" ht) t))
     (when (getf espec :refs)
       (setf (gethash "refs" ht)
             (coerce (mapcar (lambda (ref)
@@ -1854,6 +1880,7 @@ Returns a string of (defentity ...), (defrule ...), etc. forms."
                    (when (getf v :requires) (setf form (append form `(:requires ,(getf v :requires)))))
                    (when (getf v :sets) (setf form (append form `(:sets ,(getf v :sets)))))
                    (when (getf v :ensures) (setf form (append form `(:ensures ,(getf v :ensures)))))
+                   (when (getf v :reqs) (setf form (append form `(:reqs ,(getf v :reqs)))))
                    (emit form)))
                *rules*)
       ;; Invariants (non-scenario)
@@ -1879,7 +1906,10 @@ Returns a string of (defentity ...), (defrule ...), etc. forms."
                                                  (mx (getf e :max))
                                                  (per (getf e :per))
                                                  (refs (getf e :refs)))
-                                             (let ((card (if (= mn mx) mn `(,mn ,mx)))
+                                             (let ((singular (getf e :singular))
+                                                   (card (cond (singular mn)
+                                                               ((= mn mx) `(,mn ,mx))
+                                                               (t `(,mn ,mx))))
                                                    (base `(,binding ,nil ,entity)))
                                                (setf (second base) card)
                                                (when per
@@ -2143,14 +2173,16 @@ Merges with existing specs — call CLEAR-SPECS first for a clean import."
                        :entities
                        (map 'list
                             (lambda (eht)
-                              (let ((per (gethash "per" eht)))
+                              (let ((per (gethash "per" eht))
+                                    (singular (gethash "singular" eht)))
                                 (list :binding (intern (string-upcase (gethash "binding" eht))
                                                        :keyword)
                                       :entity (gethash "entity" eht)
                                       :min (gethash "min" eht)
                                       :max (gethash "max" eht)
                                       :per (when per
-                                             (intern (string-upcase per) :keyword)))))
+                                             (intern (string-upcase per) :keyword))
+                                      :singular singular)))
                             (or (gethash "entities" ht) #())))))
          scenarios)))
     ;; Helpers first — generators/invariants may reference them
