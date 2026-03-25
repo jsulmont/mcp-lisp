@@ -17,6 +17,9 @@ All macros and functions are available in the `eval_lisp` sandbox with no import
 ;; Field modifiers: :required, :unique, :default, :min, :max, :derived-from, :immutable
 ;; :immutable t — field cannot be changed after initial set (apply-rule rejects,
 ;; validate-specs warns, specs-to-sql emits trigger)
+;;
+;; Field types: string, number, integer, boolean, (member :a :b ...), (list-of type)
+;; (list-of number) — ordered list of typed values; generates as Lisp list, maps to JSONB in SQL
 (defentity event ()
   (id string :required t)
   (creation-time number :required t :immutable t)
@@ -104,6 +107,35 @@ All macros and functions are available in the `eval_lisp` sandbox with no import
              (length items)))
 ```
 
+#### Value sets
+
+Named enumerations for use in invariant checks:
+
+```lisp
+;; Define a named value set
+(defvalueset valid-response-codes (1 2 3 4 5 6 7 8 9 10 11 13 14 252 253 254))
+
+;; Use in-set in invariant checks
+(definvariant valid-response-status
+  :on response
+  :check (in-set 'valid-response-codes (response-status response)))
+```
+
+`in-set` translates to SQL `IN (...)` in `specs-to-sql`.
+
+#### Non-invariant requirements
+
+For requirements that cannot be expressed as `definvariant` (API behavior, authorization, performance, operational procedures):
+
+```lisp
+(defreq "REQ-API-001" "Return 404 for unauthorized access"
+  :category :api            ;; :api, :authorization, :operational, :performance, or custom
+  :status :not-expressible  ;; :not-expressible, :partial
+  :notes "HTTP-level behavior, not a data property")
+```
+
+These appear in `(compliance-matrix)` alongside invariant-backed requirements, giving a complete view of requirement coverage.
+
 #### `:sets` clause
 
 The `:sets` clause takes alternating `(accessor-form value-form)` pairs. Each accessor identifies the field to set; the value-form is evaluated with the entity instance and `:let` bindings in scope. Use `:sets` when a state transition must update non-state fields (e.g. setting `enabled=nil` on soft-delete, or recording a timestamp). Without `:sets`, `random-walk` will trigger invariant violations for any rule that changes state without updating correlated fields.
@@ -119,6 +151,8 @@ The `:sets` clause takes alternating `(accessor-form value-form)` pairs. Each ac
 - `(list-rules)`, `(describe-rule name)`
 - `(list-invariants)`, `(describe-invariant name)`
 - `(list-variants)`, `(describe-variant name)`, `(entity-variants entity-name)`
+- `(list-valuesets)` — named value sets from `defvalueset`
+- `(list-requirements)` — non-invariant requirements from `defreq`
 - `(list-scenarios)`, `(describe-scenario name)`
 - `(describe-config)`, `(config-fields)`
 - `(validate-specs)` — catches dangling entity references, undefined functions, free variables, non-exhaustive variant handling, invalid scenario bindings, entities with zero invariant coverage, uncovered FK-like fields/belongs-to relations, config keys referenced by scenario invariants but missing from their generators, rules whose `:sets` touch `:immutable` fields, and entity-level invariants that reference has-many relation accessors (only testable via scenario when no `:cardinality` is set)
@@ -201,9 +235,11 @@ The default generator automatically extracts constraints from invariant `:check`
 - **Disjunctive state patterns**: `(or (and (eq state :idle) (= rate 0)) (and (eq state :charging) (< rate 0)))` → per-state constraints
 - **Config references**: `(<= (position-leverage position) (config :max-leverage))` → resolves bound from current config at generation time
 
-Member/enum and boolean fields are generated first, then numeric fields in topologically sorted dependency order (expression deps and conditional deps are both tracked). A retry loop (10 attempts) catches constraints too complex for static extraction.
+Member/enum and boolean fields are generated first, then numeric fields in topologically sorted dependency order (expression deps and conditional deps are both tracked). **State fields** (member fields used in `:when`/`:ensures` of rules) use their `:default` value instead of random selection — this prevents scenario generators from producing instances in terminal states. Non-state member fields are still random. A retry loop (10 attempts) catches constraints too complex for static extraction.
 
-After fields are generated, **has-many relations with `:cardinality (min max)` are automatically populated**: the generator creates N child instances (N random in [min, max]), wires FK fields back to the parent via `:belongs-to` relations, and stores them under the relation keyword. This means entity-level invariants like `(>= (length (parent-children parent)) 2)` work without a custom generator. Population is depth-limited (default 3) to handle cyclic relations. Has-many relations without `:cardinality` are not populated.
+After fields are generated, **FK fields from `:belongs-to` relations are automatically populated**: for each `(:belongs-to parent :of parent-entity)`, a `:parent-id` field is generated with a random string value. Overrides are respected. This means custom `defscenario-generator` functions can wire FK fields via `generate-instance` overrides without manual `setf`.
+
+**Has-many relations with `:cardinality (min max)` are automatically populated**: the generator creates N child instances (N random in [min, max]), wires FK fields back to the parent via `:belongs-to` relations, and stores them under the relation keyword. This means entity-level invariants like `(>= (length (parent-children parent)) 2)` work without a custom generator. Population is depth-limited (default 3) to handle cyclic relations. Has-many relations without `:cardinality` are not populated.
 
 The extractor cannot solve constraints where neither side of a comparison is a single field access (e.g. `(= (+ a b) (* c c))`). Use `defgenerator` for those cases.
 
@@ -289,6 +325,33 @@ Usage in invariants:
   :on task
   :check (interval-before-p (task-start task) (task-duration task) (task-deadline task)))
 ```
+
+### Temporal duration helpers
+
+For retention policies, inactivity thresholds, and timeout requirements:
+
+```lisp
+;; Time elapsed between timestamp and now
+(elapsed-since timestamp now)  ; → (- now timestamp)
+
+;; Has at least min-duration elapsed?
+(duration-at-least-p timestamp now min-duration)  ; → (>= (- now timestamp) min-duration)
+
+;; Is now still within retention-duration of event-time?
+(within-retention-period-p event-time retention-duration now)  ; → (< (- now event-time) retention-duration)
+```
+
+Usage in invariants:
+```lisp
+(definvariant event-retained
+  :on event
+  :check (within-retention-period-p
+           (event-created-at event)
+           (event-retention-hours event)
+           (event-checked-at event)))
+```
+
+All three translate to PostgreSQL arithmetic in `specs-to-sql`.
 
 ### State machine analysis
 

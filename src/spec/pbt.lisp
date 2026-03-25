@@ -68,7 +68,10 @@
            #:haversine-distance-nm
            #:intervals-overlap-p
            #:interval-contains-p
-           #:interval-before-p))
+           #:interval-before-p
+           #:elapsed-since
+           #:duration-at-least-p
+           #:within-retention-period-p))
 
 (in-package #:mcp-lisp/src/spec/pbt)
 
@@ -114,6 +117,14 @@ Optional MIN and MAX constrain numeric types."
     ((and (consp type-spec) (eq (car type-spec) 'member))
      (let ((choices (cdr type-spec)))
        (nth (random (length choices)) choices)))
+    ((and (consp type-spec)
+          (symbolp (car type-spec))
+          (string-equal (symbol-name (car type-spec)) "LIST-OF"))
+     (let* ((inner-type (second type-spec))
+            (lo (max 0 (or (and min (ceiling min)) 1)))
+            (hi (or (and max (floor max)) 5))
+            (n (if (>= lo hi) lo (+ lo (random (1+ (- hi lo)))))))
+       (loop repeat n collect (generate-value inner-type))))
     ((eq type-spec 'boolean)
      (zerop (random 2)))
     (t nil)))
@@ -647,16 +658,24 @@ with bounds derived from invariant check forms."
          (other-fields (remove-if (lambda (f) (member-type-p (second f))) fields))
          ;; Sort non-member fields by dependency order
          (sorted-others (toposort-fields other-fields inv-constraints))
+         ;; Detect state fields so we can use :default for them
+         (state-fields (detect-state-fields entity-name))
          (instance nil)
          (deferred nil))
     ;; Phase 1: generate member/enum fields
+    ;; State fields (used in :when/:ensures of rules) use :default if available
     (dolist (field member-fields)
       (let* ((fname (first field))
              (ftype (second field))
-             (key (field-keyword fname)))
+             (key (field-keyword fname))
+             (kwargs (cddr field))
+             (default (getf kwargs :default))
+             (is-state (member key state-fields)))
         (if (override-present-p overrides key)
             (progn (push (override-val overrides key) instance) (push key instance))
-            (progn (push (generate-value ftype) instance) (push key instance)))))
+            (if (and is-state default)
+                (progn (push default instance) (push key instance))
+                (progn (push (generate-value ftype) instance) (push key instance))))))
     ;; Phase 2: generate non-member fields in dependency order
     (dolist (field sorted-others)
       (let* ((fname (first field))
@@ -683,6 +702,22 @@ with bounds derived from invariant check forms."
                        (generate-value ftype :min eff-min :max eff-max))
                    instance)
              (push key instance))))))
+    ;; Phase 2.5: generate FK fields from belongs-to relations
+    (let ((relations (getf entity :relations)))
+      (dolist (rel relations)
+        (when (eq (first rel) :belongs-to)
+          (let* ((rel-name (second rel))
+                 (fk-kw (intern (format nil "~A-ID"
+                                        (string-upcase (symbol-name rel-name)))
+                                :keyword)))
+            (cond
+              ((override-present-p overrides fk-kw)
+               (unless (getf instance fk-kw)
+                 (push (override-val overrides fk-kw) instance)
+                 (push fk-kw instance)))
+              ((not (getf instance fk-kw))
+               (push (generate-value 'string) instance)
+               (push fk-kw instance)))))))
     ;; Phase 3: compute derived fields
     (when deferred
       (ensure-entity-accessors entity-name)
@@ -1118,6 +1153,7 @@ of the scenario invariants reject it, the negative generator is flagged as broke
 All fields are independently random — used for negative testing."
   (let* ((entity (describe-entity entity-name))
          (fields (getf entity :fields))
+         (relations (getf entity :relations))
          (instance nil))
     (dolist (field fields)
       (let* ((fname (first field))
@@ -1127,6 +1163,14 @@ All fields are independently random — used for negative testing."
         (push (generate-value ftype :min (getf fc :min) :max (getf fc :max))
               instance)
         (push key instance)))
+    (dolist (rel relations)
+      (when (eq (first rel) :belongs-to)
+        (let ((fk-kw (intern (format nil "~A-ID"
+                                     (string-upcase (symbol-name (second rel))))
+                             :keyword)))
+          (unless (getf instance fk-kw)
+            (push (generate-value 'string) instance)
+            (push fk-kw instance)))))
     instance))
 
 (defun classify-zero-rejection (check-form &optional entity-name)
@@ -1172,7 +1216,30 @@ field-aware analysis (required/min/max, has-many accessors)."
                          (unless (or required has-min has-max is-member)
                            (setf all-bounded nil)
                            (return))))
-                     all-bounded)))))
+                     all-bounded))))
+             (referenced-fields-bounded-p ()
+               (when entity-name
+                 (let ((fields (entity-fields entity-name))
+                       (entity-sym (intern (string-upcase (string entity-name)))))
+                   (labels ((collect-refs (form)
+                              (cond
+                                ((getf-field-p form entity-sym)
+                                 (list (getf-field-p form entity-sym)))
+                                ((consp form)
+                                 (mapcan #'collect-refs (cdr form)))
+                                (t nil))))
+                     (let ((refs (remove-duplicates (collect-refs check-form))))
+                       (when refs
+                         (every (lambda (ref-kw)
+                                  (let ((field (find ref-kw fields
+                                                     :key (lambda (f)
+                                                            (field-keyword (first f))))))
+                                    (when field
+                                      (let ((ftype (second field))
+                                            (kwargs (cddr field)))
+                                        (or (getf kwargs :min) (getf kwargs :max)
+                                            (member-type-p ftype))))))
+                                refs))))))))
       (cond
         ((has-many-accessor-p)
          "requires scenario-level testing — uses has-many accessor")
@@ -1186,7 +1253,7 @@ field-aware analysis (required/min/max, has-many accessors)."
          "enforced by schema — all fields required or typed")
         ((and (uses-p '("<" ">" "<=" ">=" "PLUSP") check-form)
               (not (uses-config-p check-form))
-              (all-fields-bounded-p))
+              (or (all-fields-bounded-p) (referenced-fields-bounded-p)))
          "enforced by field bounds — :min/:max or :required constraints")
         ((and (uses-p '("IF" "WHEN" "COND") check-form)
               (uses-p '("EQ" "MEMBER") check-form))
@@ -1800,6 +1867,19 @@ Returns a list of result plists, one per invariant:
 (defun interval-before-p (start1 dur1 start2)
   "Return T if interval [start1, start1+dur1) ends at or before START2."
   (<= (+ start1 dur1) start2))
+
+(defun elapsed-since (timestamp now)
+  "Return the elapsed time between TIMESTAMP and NOW."
+  (- now timestamp))
+
+(defun duration-at-least-p (timestamp now min-duration)
+  "Return T if at least MIN-DURATION has elapsed between TIMESTAMP and NOW."
+  (>= (- now timestamp) min-duration))
+
+(defun within-retention-period-p (event-time retention-duration now)
+  "Return T if NOW is still within RETENTION-DURATION of EVENT-TIME.
+I.e. (- now event-time) < retention-duration."
+  (< (- now event-time) retention-duration))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Rule execution

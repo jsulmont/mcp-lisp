@@ -49,10 +49,17 @@
            #:*compiled-fn-cache*
            #:*helpers*
            #:*helper-sources*
+           #:*valuesets*
+           #:*requirements*
            #:defscenario
            #:defhelper
+           #:defvalueset
+           #:defreq
+           #:in-set
            #:list-scenarios
            #:describe-scenario
+           #:list-valuesets
+           #:list-requirements
            ;; Utilities
            #:register-entity-accessors
            #:clear-specs
@@ -98,6 +105,10 @@
 (defvar *compiled-fn-cache* (make-hash-table :test #'equal))
 (defvar *helpers* (make-hash-table :test #'equal))
 (defvar *helper-sources* (make-hash-table :test #'equal))
+(defvar *valuesets* (make-hash-table :test #'equal)
+  "Named value sets for use in invariant checks via IN-SET.")
+(defvar *requirements* (make-hash-table :test #'equal)
+  "Non-invariant requirements tracked for compliance matrices.")
 
 ;;; ---------------------------------------------------------------------------
 ;;; Known keywords for validation at macroexpand time
@@ -333,6 +344,55 @@ Use for utility functions referenced by invariant check forms.
        ',name)))
 
 ;;; ---------------------------------------------------------------------------
+;;; defvalueset — named value enumerations
+;;; ---------------------------------------------------------------------------
+
+(defmacro defvalueset (name values)
+  "Define a named set of values for use in invariant checks via IN-SET.
+
+  (defvalueset valid-response-codes (1 2 3 4 5 6 7 8 9 10 11 13 14 252 253 254))"
+  (let ((key (string-downcase (string name))))
+    `(progn
+       (setf (gethash ,key *valuesets*) ',values)
+       ',name)))
+
+(defun in-set (set-name value)
+  "Check if VALUE is a member of the named value set SET-NAME.
+SET-NAME is a symbol or string naming a set defined by DEFVALUESET."
+  (let ((values (gethash (string-downcase (string set-name)) *valuesets*)))
+    (and values (member value values :test #'equal) t)))
+
+(defun list-valuesets ()
+  "Return a list of registered valueset name strings."
+  (loop for k being the hash-keys of *valuesets* collect k))
+
+;;; ---------------------------------------------------------------------------
+;;; defreq — non-invariant requirements for compliance tracking
+;;; ---------------------------------------------------------------------------
+
+(defmacro defreq (id description &key category status notes)
+  "Register a requirement that cannot be expressed as a definvariant.
+Used for API-level, authorization, operational, or performance requirements.
+
+  (defreq \"REQ-API-001\" \"Return 404 for unauthorized access\"
+    :category :api
+    :status :not-expressible
+    :notes \"HTTP-level behavior, not data property\")"
+  (let ((key (string-downcase (string id))))
+    `(progn
+       (setf (gethash ,key *requirements*)
+             (list :id ',id
+                   :description ,description
+                   :category ,(or category :uncategorized)
+                   :status ,(or status :not-expressible)
+                   :notes ,notes))
+       ',id)))
+
+(defun list-requirements ()
+  "Return a list of registered requirement ID strings."
+  (loop for k being the hash-keys of *requirements* collect k))
+
+;;; ---------------------------------------------------------------------------
 ;;; Config accessor
 ;;; ---------------------------------------------------------------------------
 
@@ -417,8 +477,9 @@ field's :default value from the defconfig spec."
   (gethash (string-downcase (string name)) *scenarios*))
 
 (defun compliance-matrix ()
-  "Return a requirement-to-invariant mapping from :reqs metadata on invariants.
-Each entry is (:req REQ-ID :invariants (inv-name1 inv-name2 ...)).
+  "Return a requirement-to-invariant mapping from :reqs metadata on invariants
+and :id from defreq entries.
+Each entry is (:req REQ-ID :invariants (inv-name1 ...) :status :covered/:not-expressible).
 Invariants without :reqs are collected under :uncategorized."
   (let ((req-map (make-hash-table :test #'equal))
         (uncategorized nil))
@@ -431,9 +492,28 @@ Invariants without :reqs are collected under :uncategorized."
              *invariants*)
     (let ((result nil))
       (maphash (lambda (req invs)
-                 (push (list :req req :invariants (nreverse invs)) result))
+                 (push (list :req req :invariants (nreverse invs) :status :covered) result))
                req-map)
-      (setf result (sort result #'string< :key (lambda (e) (getf e :req))))
+      ;; Include defreq entries (non-invariant requirements)
+      (maphash (lambda (key plist)
+                 (declare (ignore key))
+                 (let* ((id (string (getf plist :id)))
+                        (existing (find id result
+                                        :key (lambda (e) (getf e :req))
+                                        :test #'string-equal)))
+                   (unless existing
+                     (push (list :req id
+                                 :description (getf plist :description)
+                                 :category (getf plist :category)
+                                 :invariants nil
+                                 :status (getf plist :status))
+                           result))))
+               *requirements*)
+      (setf result (sort result #'string<
+                         :key (lambda (e) (let ((r (getf e :req)))
+                                            (if (keywordp r)
+                                                "~~~" ; sort uncategorized last
+                                                r)))))
       (when uncategorized
         (setf result (append result
                              (list (list :req :uncategorized
@@ -459,6 +539,8 @@ Invariants without :reqs are collected under :uncategorized."
   (clrhash *scenario-negative-generator-sources*)
   (clrhash *helpers*)
   (clrhash *helper-sources*)
+  (clrhash *valuesets*)
+  (clrhash *requirements*)
   (setf *config* nil)
   (setf *current-config* nil)
   (clrhash *compiled-fn-cache*)
@@ -999,13 +1081,29 @@ Returns a list of warning strings. Empty list = all clear."
                                      (and (> (length fname) (length suffix))
                                           (alexandria:ends-with-subseq suffix fname)))
                                    fk-patterns)
-                         ;; Check if any scenario invariant mentions an accessor for this field
-                         (let ((accessor (format nil "~A-~A" ekey fname)))
-                           (unless (or (member accessor scenario-inv-symbols :test #'string=)
-                                       (member fname scenario-inv-symbols :test #'string=))
-                             (push (format nil "entity ~A: FK-like field ~A has no scenario invariant coverage"
-                                           ekey fname)
-                                   warnings)))))))
+                         ;; Only flag if the prefix before the suffix matches a known entity
+                         (let* ((matching-suffix
+                                  (find-if (lambda (suffix)
+                                             (and (> (length fname) (length suffix))
+                                                  (alexandria:ends-with-subseq suffix fname)))
+                                           fk-patterns))
+                                (prefix (when matching-suffix
+                                          (subseq fname 0 (- (length fname) (length matching-suffix)))))
+                                (accessor (format nil "~A-~A" ekey fname)))
+                           (when (and prefix
+                                      (or (member prefix entity-keys :test #'string=)
+                                          ;; Also match belongs-to relations on this entity
+                                          (some (lambda (rel)
+                                                  (and (eq (first rel) :belongs-to)
+                                                       (string= prefix
+                                                                (string-downcase
+                                                                  (symbol-name (second rel))))))
+                                                (getf eplist :relations))))
+                             (unless (or (member accessor scenario-inv-symbols :test #'string=)
+                                         (member fname scenario-inv-symbols :test #'string=))
+                               (push (format nil "entity ~A: FK-like field ~A has no scenario invariant coverage"
+                                             ekey fname)
+                                     warnings))))))))
                  *entities*))
       ;; Detect belongs-to relations not covered by scenario invariants
       (maphash (lambda (ekey eplist)
@@ -1661,6 +1759,27 @@ Returns a string of (defentity ...), (defrule ...), etc. forms."
                  *helper-sources*)
         (dolist (form (nreverse helper-forms))
           (emit form)))
+      ;; Valuesets
+      (maphash (lambda (k _v)
+                 (declare (ignore _v))
+                 (let ((name (intern (string-upcase k)))
+                       (values (gethash k *valuesets*)))
+                   (emit `(defvalueset ,name ,values))))
+               *valuesets*)
+      ;; Requirements
+      (maphash (lambda (k _v)
+                 (declare (ignore _v))
+                 (let ((plist (gethash k *requirements*)))
+                   (let ((form `(defreq ,(string (getf plist :id))
+                                  ,(getf plist :description))))
+                     (when (getf plist :category)
+                       (setf form (append form `(:category ,(getf plist :category)))))
+                     (when (getf plist :status)
+                       (setf form (append form `(:status ,(getf plist :status)))))
+                     (when (getf plist :notes)
+                       (setf form (append form `(:notes ,(getf plist :notes)))))
+                     (emit form))))
+               *requirements*)
       ;; Entities
       (maphash (lambda (k v)
                  (declare (ignore k))

@@ -204,8 +204,13 @@
                 #:*scenario-generators*
                 #:defscenario
                 #:defhelper
+                #:defvalueset
+                #:defreq
+                #:in-set
                 #:list-scenarios
                 #:describe-scenario
+                #:list-valuesets
+                #:list-requirements
                 #:clear-specs
                 #:validate-specs
                 #:suggest-invariants
@@ -258,7 +263,10 @@
                 #:haversine-distance-nm
                 #:intervals-overlap-p
                 #:interval-contains-p
-                #:interval-before-p)
+                #:interval-before-p
+                #:elapsed-since
+                #:duration-at-least-p
+                #:within-retention-period-p)
   ;; Spec analysis
   (:import-from #:mcp-lisp/src/spec/analysis
                 #:invariant-coverage
@@ -447,8 +455,13 @@
    #:*scenario-generators*
    #:defscenario
    #:defhelper
+   #:defvalueset
+   #:defreq
+   #:in-set
    #:list-scenarios
    #:describe-scenario
+   #:list-valuesets
+   #:list-requirements
    #:clear-specs
    #:validate-specs
    #:compliance-matrix
@@ -499,6 +512,9 @@
    #:intervals-overlap-p
    #:interval-contains-p
    #:interval-before-p
+   #:elapsed-since
+   #:duration-at-least-p
+   #:within-retention-period-p
    ;; Spec analysis
    #:invariant-coverage
    #:invariant-coverage-summary

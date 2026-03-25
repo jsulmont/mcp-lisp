@@ -130,7 +130,7 @@ When file_path is provided, the full untruncated result is written to that file.
                                (push (eval form) results))))))
         (error (e)
           (setf error-msg (princ-to-string e)))))
-    (let* ((last-result (car (last results)))
+    (let* ((last-result (car results))
            (result-str (when last-result (result-to-string last-result)))
            (max-len 4000))
       (if (and file-path (plusp (length file-path)))
