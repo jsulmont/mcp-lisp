@@ -65,7 +65,10 @@
            #:random-walk
            #:all-pairs-check
            #:consecutive-pairs-check
-           #:haversine-distance-nm))
+           #:haversine-distance-nm
+           #:intervals-overlap-p
+           #:interval-contains-p
+           #:interval-before-p))
 
 (in-package #:mcp-lisp/src/spec/pbt)
 
@@ -932,10 +935,28 @@ SCENARIO-ENTITIES is the list of entity specs (to map entity names to bindings).
                 (setf fk-overrides (list* fk-kw parent-id fk-overrides))))))))
     fk-overrides))
 
+(defun refs-overrides (refs result)
+  "Compute FK override plist from :refs declarations and already-generated RESULT."
+  (let ((overrides nil))
+    (dolist (ref refs)
+      (let* ((local-field (getf ref :local-field))
+             (from-binding (getf ref :from))
+             (remote-field (getf ref :field))
+             (source-val (getf result from-binding)))
+        (when source-val
+          (let* ((sources (if (and (listp source-val) (not (keywordp (car source-val))))
+                              source-val (list source-val)))
+                 (picked (nth (random (length sources)) sources))
+                 (val (getf picked remote-field)))
+            (when val
+              (setf overrides (list* local-field val overrides)))))))
+    overrides))
+
 (defun default-generate-scenario (scenario-name &optional overrides)
   "Generate a scenario instance: a plist mapping binding keywords to entity instances.
 Iterates entity specs in declaration order, respecting cardinality and :per relations.
 Auto-wires FK fields from :belongs-to relations to parent entities in the scenario.
+:refs declarations explicitly wire FK fields from referenced bindings.
 OVERRIDES is a plist mapping binding keywords to pre-built instances."
   (let* ((scenario (describe-scenario scenario-name))
          (entity-specs (getf scenario :entities))
@@ -946,41 +967,45 @@ OVERRIDES is a plist mapping binding keywords to pre-built instances."
              (emin (getf espec :min))
              (emax (getf espec :max))
              (per (getf espec :per))
+             (refs (getf espec :refs))
              (override (getf overrides binding)))
         (if override
             (setf (getf result binding) override)
-            (if per
-                ;; Generate N instances per parent
-                (let ((parents (let ((p (getf result per)))
-                                 (if (and (listp p) (not (keywordp (car p))))
-                                     p (list p))))
-                      (all-instances nil))
-                  (dolist (parent parents)
-                    (let* ((fk-ov (scenario-fk-overrides entity-name result entity-specs))
-                           (parent-id (getf parent :id))
-                           (per-entity (loop for es in entity-specs
-                                             when (eq (getf es :binding) per)
-                                               return (getf es :entity)))
-                           (per-fk-kw (when per-entity
-                                        (intern (format nil "~A-ID"
-                                                         (string-upcase per-entity))
-                                                :keyword)))
-                           (full-ov (if (and per-fk-kw parent-id)
-                                        (list* per-fk-kw parent-id fk-ov)
-                                        fk-ov))
-                           (n (if (= emin emax) emin
-                                  (+ emin (random (1+ (- emax emin)))))))
+            (let ((ref-ov (when refs (refs-overrides refs result))))
+              (if per
+                  ;; Generate N instances per parent
+                  (let ((parents (let ((p (getf result per)))
+                                   (if (and (listp p) (not (keywordp (car p))))
+                                       p (list p))))
+                        (all-instances nil))
+                    (dolist (parent parents)
+                      (let* ((fk-ov (scenario-fk-overrides entity-name result entity-specs))
+                             (parent-id (getf parent :id))
+                             (per-entity (loop for es in entity-specs
+                                               when (eq (getf es :binding) per)
+                                                 return (getf es :entity)))
+                             (per-fk-kw (when per-entity
+                                          (intern (format nil "~A-ID"
+                                                           (string-upcase per-entity))
+                                                  :keyword)))
+                             (full-ov (append ref-ov
+                                              (if (and per-fk-kw parent-id)
+                                                  (list* per-fk-kw parent-id fk-ov)
+                                                  fk-ov)))
+                             (n (if (= emin emax) emin
+                                    (+ emin (random (1+ (- emax emin)))))))
+                        (dotimes (_i n)
+                          (push (generate-instance entity-name full-ov) all-instances))))
+                    (setf (getf result binding) (nreverse all-instances)))
+                  ;; Generate N instances (no parent)
+                  (let* ((fk-ov (append ref-ov
+                                        (scenario-fk-overrides entity-name result entity-specs)))
+                         (n (if (= emin emax) emin
+                                (+ emin (random (1+ (- emax emin)))))))
+                    (let ((instances nil))
                       (dotimes (_i n)
-                        (push (generate-instance entity-name full-ov) all-instances))))
-                  (setf (getf result binding) (nreverse all-instances)))
-                ;; Generate N instances (no parent)
-                (let* ((fk-ov (scenario-fk-overrides entity-name result entity-specs))
-                       (n (if (= emin emax) emin
-                              (+ emin (random (1+ (- emax emin)))))))
-                  (let ((instances nil))
-                    (dotimes (_i n)
-                      (push (generate-instance entity-name fk-ov) instances))
-                    (setf (getf result binding) (nreverse instances))))))))
+                        (push (generate-instance entity-name fk-ov) instances))
+                      (setf (getf result binding) (nreverse instances)))))))))
     result))
 
 (defun generate-scenario (scenario-name &optional overrides)
@@ -1665,6 +1690,24 @@ Returns a list of result plists, one per invariant:
       (* 3440.065d0 c))))
 
 ;;; ---------------------------------------------------------------------------
+;;; Temporal interval helpers
+;;; ---------------------------------------------------------------------------
+
+(defun intervals-overlap-p (start1 dur1 start2 dur2)
+  "Return T if two intervals [start1, start1+dur1) and [start2, start2+dur2) overlap."
+  (and (< start1 (+ start2 dur2))
+       (< start2 (+ start1 dur1))))
+
+(defun interval-contains-p (outer-start outer-dur inner-start inner-dur)
+  "Return T if [inner-start, inner-start+inner-dur) is entirely within [outer-start, outer-start+outer-dur)."
+  (and (<= outer-start inner-start)
+       (<= (+ inner-start inner-dur) (+ outer-start outer-dur))))
+
+(defun interval-before-p (start1 dur1 start2)
+  "Return T if interval [start1, start1+dur1) ends at or before START2."
+  (<= (+ start1 dur1) start2))
+
+;;; ---------------------------------------------------------------------------
 ;;; Rule execution
 ;;; ---------------------------------------------------------------------------
 
@@ -1806,7 +1849,19 @@ Returns (values new-instance applied-p rejection-reason).
             (setf (getf new (car target)) (cdr target)))
           (dolist (assignment field-assignments)
             (setf (getf new (car assignment)) (cdr assignment)))
-          ;; 5. Apply :sets — evaluate each (accessor-form value-form) pair
+          ;; 5. Check immutable fields before applying :sets
+          (let ((immutable-keys nil))
+            (dolist (field (getf (describe-entity entity-name) :fields))
+              (when (getf (cddr field) :immutable)
+                (push (field-keyword (first field)) immutable-keys)))
+            (when immutable-keys
+              (loop for (accessor-form _vf) on sets-clause by #'cddr
+                    for fkw = (getf-field-p accessor-form entity-sym)
+                    when (and fkw (member fkw immutable-keys)
+                              (getf instance fkw))
+                      do (return-from apply-rule
+                           (values instance nil (list :immutable-violation fkw))))))
+          ;; 6. Apply :sets — evaluate each (accessor-form value-form) pair
           (loop for (accessor-form value-form) on sets-clause by #'cddr
                 do (handler-case
                        (let* ((params (cons entity-sym (reverse let-vars)))

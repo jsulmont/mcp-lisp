@@ -14,6 +14,14 @@ All macros and functions are available in the `eval_lisp` sandbox with no import
   (:has-many orders :of order)
   (:derived display-name (lambda (u) (or (name u) (email u)))))
 
+;; Field modifiers: :required, :unique, :default, :min, :max, :derived-from, :immutable
+;; :immutable t — field cannot be changed after initial set (apply-rule rejects,
+;; validate-specs warns, specs-to-sql emits trigger)
+(defentity event ()
+  (id string :required t)
+  (creation-time number :required t :immutable t)
+  (start-time number :required t :immutable t))
+
 ;; Variants — discriminated unions (sum types)
 (defentity node ()
   (id string :required t)
@@ -46,9 +54,21 @@ All macros and functions are available in the `eval_lisp` sandbox with no import
   :sets ((server-current-term server) (+ (server-current-term server) 1))
   :ensures ((eq (server-state server) :candidate)))
 
+;; Relations support :cardinality on has-many for bounded counts
+;; specs-to-sql emits a trigger enforcing the max on the child table
+(defentity device ()
+  (id string :required t)
+  (:has-many group-assignments :of assignment :cardinality (1 15)))
+
 ;; Invariants — properties that must always hold
 (definvariant non-negative-balance
   :on account
+  :check (>= (account-balance account) 0))
+
+;; :reqs maps invariants to requirement IDs for compliance traceability
+(definvariant non-negative-balance-req
+  :on account
+  :reqs ("REQ-ACCT-001")
   :check (>= (account-balance account) 0))
 
 ;; Invariants can reference config via (config :key)
@@ -67,6 +87,15 @@ All macros and functions are available in the `eval_lisp` sandbox with no import
   :entities ((warehouses (1 3) warehouse)
              (orders     (5 20) order)
              (items      (1 5) line-item :per orders)))
+
+;; :refs on bindings auto-wires FK fields from referenced bindings,
+;; eliminating the need for a custom generator in join-table scenarios
+(defscenario group-membership
+  :entities ((devices     (1 5) end-device)
+             (groups      (1 3) dpd-group)
+             (assignments (1 15) device-group-assignment
+               :refs ((device-id :from devices :field id)
+                      (group-id  :from groups  :field id)))))
 
 ;; Scenario invariants — binding names become variables in the check form
 (definvariant total-items-match
@@ -92,8 +121,9 @@ The `:sets` clause takes alternating `(accessor-form value-form)` pairs. Each ac
 - `(list-variants)`, `(describe-variant name)`, `(entity-variants entity-name)`
 - `(list-scenarios)`, `(describe-scenario name)`
 - `(describe-config)`, `(config-fields)`
-- `(validate-specs)` — catches dangling entity references, undefined functions, free variables, non-exhaustive variant handling, invalid scenario bindings, entities with zero invariant coverage, uncovered FK-like fields/belongs-to relations, and config keys referenced by scenario invariants but missing from their generators
+- `(validate-specs)` — catches dangling entity references, undefined functions, free variables, non-exhaustive variant handling, invalid scenario bindings, entities with zero invariant coverage, uncovered FK-like fields/belongs-to relations, config keys referenced by scenario invariants but missing from their generators, and rules whose `:sets` touch `:immutable` fields
 - `(suggest-invariants)` — proposes `defscenario` + `definvariant` skeletons for relations and config fields
+- `(compliance-matrix)` — returns requirement-to-invariant mapping from `:reqs` metadata; groups by requirement ID, collects untagged invariants under `:uncategorized`
 - `(clear-specs)` — reset all registries
 
 ### Spec analysis
@@ -232,6 +262,28 @@ When a scenario invariant is structurally hard to violate via random generation 
 - `scenario-feasibility` reports `:has-negative-generator` when one is registered.
 - Targeted negative trials are added alongside random negative trials; per-invariant rejection stats combine both sources.
 
+### Temporal interval helpers
+
+Pre-loaded functions for interval reasoning in `:check` forms. `specs-to-sql` translates them to PostgreSQL arithmetic.
+
+```lisp
+;; Do two intervals [s1, s1+d1) and [s2, s2+d2) overlap?
+(intervals-overlap-p start1 dur1 start2 dur2)
+
+;; Is [inner-start, inner-start+inner-dur) entirely within [outer-start, outer-start+outer-dur)?
+(interval-contains-p outer-start outer-dur inner-start inner-dur)
+
+;; Does [start1, start1+dur1) end at or before start2?
+(interval-before-p start1 dur1 start2)
+```
+
+Usage in invariants:
+```lisp
+(definvariant task-finishes-before-deadline
+  :on task
+  :check (interval-before-p (task-start task) (task-duration task) (task-deadline task)))
+```
+
 ### State machine analysis
 
 Rules with `:when`/`:ensures` patterns implicitly define state machines:
@@ -258,6 +310,7 @@ A state field is a `(member ...)` field that appears as a source in at least one
 ;; → (values new-instance t nil)               ; applied
 ;; → (values instance nil :when-mismatch)       ; wrong state
 ;; → (values instance nil (:guard-failed form)) ; :requires failed
+;; → (values instance nil (:immutable-violation :field)) ; :sets touches immutable field
 ;; → (values instance nil :unknown-rule)        ; rule doesn't exist
 
 ;; Which rules can fire on this instance?

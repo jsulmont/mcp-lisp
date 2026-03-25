@@ -39,7 +39,8 @@
                (:file "pbt-tests")
                (:file "transition-tests")
                (:file "codegen-tests")
-               (:file "analysis-tests"))
+               (:file "analysis-tests")
+               (:file "dsl-features-tests"))
   :perform (test-op (o c)
                     (symbol-call :fiveam :run!
                                  (find-symbol "MCP-LISP-TESTS"

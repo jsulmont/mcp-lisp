@@ -319,6 +319,32 @@ Returns the SQL string or NIL if the form can't be translated."
              ((and (eq (first f) 'abs) (= (length f) 2))
               (let ((inner (xlate (second f))))
                 (when inner (format nil "abs(~A)" inner))))
+             ;; intervals-overlap-p
+             ((and (symbolp (first f))
+                   (string-equal (symbol-name (first f)) "INTERVALS-OVERLAP-P")
+                   (= (length f) 5))
+              (let ((s1 (xlate (second f))) (d1 (xlate (third f)))
+                    (s2 (xlate (fourth f))) (d2 (xlate (fifth f))))
+                (when (and s1 d1 s2 d2)
+                  (format nil "(~A < ~A + ~A AND ~A < ~A + ~A)"
+                          s1 s2 d2 s2 s1 d1))))
+             ;; interval-contains-p
+             ((and (symbolp (first f))
+                   (string-equal (symbol-name (first f)) "INTERVAL-CONTAINS-P")
+                   (= (length f) 5))
+              (let ((os (xlate (second f))) (od (xlate (third f)))
+                    (is (xlate (fourth f))) (id (xlate (fifth f))))
+                (when (and os od is id)
+                  (format nil "(~A <= ~A AND ~A + ~A <= ~A + ~A)"
+                          os is is id os od))))
+             ;; interval-before-p
+             ((and (symbolp (first f))
+                   (string-equal (symbol-name (first f)) "INTERVAL-BEFORE-P")
+                   (= (length f) 4))
+              (let ((s1 (xlate (second f))) (d1 (xlate (third f)))
+                    (s2 (xlate (fourth f))))
+                (when (and s1 d1 s2)
+                  (format nil "(~A + ~A <= ~A)" s1 d1 s2))))
              ;; length — use jsonb_array_length for list/JSONB fields
              ((and (eq (first f) 'length) (= (length f) 2))
               (let* ((inner (xlate (second f)))
@@ -661,6 +687,65 @@ Returns a list of (fk-col-sql parent-table-sql parent-col-sql) triples."
         (format out "    BEFORE UPDATE OF ~A ON ~A~%" (quote-ident col-name) (quote-ident table-name))
         (format out "    FOR EACH ROW EXECUTE FUNCTION ~A();~%~%" fn-name)))))
 
+(defun emit-cardinality-triggers (entity-name out)
+  (dolist (rel (entity-relations entity-name))
+    (when (and (eq (first rel) :has-many) (getf (cddr rel) :cardinality))
+      (let* ((card (getf (cddr rel) :cardinality))
+             (card-min (first card))
+             (card-max (second card))
+             (target (getf (cddr rel) :of))
+             (target-name (when target (string-downcase (string target))))
+             (parent-table (lisp-to-sql entity-name))
+             (child-table (when target-name (lisp-to-sql target-name)))
+             (parent-pk (entity-pk-column entity-name))
+             (fk-col (format nil "~A_~A" parent-table parent-pk))
+             (fn-name (format nil "check_~A_~A_cardinality"
+                              parent-table (lisp-to-sql (string (second rel))))))
+        (when (and child-table card-max)
+          (format out "CREATE OR REPLACE FUNCTION ~A()~%" fn-name)
+          (format out "RETURNS TRIGGER AS $$~%")
+          (format out "DECLARE cnt INTEGER;~%")
+          (format out "BEGIN~%")
+          (format out "    SELECT COUNT(*) INTO cnt FROM ~A WHERE ~A = NEW.~A;~%"
+                  (quote-ident child-table) (quote-ident fk-col) (quote-ident fk-col))
+          (when card-max
+            (format out "    IF cnt > ~A THEN~%" card-max)
+            (format out "        RAISE EXCEPTION '~A cardinality exceeded: max ~A, got %', cnt;~%"
+                    (lisp-to-sql (string (second rel))) card-max)
+            (format out "    END IF;~%"))
+          (when (and card-min (plusp card-min))
+            (format out "    -- min cardinality ~A is deferred (enforced at transaction commit)~%" card-min))
+          (format out "    RETURN NEW;~%")
+          (format out "END;~%")
+          (format out "$$ LANGUAGE plpgsql;~%~%")
+          (format out "CREATE TRIGGER trg_~A_~A_cardinality~%"
+                  child-table (lisp-to-sql (string (second rel))))
+          (format out "    AFTER INSERT OR UPDATE ON ~A~%" (quote-ident child-table))
+          (format out "    FOR EACH ROW EXECUTE FUNCTION ~A();~%~%" fn-name))))))
+
+(defun emit-immutable-triggers (entity-name out)
+  (let ((immutable-cols nil))
+    (dolist (field (entity-fields entity-name))
+      (when (getf (cddr field) :immutable)
+        (push (lisp-to-sql (string (first field))) immutable-cols)))
+    (when immutable-cols
+      (let* ((table-name (lisp-to-sql entity-name))
+             (fn-name (format nil "check_~A_immutable" table-name)))
+        (format out "CREATE OR REPLACE FUNCTION ~A()~%" fn-name)
+        (format out "RETURNS TRIGGER AS $$~%")
+        (format out "BEGIN~%")
+        (dolist (col (nreverse immutable-cols))
+          (format out "    IF OLD.~A IS NOT NULL AND NEW.~A IS DISTINCT FROM OLD.~A THEN~%"
+                  (quote-ident col) (quote-ident col) (quote-ident col))
+          (format out "        RAISE EXCEPTION 'field ~A is immutable';~%" col)
+          (format out "    END IF;~%"))
+        (format out "    RETURN NEW;~%")
+        (format out "END;~%")
+        (format out "$$ LANGUAGE plpgsql;~%~%")
+        (format out "CREATE TRIGGER trg_~A_immutable~%" table-name)
+        (format out "    BEFORE UPDATE ON ~A~%" (quote-ident table-name))
+        (format out "    FOR EACH ROW EXECUTE FUNCTION ~A();~%~%" fn-name)))))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Top-level
 ;;; ---------------------------------------------------------------------------
@@ -706,7 +791,11 @@ Only :postgresql dialect is currently supported."
         (when (detect-state-fields ename)
           (unless has-triggers
             (setf has-triggers t))
-          (emit-triggers ename out))))
+          (emit-triggers ename out)))
+      (dolist (ename entities)
+        (emit-immutable-triggers ename out))
+      (dolist (ename entities)
+        (emit-cardinality-triggers ename out)))
     (format out "COMMIT;~%")
     (get-output-stream-string out)))
 

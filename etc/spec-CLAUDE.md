@@ -5,7 +5,7 @@ This project uses a behavioral specification DSL via the `eval_lisp` MCP tool. W
 ### Workflow
 
 1. User describes domain in natural language
-2. Define entities, variants, config, rules, invariants via `eval_lisp`
+2. Define entities, variants, config, rules, invariants via `eval_lisp`. Mark write-once fields with `:immutable t`. Tag invariants with `:reqs ("REQ-ID")` when mapping to formal requirements. Use `:cardinality (min max)` on `has-many` to bound relation counts.
 3. **Verify completeness against the prompt.** Run `(list-entities)`, `(list-rules)`, `(list-invariants)`, `(list-scenarios)` and diff against the prompt's named items. List any that appear in the prompt but are missing from the spec. **Implement all missing items before proceeding.** This catches the most common failure: silently dropping items from long lists, especially complex invariants in the middle-to-end of the prompt.
    - **When the source is a formal spec** (TLA+, Alloy, Z, etc.): every action/operation in the source MUST have a corresponding `defrule`, not just the ones that change a `(member ...)` state field. Enumerate every action in the source and check it off against `(list-rules)`. Actions that only mutate non-state fields (e.g. appending to a log, incrementing a counter, advancing a commit index) are just as critical as state transitions — they define the protocol's operational semantics. The `:sets` clause on each rule must account for every field the source action mutates.
 4. **Inspect state machines.** For any entity with `(member ...)` state fields and rules, run `(analyze-state-machine "entity")`. Check for dead-end states (missing rule), unreachable states (missing inbound rule), and missing terminal states. Use `(simulate-trace "entity" instance '("rule1" "rule2"))` to walk a concrete instance through the lifecycle. Fix gaps before proceeding — the state graph shapes what invariants and scenarios are needed.
@@ -15,13 +15,14 @@ This project uses a behavioral specification DSL via the `eval_lisp` MCP tool. W
    - **Relations as signals**: For every `has-many` relation, ask: does the parent have fields that should bound aggregate properties of the children (count, sum, max)? If yes, that's a scenario.
    - **Rules that reach across entities**: If a rule's `:requires` or `:let` accesses fields from related entities, the constraint likely has a corresponding aggregate invariant that should hold at rest.
    - If this audit finds gaps, define the scenarios before proceeding.
-7. Define scenarios with `defscenario` for cross-entity invariants
+7. Define scenarios with `defscenario` for cross-entity invariants. For join entities, use `:refs` to auto-wire FK fields from parent bindings instead of writing a custom generator. Use `intervals-overlap-p`, `interval-contains-p`, `interval-before-p` for temporal constraints.
 8. **Check generation feasibility.** Run `(generation-feasibility "entity")` for each entity with invariants. If `:needs-custom-generator`, write a `defgenerator` before PBT. Run `(scenario-feasibility "scenario")` for each scenario — if it needs a custom generator and doesn't have one, write a `defscenario-generator`. For scenario invariants that are structurally hard to violate randomly (e.g. uniqueness over high-entropy fields), write a `defscenario-negative-generator` to produce targeted bad data. See `etc/spec-reference.md` for generator syntax.
-9. Run `(validate-specs)` to catch dangling references, non-exhaustive variant handling, and invalid scenario bindings
+9. Run `(validate-specs)` to catch dangling references, non-exhaustive variant handling, invalid scenario bindings, and rules whose `:sets` touch `:immutable` fields
 10. Run `(run-pbt :trials 500 :negative-trials 200)` — positive trials test correctness, negative trials verify invariants aren't trivially true
 11. Run `(run-pbt :scenario "name" :trials 50)` for each scenario
 12. Run `(random-walk "entity" :steps 20 :trials 50)` for entities with rules — tests invariants across rule sequences, not just freshly generated instances
 13. Generate SQL: `(specs-to-sql)` for DDL, `(specs-to-sql-seed :rows-per-entity 20)` for seed data
-14. Save the spec via `(specs-to-lisp)` — produces a loadable `.lisp` file. This is the canonical format.
+14. For compliance specs, run `(compliance-matrix)` to verify requirement-to-invariant coverage from `:reqs` tags
+15. Save the spec via `(specs-to-lisp)` — produces a loadable `.lisp` file. This is the canonical format.
 
 Always spec first, code second.

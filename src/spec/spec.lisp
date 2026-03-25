@@ -58,6 +58,7 @@
            #:clear-specs
            #:validate-specs
            #:suggest-invariants
+           #:compliance-matrix
            ;; AST
            #:form-to-ast
            #:ast-to-form
@@ -102,7 +103,7 @@
 ;;; Known keywords for validation at macroexpand time
 ;;; ---------------------------------------------------------------------------
 
-(defparameter +known-field-keys+ '(:required :default :unique :min :max :derived-from))
+(defparameter +known-field-keys+ '(:required :default :unique :min :max :derived-from :immutable))
 (defparameter +relation-types+ '(:has-many :has-one :belongs-to))
 
 ;;; ---------------------------------------------------------------------------
@@ -203,18 +204,21 @@ Returns (values fields relations derived)."
 ;;; definvariant
 ;;; ---------------------------------------------------------------------------
 
-(defmacro definvariant (name &key on check)
+(defmacro definvariant (name &key on check reqs)
   "Define a spec invariant. Stored as quoted form, not compiled.
+Optional :reqs maps to requirement IDs for compliance traceability.
 
   (definvariant positive-balance
     :on account
+    :reqs (\"REQ-001\")
     :check (>= (account-balance account) 0))"
   (let ((key (string-downcase (string name))))
     `(progn
        (setf (gethash ,key *invariants*)
              (list :name ',name
                    :on ',on
-                   :check ',check))
+                   :check ',check
+                   ,@(when reqs `(:reqs ',reqs))))
        (clrhash *compiled-fn-cache*)
        ',name)))
 
@@ -286,14 +290,23 @@ Returns (values fields relations derived)."
   (let ((key (string-downcase (string name)))
         (parsed-entities
           (mapcar (lambda (spec)
-                    (destructuring-bind (binding card entity-name &key per) spec
+                    (destructuring-bind (binding card entity-name &key per refs) spec
                       (let ((minmax (parse-scenario-cardinality card)))
-                        (list :binding (intern (string binding) :keyword)
-                              :entity (string-downcase (string entity-name))
-                              :min (first minmax)
-                              :max (second minmax)
-                              :per (when per
-                                     (intern (string per) :keyword))))))
+                        (let ((result (list :binding (intern (string binding) :keyword)
+                                            :entity (string-downcase (string entity-name))
+                                            :min (first minmax)
+                                            :max (second minmax)
+                                            :per (when per
+                                                   (intern (string per) :keyword)))))
+                          (when refs
+                            (setf (getf result :refs)
+                                  (mapcar (lambda (ref)
+                                            (destructuring-bind (local-field &key from field) ref
+                                              (list :local-field (intern (string local-field) :keyword)
+                                                    :from (intern (string from) :keyword)
+                                                    :field (intern (string field) :keyword))))
+                                          refs)))
+                          result))))
                   entities)))
     `(progn
        (setf (gethash ,key *scenarios*)
@@ -402,6 +415,30 @@ field's :default value from the defconfig spec."
 (defun describe-scenario (name)
   "Return the plist for scenario NAME (string-downcased), or NIL."
   (gethash (string-downcase (string name)) *scenarios*))
+
+(defun compliance-matrix ()
+  "Return a requirement-to-invariant mapping from :reqs metadata on invariants.
+Each entry is (:req REQ-ID :invariants (inv-name1 inv-name2 ...)).
+Invariants without :reqs are collected under :uncategorized."
+  (let ((req-map (make-hash-table :test #'equal))
+        (uncategorized nil))
+    (maphash (lambda (key plist)
+               (let ((reqs (getf plist :reqs)))
+                 (if reqs
+                     (dolist (req reqs)
+                       (push key (gethash req req-map)))
+                     (push key uncategorized))))
+             *invariants*)
+    (let ((result nil))
+      (maphash (lambda (req invs)
+                 (push (list :req req :invariants (nreverse invs)) result))
+               req-map)
+      (setf result (sort result #'string< :key (lambda (e) (getf e :req))))
+      (when uncategorized
+        (setf result (append result
+                             (list (list :req :uncategorized
+                                         :invariants (nreverse uncategorized))))))
+      result)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Utilities
@@ -1023,7 +1060,38 @@ Returns a list of warning strings. Empty list = all clear."
                              (push (format nil "scenario ~A: invariant references (config ~S) but generator does not"
                                            skey ck)
                                    warnings)))))))
-                 *scenarios*)))
+                 *scenarios*))
+      ;; Warn about rules whose :sets touch immutable fields
+      (let ((immutable-fields (make-hash-table :test #'equal)))
+        (maphash (lambda (ekey eplist)
+                   (dolist (field (getf eplist :fields))
+                     (when (getf (cddr field) :immutable)
+                       (let ((fname (string-downcase (symbol-name (first field)))))
+                         (setf (gethash (cons ekey fname) immutable-fields) t)))))
+                 *entities*)
+        (when (plusp (hash-table-count immutable-fields))
+          (maphash (lambda (rkey rplist)
+                     (let* ((when-clause (getf rplist :when))
+                            (entity-name (when (and when-clause (symbolp (car when-clause)))
+                                           (string-downcase (symbol-name (car when-clause)))))
+                            (sets-clause (getf rplist :sets)))
+                       (when (and entity-name sets-clause)
+                         (loop for (accessor-form _value-form) on sets-clause by #'cddr
+                               do (let ((field-name
+                                          (cond
+                                            ((and (consp accessor-form) (eq (first accessor-form) 'getf)
+                                                  (= (length accessor-form) 3) (keywordp (third accessor-form)))
+                                             (string-downcase (symbol-name (third accessor-form))))
+                                            ((and (consp accessor-form) (= (length accessor-form) 2)
+                                                  (symbolp (first accessor-form)))
+                                             (multiple-value-bind (ekey fname) (decompose-accessor (first accessor-form))
+                                               (when (and ekey (string= ekey entity-name)) fname))))))
+                                    (when (and field-name
+                                              (gethash (cons entity-name field-name) immutable-fields))
+                                      (push (format nil "rule ~A: :sets touches immutable field ~A on ~A"
+                                                    rkey field-name entity-name)
+                                            warnings)))))))
+                   *rules*))))
     (nreverse warnings)))
 
 ;;; ---------------------------------------------------------------------------
@@ -1377,17 +1445,23 @@ before falling back to *PACKAGE*."
                (:default      (setf (gethash "default" ht) (form-to-string v)))
                (:min          (setf (gethash "min" ht) v))
                (:max          (setf (gethash "max" ht) v))
-               (:derived-from (setf (gethash "derived-from" ht) (form-to-ast v)))))
+               (:derived-from (setf (gethash "derived-from" ht) (form-to-ast v)))
+               (:immutable    (when v (setf (gethash "immutable" ht) t)))))
     ht))
 
 (defun relation-to-ht (rel-spec)
   "Convert a relation spec like (:HAS-MANY ORDERS :OF ORDER) to a hash table."
   (let ((kind (string-downcase (symbol-name (first rel-spec))))
         (name (string-downcase (symbol-name (second rel-spec))))
-        (of (getf (cddr rel-spec) :of)))
-    (dict "kind" kind
-          "name" name
-          "of" (when of (string-downcase (symbol-name of))))))
+        (of (getf (cddr rel-spec) :of))
+        (card (getf (cddr rel-spec) :cardinality)))
+    (let ((ht (dict "kind" kind
+                    "name" name
+                    "of" (when of (string-downcase (symbol-name of))))))
+      (when card
+        (setf (gethash "cardinality" ht)
+              (coerce card 'vector)))
+      ht)))
 
 (defun derived-to-ht (derived-spec)
   "Convert (:DERIVED NAME EXPR) to a hash table."
@@ -1440,6 +1514,8 @@ before falling back to *PACKAGE*."
       (setf (gethash "on" ht) (string-downcase (symbol-name (getf plist :on)))))
     (when (getf plist :check)
       (setf (gethash "check" ht) (form-to-ast (getf plist :check))))
+    (when (getf plist :reqs)
+      (setf (gethash "reqs" ht) (coerce (getf plist :reqs) 'vector)))
     ht))
 
 (defun variant-to-ht (plist)
@@ -1459,6 +1535,14 @@ before falling back to *PACKAGE*."
     (when (getf espec :per)
       (setf (gethash "per" ht)
             (string-downcase (symbol-name (getf espec :per)))))
+    (when (getf espec :refs)
+      (setf (gethash "refs" ht)
+            (coerce (mapcar (lambda (ref)
+                              (dict "local-field" (string-downcase (symbol-name (getf ref :local-field)))
+                                    "from" (string-downcase (symbol-name (getf ref :from)))
+                                    "field" (string-downcase (symbol-name (getf ref :field)))))
+                            (getf espec :refs))
+                    'vector)))
     ht))
 
 (defun scenario-to-ht (plist)
@@ -1604,9 +1688,12 @@ Returns a string of (defentity ...), (defrule ...), etc. forms."
                  (declare (ignore k))
                  (let ((on-name (string-downcase (symbol-name (getf v :on)))))
                    (unless (gethash on-name *scenarios*)
-                     (emit `(definvariant ,(getf v :name)
-                              :on ,(getf v :on)
-                              :check ,(getf v :check))))))
+                     (let ((form `(definvariant ,(getf v :name)
+                                    :on ,(getf v :on)
+                                    ,@(when (getf v :reqs)
+                                        `(:reqs ,(getf v :reqs)))
+                                    :check ,(getf v :check))))
+                       (emit form)))))
                *invariants*)
       ;; Scenarios
       (maphash (lambda (k v)
@@ -1617,12 +1704,20 @@ Returns a string of (defentity ...), (defrule ...), etc. forms."
                                                  (entity (intern (string-upcase (getf e :entity))))
                                                  (mn (getf e :min))
                                                  (mx (getf e :max))
-                                                 (per (getf e :per)))
+                                                 (per (getf e :per))
+                                                 (refs (getf e :refs)))
                                              (let ((card (if (= mn mx) mn `(,mn ,mx)))
                                                    (base `(,binding ,nil ,entity)))
                                                (setf (second base) card)
                                                (when per
                                                  (setf base (append base `(:per ,(intern (string per))))))
+                                               (when refs
+                                                 (setf base (append base
+                                                                    `(:refs ,(mapcar (lambda (r)
+                                                                                       (list (intern (string (getf r :local-field)))
+                                                                                             :from (intern (string (getf r :from)))
+                                                                                             :field (intern (string (getf r :field)))))
+                                                                                     refs)))))
                                                base)))
                                          (getf v :entities))))
                    (emit `(defscenario ,name :entities ,entities))))
@@ -1632,9 +1727,12 @@ Returns a string of (defentity ...), (defrule ...), etc. forms."
                  (declare (ignore k))
                  (let ((on-name (string-downcase (symbol-name (getf v :on)))))
                    (when (gethash on-name *scenarios*)
-                     (emit `(definvariant ,(getf v :name)
-                              :on ,(getf v :on)
-                              :check ,(getf v :check))))))
+                     (let ((form `(definvariant ,(getf v :name)
+                                    :on ,(getf v :on)
+                                    ,@(when (getf v :reqs)
+                                        `(:reqs ,(getf v :reqs)))
+                                    :check ,(getf v :check))))
+                       (emit form)))))
                *invariants*)
       ;; Generators
       (maphash (lambda (k v)
@@ -1769,14 +1867,20 @@ Uses EVAL only for generator/helper source forms (which are defmacro calls)."
       (setf spec (append spec (list :max (gethash "max" ht)))))
     (when (gethash "derived-from" ht)
       (setf spec (append spec (list :derived-from (ast-to-form (gethash "derived-from" ht))))))
+    (when (gethash "immutable" ht)
+      (setf spec (append spec (list :immutable t))))
     spec))
 
 (defun ht-to-relation (ht)
   "Convert a JSON relation hash table back to a relation spec list."
   (let ((kind (intern (string-upcase (gethash "kind" ht)) :keyword))
         (name (intern (string-upcase (gethash "name" ht))))
-        (of (gethash "of" ht)))
-    (list kind name :of (when of (intern (string-upcase of))))))
+        (of (gethash "of" ht))
+        (card (gethash "cardinality" ht)))
+    (let ((rel (list kind name :of (when of (intern (string-upcase of))))))
+      (when card
+        (setf rel (append rel (list :cardinality (coerce card 'list)))))
+      rel)))
 
 (defun ht-to-derived (ht)
   "Convert a JSON derived hash table back to a derived spec list."
@@ -1827,12 +1931,14 @@ Merges with existing specs — call CLEAR-SPECS first for a clean import."
       (when invariants
         (maphash
          (lambda (key ht)
-           (setf (gethash key *invariants*)
-                 (list :name (intern (string-upcase (gethash "name" ht)))
-                       :on (when (gethash "on" ht)
-                             (intern (string-upcase (gethash "on" ht))))
-                       :check (when (gethash "check" ht)
-                                (ast-to-form (gethash "check" ht))))))
+           (let ((inv (list :name (intern (string-upcase (gethash "name" ht)))
+                           :on (when (gethash "on" ht)
+                                 (intern (string-upcase (gethash "on" ht))))
+                           :check (when (gethash "check" ht)
+                                    (ast-to-form (gethash "check" ht))))))
+             (when (gethash "reqs" ht)
+               (setf (getf inv :reqs) (coerce (gethash "reqs" ht) 'list)))
+             (setf (gethash key *invariants*) inv)))
          invariants)))
     ;; Variants
     (let ((variants (gethash "variants" data)))

@@ -38,6 +38,7 @@ Each step catches a different class of problem. The order matters — `validate-
 - Scenarios using aggregates but missing a `defscenario-generator`
 - Config keys referenced in scenario invariants but not in their generators
 - Conditional invariants on entities without a `defgenerator`
+- Rules whose `:sets` touch `:immutable` fields
 
 ### State machine defects (analyze-state-machine)
 
@@ -72,7 +73,7 @@ Typed fields with constraints, relations, and derived values:
   (:belongs-to aggregator :of end-device :optional t))
 ```
 
-Field types: `string`, `number`, `boolean`, `list`, `(member :a :b :c)`. Relations: `:has-many`, `:belongs-to`. Fields can be `:required`, `:unique`, have `:default` values. Member fields become PostgreSQL enums in codegen.
+Field types: `string`, `number`, `boolean`, `list`, `(member :a :b :c)`. Relations: `:has-many`, `:belongs-to`. Fields can be `:required`, `:unique`, have `:default` values, or be `:immutable t` (write-once — `apply-rule` rejects changes after initial set, `validate-specs` warns, codegen emits a `BEFORE UPDATE` trigger). Member fields become PostgreSQL enums in codegen. `:has-many` relations support `:cardinality (min max)` — codegen emits a trigger enforcing the max on the child table.
 
 ### Config
 
@@ -141,7 +142,11 @@ Properties that must always hold on a single entity:
               (<= (der-program-primacy der-program) 255)))
 ```
 
+Invariants can carry `:reqs ("REQ-ID" ...)` metadata for compliance traceability. `(compliance-matrix)` returns the requirement-to-invariant mapping.
+
 The generator automatically extracts constraints from `:check` forms to produce valid instances — constant bounds, field ordering, arithmetic expressions, conditional constraints, config references.
+
+Temporal interval helpers — `intervals-overlap-p`, `interval-contains-p`, `interval-before-p` — are preloaded for use in `:check` forms and translate to SQL arithmetic in `specs-to-sql`.
 
 ### Scenarios and Cross-Entity Invariants
 
@@ -170,6 +175,17 @@ When invariants span multiple entity types, define a scenario:
 (definvariant older-is-superseded
   :on control-supersession
   :check (eq (getf older-control :event-status) :superseded))
+```
+
+For join entities (many-to-many), `:refs` on scenario bindings auto-wires FK fields from referenced parent bindings, eliminating the need for a custom generator:
+
+```lisp
+(defscenario group-membership
+  :entities ((devices     (1 5) end-device)
+             (groups      (1 3) dpd-group)
+             (assignments (1 15) device-group-assignment
+               :refs ((device-id :from devices :field id)
+                      (group-id  :from groups  :field id)))))
 ```
 
 Scenarios that compute aggregates or cross-references need a custom generator — default random generation won't satisfy them:
@@ -257,6 +273,9 @@ Test invariants across rule sequences, not just freshly generated instances:
 - **Foreign keys** from `:belongs-to` relations
 - **Indexes** on FK columns and state fields
 - **State machine triggers** — `BEFORE UPDATE` triggers that enforce valid transitions derived from rules
+- **Immutability triggers** — `BEFORE UPDATE` triggers that prevent changing `:immutable` fields
+- **Cardinality triggers** — `AFTER INSERT` triggers that enforce `:cardinality` bounds on `has-many` relations
+- **Temporal SQL** — `intervals-overlap-p`, `interval-contains-p`, `interval-before-p` in CHECK constraints translate to arithmetic expressions
 
 Example output (abbreviated):
 

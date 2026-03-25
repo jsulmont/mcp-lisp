@@ -209,6 +209,7 @@
                 #:clear-specs
                 #:validate-specs
                 #:suggest-invariants
+                #:compliance-matrix
                 #:form-to-ast
                 #:ast-to-form
                 #:specs-to-json
@@ -254,7 +255,10 @@
                 #:random-walk
                 #:all-pairs-check
                 #:consecutive-pairs-check
-                #:haversine-distance-nm)
+                #:haversine-distance-nm
+                #:intervals-overlap-p
+                #:interval-contains-p
+                #:interval-before-p)
   ;; Spec analysis
   (:import-from #:mcp-lisp/src/spec/analysis
                 #:invariant-coverage
@@ -447,6 +451,7 @@
    #:describe-scenario
    #:clear-specs
    #:validate-specs
+   #:compliance-matrix
    #:form-to-ast
    #:ast-to-form
    #:specs-to-json
@@ -491,6 +496,9 @@
    #:all-pairs-check
    #:consecutive-pairs-check
    #:haversine-distance-nm
+   #:intervals-overlap-p
+   #:interval-contains-p
+   #:interval-before-p
    ;; Spec analysis
    #:invariant-coverage
    #:invariant-coverage-summary
