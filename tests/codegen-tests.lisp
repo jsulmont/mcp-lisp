@@ -532,3 +532,70 @@
         inst))
     (let ((sql (mcp-lisp:specs-to-sql-seed :rows-per-entity 3)))
       (is (search "CUSTOM-LFDI-VALUE" sql)))))
+
+;;; ---------------------------------------------------------------------------
+;;; Bitwise operations in CHECK constraints
+;;; ---------------------------------------------------------------------------
+
+(test specs-to-sql-check-logand
+  "logand in invariant translates to PG & operator"
+  (with-fresh-specs
+    (mcp-lisp:defentity device ()
+      (id string :required t)
+      (modes-supported integer :required t)
+      (modes-enabled integer :required t))
+    (mcp-lisp:definvariant enabled-subset
+      :on device
+      :check (= (logand (device-modes-enabled device)
+                         (lognot (device-modes-supported device)))
+                0))
+    (let ((sql (mcp-lisp:specs-to-sql)))
+      (is (search "CONSTRAINT enabled_subset CHECK" sql))
+      (is (search "&" sql))
+      (is (search "~" sql)))))
+
+(test specs-to-sql-check-logior
+  "logior in invariant translates to PG | operator"
+  (with-fresh-specs
+    (mcp-lisp:defentity register ()
+      (id string :required t)
+      (flags-a integer :required t)
+      (flags-b integer :required t)
+      (flags-combined integer :required t))
+    (mcp-lisp:definvariant combined-is-union
+      :on register
+      :check (= (register-flags-combined register)
+                 (logior (register-flags-a register)
+                         (register-flags-b register))))
+    (let ((sql (mcp-lisp:specs-to-sql)))
+      (is (search "CONSTRAINT combined_is_union CHECK" sql))
+      (is (search "|" sql)))))
+
+(test specs-to-sql-check-logxor
+  "logxor in invariant translates to PG # operator"
+  (with-fresh-specs
+    (mcp-lisp:defentity mask ()
+      (id string :required t)
+      (a integer :required t)
+      (b integer :required t)
+      (diff integer :required t))
+    (mcp-lisp:definvariant diff-is-xor
+      :on mask
+      :check (= (mask-diff mask)
+                 (logxor (mask-a mask) (mask-b mask))))
+    (let ((sql (mcp-lisp:specs-to-sql)))
+      (is (search "CONSTRAINT diff_is_xor CHECK" sql))
+      (is (search "#" sql)))))
+
+(test specs-to-sql-check-ash
+  "ash in invariant translates to PG << operator"
+  (with-fresh-specs
+    (mcp-lisp:defentity bitfield ()
+      (id string :required t)
+      (value integer :required t))
+    (mcp-lisp:definvariant shifted-bound
+      :on bitfield
+      :check (< (bitfield-value bitfield) (ash 1 16)))
+    (let ((sql (mcp-lisp:specs-to-sql)))
+      (is (search "CONSTRAINT shifted_bound CHECK" sql))
+      (is (search "<<" sql)))))

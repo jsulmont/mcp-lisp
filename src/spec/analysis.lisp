@@ -35,6 +35,7 @@
                 #:extract-transitions
                 #:detect-state-fields)
   (:export #:invariant-coverage
+           #:invariant-coverage-summary
            #:field-index
            #:generation-feasibility
            #:simulate-trace
@@ -126,6 +127,27 @@ Helps identify unconstrained fields that may need invariants."
       (dolist (k field-keys)
         (push (cons k (nreverse (gethash k coverage))) result))
       (nreverse result))))
+
+(defun invariant-coverage-summary ()
+  "Return a coverage summary across all entities.
+Each entry is a plist (:entity :fields :covered :uncovered :ratio :uncovered-fields).
+The list is sorted by coverage ratio ascending (worst-covered first)."
+  (let ((result nil))
+    (dolist (ename (list-entities))
+      (let* ((cov (invariant-coverage ename))
+             (total (length cov))
+             (covered (count-if #'cdr cov))
+             (uncov (- total covered))
+             (uncov-fields (mapcar #'car (remove-if #'cdr cov))))
+        (push (list :entity ename
+                    :fields total
+                    :covered covered
+                    :uncovered uncov
+                    :ratio (if (zerop total) 1.0
+                               (float (/ covered total)))
+                    :uncovered-fields uncov-fields)
+              result)))
+    (sort result #'< :key (lambda (e) (getf e :ratio)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; 2. field-index

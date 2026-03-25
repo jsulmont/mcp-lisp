@@ -303,6 +303,19 @@ Returns the SQL string or NIL if the form can't be translated."
                     (r (xlate (third f)))
                     (op (string (first f))))
                 (when (and l r) (format nil "(~A ~A ~A)" l op r))))
+             ;; Bitwise
+             ((and (member (first f) '(logand logior logxor)) (= (length f) 3))
+              (let ((l (xlate (second f)))
+                    (r (xlate (third f)))
+                    (op (case (first f) (logand "&") (logior "|") (logxor "#"))))
+                (when (and l r) (format nil "(~A ~A ~A)" l op r))))
+             ((and (eq (first f) 'lognot) (= (length f) 2))
+              (let ((inner (xlate (second f))))
+                (when inner (format nil "(~~~A)" inner))))
+             ((and (eq (first f) 'ash) (= (length f) 3))
+              (let ((l (xlate (second f)))
+                    (r (xlate (third f))))
+                (when (and l r) (format nil "(~A << ~A)" l r))))
              ((and (eq (first f) 'abs) (= (length f) 2))
               (let ((inner (xlate (second f))))
                 (when inner (format nil "abs(~A)" inner))))
@@ -660,6 +673,7 @@ Only :postgresql dialect is currently supported."
   (let ((out (make-string-output-stream))
         (enums (collect-enums))
         (entities (toposort-entities)))
+    (format out "BEGIN;~%~%")
     ;; Idempotent drops (reverse dependency order)
     (let ((rev-entities (reverse entities)))
       (format out "-- Drop existing objects~%")
@@ -693,6 +707,7 @@ Only :postgresql dialect is currently supported."
           (unless has-triggers
             (setf has-triggers t))
           (emit-triggers ename out))))
+    (format out "COMMIT;~%")
     (get-output-stream-string out)))
 
 ;;; ---------------------------------------------------------------------------

@@ -258,6 +258,7 @@
   ;; Spec analysis
   (:import-from #:mcp-lisp/src/spec/analysis
                 #:invariant-coverage
+                #:invariant-coverage-summary
                 #:field-index
                 #:generation-feasibility
                 #:simulate-trace
@@ -492,6 +493,7 @@
    #:haversine-distance-nm
    ;; Spec analysis
    #:invariant-coverage
+   #:invariant-coverage-summary
    #:field-index
    #:generation-feasibility
    #:simulate-trace

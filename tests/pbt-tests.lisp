@@ -638,16 +638,17 @@
       (is (>= (length (getf instance :txns)) 2)))))
 
 (test scenario-exact-cardinality-one
-  "cardinality=1 produces a single instance, not a list"
+  "cardinality=1 produces a list with exactly one instance"
   (with-fresh-specs
     (mcp-lisp:defentity config-entity ()
       (name string :required t))
     (mcp-lisp:defscenario singleton
       :entities ((cfg 1 config-entity)))
     (mcp-lisp:ensure-entity-accessors "config-entity")
-    (let ((instance (mcp-lisp:default-generate-scenario "singleton")))
-      ;; Single instance, not a list
-      (is (stringp (getf (getf instance :cfg) :name))))))
+    (let* ((instance (mcp-lisp:default-generate-scenario "singleton"))
+           (cfg (getf instance :cfg)))
+      (is (= 1 (length cfg)))
+      (is (stringp (getf (first cfg) :name))))))
 
 (test scenario-invariant-passing
   "scenario invariant that passes"

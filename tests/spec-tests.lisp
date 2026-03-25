@@ -306,6 +306,9 @@
   (with-fresh-specs
     (mcp-lisp:defentity order ()
       (quantity number :required t))
+    (mcp-lisp:definvariant order-quantity-positive
+      :on order
+      :check (>= (order-quantity order) 0))
     (mcp-lisp:defrule validate-order
       :when (order :state :pending)
       :requires ((pos (order-quantity order))))
@@ -458,6 +461,9 @@
       (kind (member :branch :leaf)))
     (mcp-lisp:defvariant branch (node :kind :branch)
       (children list :required t))
+    (mcp-lisp:definvariant node-has-kind
+      :on node
+      :check (node-kind node))
     (mcp-lisp:definvariant branch-has-children
       :on branch
       :check (> (length (branch-children branch)) 0))
@@ -473,6 +479,9 @@
       (children list))
     (mcp-lisp:defvariant leaf (node :kind :leaf)
       (data list))
+    (mcp-lisp:definvariant node-has-kind
+      :on node
+      :check (node-kind node))
     ;; Rule handles :branch but not :leaf
     (mcp-lisp:defrule process-branch
       :when (node :kind :branch)
@@ -491,6 +500,9 @@
       (children list))
     (mcp-lisp:defvariant leaf (node :kind :leaf)
       (data list))
+    (mcp-lisp:definvariant node-has-kind
+      :on node
+      :check (node-kind node))
     (mcp-lisp:defrule process-branch
       :when (node :kind :branch)
       :ensures ((not (null (node-id node)))))
