@@ -700,6 +700,7 @@ Returns NIL if SYM is not a recognized accessor."
                      ;; loop — walk sub-forms, skip keywords and bound vars
                      ((eq head 'loop)
                       (let ((tokens (cdr f))
+                            (destructuring-patterns nil)
                             (kw-names '("FOR" "AS" "WITH" "INTO" "USING" "NAMED"
                                         "IN" "ON" "ACROSS" "FROM" "TO" "BELOW"
                                         "ABOVE" "DOWNTO" "DOWNFROM" "UPFROM" "BY"
@@ -713,11 +714,21 @@ Returns NIL if SYM is not a recognized accessor."
                                         "WHILE" "UNTIL" "WHEN" "IF" "UNLESS"
                                         "ALWAYS" "NEVER" "THEREIS"
                                         "REPEAT" "RETURN" "INITIALLY" "FINALLY"
-                                        "END" "ELSE")))
+                                        "END" "ELSE"))
+                            (binding-names '("FOR" "AS" "WITH" "INTO")))
+                        (do ((rest tokens (cdr rest)))
+                            ((null rest))
+                          (let ((tok (car rest)))
+                            (when (and (symbolp tok)
+                                       (member (symbol-name tok) binding-names
+                                               :test #'string=)
+                                       (cdr rest) (consp (cadr rest)))
+                              (push (cadr rest) destructuring-patterns))))
                         (dolist (tok tokens)
-                          (unless (and (symbolp tok)
-                                       (member (symbol-name tok) kw-names
-                                               :test #'string=))
+                          (unless (or (and (symbolp tok)
+                                           (member (symbol-name tok) kw-names
+                                                   :test #'string=))
+                                      (member tok destructuring-patterns :test #'eq))
                             (walk tok)))))
                      (t
                       (when (symbolp head)
@@ -820,26 +831,35 @@ Handles QUOTE, LAMBDA, LET, LET* binding forms."
                                          "REPEAT" "RETURN" "INITIALLY" "FINALLY"
                                          "END" "ELSE"))
                              (binding-names '("FOR" "AS" "WITH" "INTO")))
-                         (do ((rest tokens (cdr rest)))
-                             ((null rest))
-                           (let ((tok (car rest)))
-                             (when (and (symbolp tok)
-                                        (member (symbol-name tok) binding-names
-                                                :test #'string=)
-                                        (cdr rest) (symbolp (cadr rest)))
-                               (push (cadr rest) loop-vars))
-                             (when (and (symbolp tok)
-                                        (string= (symbol-name tok) "USING")
-                                        (cdr rest) (consp (cadr rest))
-                                        (cdadr rest) (symbolp (cadadr rest)))
-                               (push (cadadr rest) loop-vars))))
-                         (let ((loop-env (append loop-vars env)))
-                           (dolist (tok tokens)
-                             (unless (and (symbolp tok)
-                                          (or (member (symbol-name tok) kw-names
-                                                      :test #'string=)
-                                              (member tok loop-vars :test #'eq)))
-                               (walk tok loop-env))))))
+                         (let ((destructuring-patterns nil))
+                           (do ((rest tokens (cdr rest)))
+                               ((null rest))
+                             (let ((tok (car rest)))
+                               (when (and (symbolp tok)
+                                          (member (symbol-name tok) binding-names
+                                                  :test #'string=)
+                                          (cdr rest))
+                                 (let ((binding (cadr rest)))
+                                   (cond ((symbolp binding)
+                                          (push binding loop-vars))
+                                         ((consp binding)
+                                          (push binding destructuring-patterns)
+                                          (dolist (s (alexandria:flatten binding))
+                                            (when (symbolp s)
+                                              (push s loop-vars)))))))
+                               (when (and (symbolp tok)
+                                          (string= (symbol-name tok) "USING")
+                                          (cdr rest) (consp (cadr rest))
+                                          (cdadr rest) (symbolp (cadadr rest)))
+                                 (push (cadadr rest) loop-vars))))
+                           (let ((loop-env (append loop-vars env)))
+                             (dolist (tok tokens)
+                               (unless (or (and (symbolp tok)
+                                                (or (member (symbol-name tok) kw-names
+                                                            :test #'string=)
+                                                    (member tok loop-vars :test #'eq)))
+                                           (member tok destructuring-patterns :test #'eq))
+                                 (walk tok loop-env)))))))
                       (t
                        ;; head is function position — skip it, walk args
                        (dolist (arg (cdr f))

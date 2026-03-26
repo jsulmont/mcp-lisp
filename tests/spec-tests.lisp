@@ -363,6 +363,54 @@
                    always (> item 0)))
     (is (null (mcp-lisp:validate-specs)))))
 
+(test validate-specs-loop-destructuring-on
+  "validate-specs recognises loop for (a b) on ... destructuring"
+  (with-fresh-specs
+    (mcp-lisp:defentity item ()
+      (id string :required t)
+      (val integer :required t :min 0 :max 100))
+    (mcp-lisp:defscenario item-scenario
+      :entities ((items (3 5) item)))
+    (mcp-lisp:definvariant pairwise-ascending
+      :on item-scenario
+      :check (let ((sorted (sort (copy-list items) #'< :key (lambda (x) (getf x :val)))))
+               (loop for (a b) on sorted while b
+                     always (<= (getf a :val) (getf b :val)))))
+    (let ((warnings (mcp-lisp:validate-specs)))
+      (is (notany (lambda (w) (search "free variable A" w)) warnings))
+      (is (notany (lambda (w) (search "free variable B" w)) warnings))
+      (is (notany (lambda (w) (search "undefined function A" w)) warnings)))))
+
+(test validate-specs-loop-destructuring-dotted
+  "validate-specs recognises loop for (a . rest) on ... destructuring"
+  (with-fresh-specs
+    (mcp-lisp:defentity record ()
+      (id string :required t)
+      (vals list :required t))
+    (mcp-lisp:definvariant first-positive
+      :on record
+      :check (loop for (head . tail) on (record-vals record)
+                   always (or (null head) (> head 0))))
+    (let ((warnings (mcp-lisp:validate-specs)))
+      (is (notany (lambda (w) (search "free variable HEAD" w)) warnings))
+      (is (notany (lambda (w) (search "free variable TAIL" w)) warnings))
+      (is (notany (lambda (w) (search "undefined function HEAD" w)) warnings)))))
+
+(test validate-specs-loop-destructuring-nested
+  "validate-specs handles nested loop destructuring"
+  (with-fresh-specs
+    (mcp-lisp:defentity matrix ()
+      (id string :required t)
+      (rows list :required t))
+    (mcp-lisp:definvariant rows-ok
+      :on matrix
+      :check (loop for ((x y) . rest) on (matrix-rows matrix)
+                   always (or (null x) (numberp x))))
+    (let ((warnings (mcp-lisp:validate-specs)))
+      (is (notany (lambda (w) (search "free variable X" w)) warnings))
+      (is (notany (lambda (w) (search "free variable Y" w)) warnings))
+      (is (notany (lambda (w) (search "undefined function X" w)) warnings)))))
+
 (test validate-specs-return-from-ok
   "validate-specs does not flag return-from block name as free variable"
   (with-fresh-specs
