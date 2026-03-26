@@ -245,6 +245,8 @@
                 #:ensure-entity-accessors
                 #:ensure-variant-accessors
                 #:generate-config
+                #:config-invariants
+                #:check-config-invariants
                 #:check-invariants
                 #:check-scenario-invariants
                 #:scenario-invariants-for
@@ -493,6 +495,8 @@
    #:ensure-entity-accessors
    #:ensure-variant-accessors
    #:generate-config
+   #:config-invariants
+   #:check-config-invariants
    #:check-invariants
    #:check-scenario-invariants
    #:scenario-invariants-for

@@ -46,6 +46,8 @@
            #:ensure-entity-accessors
            #:ensure-variant-accessors
            #:generate-config
+           #:config-invariants
+           #:check-config-invariants
            #:check-invariants
            #:check-scenario-invariants
            #:invariants-for
@@ -740,8 +742,8 @@ with bounds derived from invariant check forms."
     ;; Phase 4: populate has-many relations with cardinality
     (populate-has-many entity-name instance)))
 
-(defun generate-config ()
-  "Generate a random config plist from *CONFIG* field specs."
+(defun generate-config-once ()
+  "Generate a single random config plist from *CONFIG* field specs (no invariant checking)."
   (let ((result nil))
     (dolist (field *config*)
       (let* ((fname (first field))
@@ -752,6 +754,45 @@ with bounds derived from invariant check forms."
               result)
         (push key result)))
     result))
+
+(defun config-invariants ()
+  "Return a list of (inv-name inv-plist) for invariants with :on :config."
+  (loop for inv-name in (list-invariants)
+        for inv = (describe-invariant inv-name)
+        when (and (getf inv :on)
+                  (keywordp (getf inv :on))
+                  (string-equal (symbol-name (getf inv :on)) "CONFIG"))
+          collect (list inv-name inv)))
+
+(defun check-config-invariants (config-plist)
+  "Check all config-level invariants against CONFIG-PLIST.
+Returns (:PASS) when all hold, or (:FAIL inv1 inv2 ...) with violation names."
+  (let ((violations nil)
+        (*current-config* config-plist))
+    (dolist (entry (config-invariants))
+      (destructuring-bind (inv-name inv) entry
+        (let ((check-form (getf inv :check)))
+          (handler-case
+              (let ((fn (get-compiled-fn inv-name () check-form)))
+                (unless (funcall fn)
+                  (push inv-name violations)))
+            (error ()
+              (push inv-name violations))))))
+    (if violations
+        (cons :fail (nreverse violations))
+        '(:pass))))
+
+(defun generate-config ()
+  "Generate a random config plist from *CONFIG* field specs.
+Retries up to 100 times to satisfy config-level invariants."
+  (let ((invs (config-invariants)))
+    (if (null invs)
+        (generate-config-once)
+        (dotimes (attempt 100 (generate-config-once))
+          (let* ((cfg (generate-config-once))
+                 (result (check-config-invariants cfg)))
+            (when (eq (first result) :pass)
+              (return cfg)))))))
 
 (defun generate-variant-fields (variant instance)
   "Generate variant-specific fields and merge into INSTANCE plist."

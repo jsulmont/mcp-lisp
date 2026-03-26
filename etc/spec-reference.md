@@ -96,6 +96,12 @@ All macros and functions are available in the `eval_lisp` sandbox with no import
   :on position
   :check (<= (position-leverage position) (config :max-leverage)))
 
+;; Config invariants — cross-parameter constraints on config itself
+;; :on :config targets the config block; check form uses (config :key)
+(definvariant bounds-consistent
+  :on :config
+  :check (<= (config :min-group-size) (config :max-group-size)))
+
 ;; Invariants can target a specific variant
 (definvariant branch-has-children
   :on branch
@@ -252,7 +258,7 @@ The `:sets` clause takes alternating `(accessor-form value-form)` pairs. Each ac
 (run-pbt :trials 200 :negative-trials 100)
 ```
 
-`run-pbt` generates random instances for every entity that has invariants, checks all applicable invariants (including variant-specific ones), and reports counterexamples on failure. When `defconfig` is defined, `:config-trials` (default 5) generates random configs within declared bounds.
+`run-pbt` generates random instances for every entity that has invariants, checks all applicable invariants (including variant-specific ones), and reports counterexamples on failure. When `defconfig` is defined, `:config-trials` (default 5) generates random configs within declared bounds. Config-level invariants (`:on :config`) are enforced during generation — `generate-config` retries until all config invariants are satisfied.
 
 For entities with variants, `generate-instance` picks a random variant, sets the discriminator, and generates variant-specific fields. Invariants on the base entity apply to all variants; invariants on a variant name apply only when the discriminator matches.
 

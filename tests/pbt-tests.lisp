@@ -604,6 +604,90 @@
       (is (= 0 (getf (first results) :failed))))))
 
 ;;; ---------------------------------------------------------------------------
+;;; Config invariants
+;;; ---------------------------------------------------------------------------
+
+(test config-invariant-generation-respects-constraint
+  "generate-config retries until config-level invariants are satisfied"
+  (with-fresh-specs
+    (mcp-lisp:defconfig
+      (min-size integer :min 1 :max 50)
+      (max-size integer :min 1 :max 50))
+    (mcp-lisp:definvariant bounds-consistent
+      :on :config
+      :check (<= (mcp-lisp:config :min-size) (mcp-lisp:config :max-size)))
+    (dotimes (i 50)
+      (let ((cfg (mcp-lisp:generate-config)))
+        (is (<= (getf cfg :min-size) (getf cfg :max-size)))))))
+
+(test config-invariant-check-pass
+  "check-config-invariants returns :pass for valid config"
+  (with-fresh-specs
+    (mcp-lisp:defconfig
+      (lo number :min 0.0 :max 10.0)
+      (hi number :min 0.0 :max 10.0))
+    (mcp-lisp:definvariant lo-le-hi
+      :on :config
+      :check (<= (mcp-lisp:config :lo) (mcp-lisp:config :hi)))
+    (let ((result (mcp-lisp:check-config-invariants '(:lo 1.0 :hi 5.0))))
+      (is (eq :pass (first result))))))
+
+(test config-invariant-check-fail
+  "check-config-invariants returns :fail for invalid config"
+  (with-fresh-specs
+    (mcp-lisp:defconfig
+      (lo number :min 0.0 :max 10.0)
+      (hi number :min 0.0 :max 10.0))
+    (mcp-lisp:definvariant lo-le-hi
+      :on :config
+      :check (<= (mcp-lisp:config :lo) (mcp-lisp:config :hi)))
+    (let ((result (mcp-lisp:check-config-invariants '(:lo 8.0 :hi 2.0))))
+      (is (eq :fail (first result)))
+      (is (member "lo-le-hi" (rest result) :test #'string=)))))
+
+(test config-invariant-pbt-integration
+  "run-pbt generates configs satisfying config invariants across trials"
+  (with-fresh-specs
+    (mcp-lisp:defentity widget ()
+      (size number :required t :min 0.0 :max 100.0))
+    (mcp-lisp:defconfig
+      (min-size number :min 0.0 :max 50.0)
+      (max-size number :min 0.0 :max 50.0))
+    (mcp-lisp:definvariant config-bounds
+      :on :config
+      :check (<= (mcp-lisp:config :min-size) (mcp-lisp:config :max-size)))
+    (mcp-lisp:definvariant widget-in-range
+      :on widget
+      :check (and (>= (widget-size widget) (mcp-lisp:config :min-size))
+                  (<= (widget-size widget) (mcp-lisp:config :max-size))))
+    (let ((results (mcp-lisp:run-pbt :trials 30 :config-trials 5)))
+      (is (= 0 (getf (first results) :failed))))))
+
+(test validate-specs-config-invariant-accepted
+  "validate-specs does not warn about definvariant :on :config"
+  (with-fresh-specs
+    (mcp-lisp:defconfig
+      (lo number :min 0.0 :max 10.0)
+      (hi number :min 0.0 :max 10.0))
+    (mcp-lisp:definvariant lo-le-hi
+      :on :config
+      :check (<= (mcp-lisp:config :lo) (mcp-lisp:config :hi)))
+    (let ((warnings (mcp-lisp:validate-specs)))
+      (is (null warnings)))))
+
+(test validate-specs-config-invariant-bad-key
+  "validate-specs warns when config invariant references unknown config key"
+  (with-fresh-specs
+    (mcp-lisp:defconfig
+      (lo number :min 0.0 :max 10.0))
+    (mcp-lisp:definvariant bad-ref
+      :on :config
+      :check (<= (mcp-lisp:config :lo) (mcp-lisp:config :hi)))
+    (let ((warnings (mcp-lisp:validate-specs)))
+      (is (= 1 (length warnings)))
+      (is (search "unknown config key" (first warnings))))))
+
+;;; ---------------------------------------------------------------------------
 ;;; Scenario PBT
 ;;; ---------------------------------------------------------------------------
 

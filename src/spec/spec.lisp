@@ -899,12 +899,14 @@ Returns a list of warning strings. Empty list = all clear."
                                      key (car when-clause))
                              warnings)))))
                *rules*)
-      ;; Check invariants — :on should name an entity, variant, or scenario
+      ;; Check invariants — :on should name an entity, variant, scenario, or :config
       (maphash (lambda (key plist)
                  (let ((on (getf plist :on)))
                    (when on
                      (unless (or (known-entity-p on) (known-variant-p on)
-                                 (known-scenario-p on))
+                                 (known-scenario-p on)
+                                 (and (keywordp on)
+                                      (string-equal (symbol-name on) "CONFIG")))
                        (push (format nil "invariant ~A: :on references unknown entity/scenario ~A"
                                      key on)
                              warnings)))))
@@ -919,30 +921,49 @@ Returns a list of warning strings. Empty list = all clear."
                              warnings)))))
                *entities*)
       ;; Check forms in invariant :check clauses — functions and free variables
-      (maphash (lambda (key plist)
-                 (when (getf plist :check)
-                   (setf warnings
-                         (check-form-symbols (getf plist :check)
-                                             (format nil "invariant ~A" key)
-                                             warnings))
-                   (when (getf plist :on)
-                     (let* ((on-sym (getf plist :on))
-                            (scenario (describe-scenario on-sym))
-                            (bound-vars
-                              (if scenario
-                                  ;; Scenario invariant: bindings are the variable names
-                                  (mapcar (lambda (e)
-                                            (intern (symbol-name (getf e :binding))))
-                                          (getf scenario :entities))
-                                  ;; Entity/variant invariant: entity name is the variable
-                                  (list on-sym))))
-                       (setf warnings
-                             (check-form-free-variables
-                              (getf plist :check)
-                              bound-vars
-                              (format nil "invariant ~A" key)
-                              warnings))))))
-               *invariants*)
+      (let ((config-keys (mapcar (lambda (f)
+                                   (intern (string-upcase (symbol-name (first f)))
+                                           :keyword))
+                                 *config*)))
+        (maphash (lambda (key plist)
+                   (when (getf plist :check)
+                     (setf warnings
+                           (check-form-symbols (getf plist :check)
+                                               (format nil "invariant ~A" key)
+                                               warnings))
+                     (when (getf plist :on)
+                       (let ((on-sym (getf plist :on)))
+                         (if (and (keywordp on-sym)
+                                  (string-equal (symbol-name on-sym) "CONFIG"))
+                             ;; Config invariant: no bound entity var, validate config key refs
+                             (labels ((check-config-refs (form)
+                                        (when (consp form)
+                                          (if (and (symbolp (first form))
+                                                   (string-equal (symbol-name (first form)) "CONFIG")
+                                                   (= (length form) 2)
+                                                   (keywordp (second form)))
+                                              (unless (member (second form) config-keys)
+                                                (push (format nil "invariant ~A: (config ~S) references unknown config key"
+                                                              key (second form))
+                                                      warnings))
+                                              (dolist (sub form)
+                                                (check-config-refs sub))))))
+                               (check-config-refs (getf plist :check)))
+                             ;; Entity/variant/scenario invariant: check free variables
+                             (let* ((scenario (describe-scenario on-sym))
+                                    (bound-vars
+                                      (if scenario
+                                          (mapcar (lambda (e)
+                                                    (intern (symbol-name (getf e :binding))))
+                                                  (getf scenario :entities))
+                                          (list on-sym))))
+                               (setf warnings
+                                     (check-form-free-variables
+                                      (getf plist :check)
+                                      bound-vars
+                                      (format nil "invariant ~A" key)
+                                      warnings))))))))
+                 *invariants*))
       ;; Check forms in rule :requires, :ensures, :sets, and :let clauses
       (maphash (lambda (key plist)
                  (dolist (form (getf plist :requires))
