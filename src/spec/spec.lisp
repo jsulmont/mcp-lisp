@@ -1906,7 +1906,7 @@ Returns a string of (defentity ...), (defrule ...), etc. forms."
                                                  (mx (getf e :max))
                                                  (per (getf e :per))
                                                  (refs (getf e :refs)))
-                                             (let ((singular (getf e :singular))
+                                             (let* ((singular (getf e :singular))
                                                    (card (cond (singular mn)
                                                                ((= mn mx) `(,mn ,mx))
                                                                (t `(,mn ,mx))))
