@@ -124,6 +124,30 @@ All macros and functions are available in the `eval_lisp` sandbox with no import
              (length items)))
 ```
 
+#### Helper functions
+
+Persistent utility functions for use in invariant `:check` forms. Survives JSON round-trips (source stored in registry).
+
+```lisp
+(defhelper haversine-distance-nm (lat1 lon1 lat2 lon2)
+  (let* ((to-rad (/ pi 180.0d0))
+         (rlat1 (* lat1 to-rad)) (rlat2 (* lat2 to-rad))
+         (dlat (- rlat2 rlat1))
+         (dlon (* (- lon2 lon1) to-rad))
+         (a (+ (expt (sin (/ dlat 2)) 2)
+               (* (cos rlat1) (cos rlat2) (expt (sin (/ dlon 2)) 2)))))
+    (* 2 3440.065 (atan (sqrt a) (sqrt (- 1 a))))))
+
+(definvariant route-distance-limit
+  :on flight
+  :check (< (haversine-distance-nm
+              (flight-dep-lat flight) (flight-dep-lon flight)
+              (flight-arr-lat flight) (flight-arr-lon flight))
+            (flight-max-range flight)))
+```
+
+`clear-specs` also clears registered helpers.
+
 #### Value sets
 
 Named enumerations for use in invariant checks:
@@ -172,9 +196,14 @@ The `:sets` clause takes alternating `(accessor-form value-form)` pairs. Each ac
 - `(list-requirements)` — non-invariant requirements from `defreq`
 - `(list-scenarios)`, `(describe-scenario name)`
 - `(describe-config)`, `(config-fields)`
-- `(validate-specs)` — catches dangling entity references, undefined functions, free variables, non-exhaustive variant handling, invalid scenario bindings, `:unique-together` fields that don't exist, entities with zero invariant coverage, uncovered FK-like fields/belongs-to relations, config keys referenced by scenario invariants but missing from their generators, rules whose `:sets` touch `:immutable` fields, and entity-level invariants that reference has-many relation accessors (only testable via scenario when no `:cardinality` is set)
+- `(validate-specs)` — catches: rules/invariants referencing unknown entities, unresolvable symbols in `:check`/`:requires`/`:ensures`/`:sets`/`:let` forms, free variables in invariant/rule forms, non-exhaustive variant handling in rules, invalid scenario bindings (unknown entities, `:per` referencing undeclared binding), `:unique-together` fields that don't exist, entities with non-identifier fields but zero invariants, uncovered FK-like fields/belongs-to relations, scenario invariants using aggregates without a `defscenario-generator`, config keys referenced by scenario invariants but missing from their generators, rules whose `:sets` touch `:immutable` fields, entity-level invariants that reference has-many relation accessors (only testable via scenario when no `:cardinality` is set), and trivially true/false `:check` forms (constant values like `t` or numbers)
 - `(suggest-invariants)` — proposes `defscenario` + `definvariant` skeletons for relations and config fields
 - `(compliance-matrix)` — returns requirement-to-invariant-and-rule mapping from `:reqs` metadata on invariants, rules, and `defreq` entries; when a requirement has both invariants and a `defreq`, they are merged into a single row with the defreq's description, category, and status (`:partial` when invariants exist but defreq says `:not-expressible`). Collects untagged invariants under `:uncategorized`
+- `(invariant-coverage-summary)` — coverage ratio per entity, sorted worst-first: `(:entity :fields :covered :uncovered :ratio :uncovered-fields)`
+- `(check-scenario scenario-name instance)` — debug a scenario generator: returns per-invariant pass/fail results
+- `(scenario-invariants-for scenario-name)` — list invariants targeting a scenario
+- `(generate-scenario scenario-name)` — generate a scenario instance (dispatches to custom generator if registered)
+- `(generate-config)` — generate a random config plist within declared bounds
 - `(clear-specs)` — reset all registries
 
 ### Spec analysis
@@ -250,6 +279,7 @@ The default generator automatically extracts constraints from invariant `:check`
 - **Conditional constraints**: `(if (eq state :online) (>= output min-output) t)` → applies bounds only when condition holds
 - **Member conditions**: `(if (member fuel '(:hydro :wind :solar)) (= emissions 0) (> emissions 0))`
 - **Disjunctive state patterns**: `(or (and (eq state :idle) (= rate 0)) (and (eq state :charging) (< rate 0)))` → per-state constraints
+- **Field-to-field references**: `(>= field1 field2)`, `(>= field1 (* 2 field2))` → `:min-field`/`:max-field`/`:eq-field` constraints with optional multiplier factor and exclusivity for strict inequalities
 - **Config references**: `(<= (position-leverage position) (config :max-leverage))` → resolves bound from current config at generation time
 
 Member/enum and boolean fields are generated first, then numeric fields in topologically sorted dependency order (expression deps and conditional deps are both tracked). **State fields** (member fields used in `:when`/`:ensures` of rules) use their `:default` value instead of random selection — this prevents scenario generators from producing instances in terminal states. Non-state member fields are still random. **Boolean fields with `:default`** always generate at their default value (e.g. `(enabled boolean :default t)` always generates `t`). **Nullable fields** (`:nullable t`) generate nil ~30% of the time. A retry loop (10 attempts) catches constraints too complex for static extraction.
@@ -320,6 +350,32 @@ When a scenario invariant is structurally hard to violate via random generation 
 - During negative PBT, every generated instance is checked — if it passes all invariants (i.e. the negative generator produced valid data), a warning is emitted.
 - `scenario-feasibility` reports `:has-negative-generator` when one is registered.
 - Targeted negative trials are added alongside random negative trials; per-invariant rejection stats combine both sources.
+
+### Collection predicates
+
+Utility functions for invariant checks over lists of instances:
+
+```lisp
+;; Check that PRED holds for every unordered pair in LST
+(all-pairs-check lst pred)
+
+;; Check that PRED holds for every consecutive pair in LST
+(consecutive-pairs-check lst pred)
+
+;; Great-circle distance between two lat/lon points, in nautical miles
+(haversine-distance-nm lat1 lon1 lat2 lon2)
+```
+
+Usage in scenario invariants:
+```lisp
+(definvariant no-overlapping-slots
+  :on schedule
+  :check (all-pairs-check slots
+           (lambda (a b)
+             (not (intervals-overlap-p
+                    (getf a :start) (getf a :duration)
+                    (getf b :start) (getf b :duration))))))
+```
 
 ### Temporal interval helpers
 
@@ -421,3 +477,12 @@ A state field is a `(member ...)` field that appears as a source in at least one
 - `(specs-to-json)` — export all specs as JSON (conforms to JSON Schema 2020-12)
 - `(json-to-specs json-string)` — import specs from JSON (merges; call `clear-specs` first for clean import)
 - `(spec-json-schema)` — returns the JSON Schema
+
+### File persistence
+
+```lisp
+(write-specs #p"/path/to/specs.sexp")  ; write all registries as readable s-expression
+(read-specs #p"/path/to/specs.sexp")   ; read back (merges; call clear-specs first for clean load)
+```
+
+Lower-level: `(specs-to-data)` returns a plist, `(data-to-specs plist)` reconstructs registries from it.
