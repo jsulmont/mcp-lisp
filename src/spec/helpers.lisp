@@ -8,6 +8,9 @@
   (:export #:all-pairs-check
            #:consecutive-pairs-check
            #:haversine-distance-nm
+           #:initial-bearing-deg
+           #:heading-difference-deg
+           #:point-in-polygon-p
            #:intervals-overlap-p
            #:interval-contains-p
            #:interval-before-p
@@ -53,6 +56,53 @@
            (c (* 2.0d0 (asin (sqrt (the (double-float 0.0d0 1.0d0) a))))))
       (declare (type double-float sdlat2 sdlon2 a c))
       (* 3440.065d0 c))))
+
+;;; ---------------------------------------------------------------------------
+;;; Bearing & heading
+;;; ---------------------------------------------------------------------------
+
+(declaim (ftype (function (real real real real) double-float) initial-bearing-deg))
+(defun initial-bearing-deg (lat1 lon1 lat2 lon2)
+  "Forward azimuth (initial bearing) from point 1 to point 2, in degrees [0,360)."
+  (declare (optimize (speed 3) (safety 1)))
+  (let* ((to-rad (load-time-value (/ pi 180.0d0) t))
+         (to-deg (load-time-value (/ 180.0d0 pi) t))
+         (rlat1 (* (coerce lat1 'double-float) to-rad))
+         (rlat2 (* (coerce lat2 'double-float) to-rad))
+         (dlon  (* (- (coerce lon2 'double-float) (coerce lon1 'double-float)) to-rad))
+         (x (- (* (cos rlat1) (sin rlat2))
+               (* (sin rlat1) (cos rlat2) (cos dlon))))
+         (y (* (sin dlon) (cos rlat2)))
+         (theta (atan y x)))
+    (declare (type double-float to-rad to-deg rlat1 rlat2 dlon x y theta))
+    (mod (* theta to-deg) 360.0d0)))
+
+(declaim (ftype (function (real real) double-float) heading-difference-deg))
+(defun heading-difference-deg (h1 h2)
+  "Smallest angular difference between two headings in degrees [0,180]."
+  (let ((d (abs (- (mod (coerce h1 'double-float) 360.0d0)
+                   (mod (coerce h2 'double-float) 360.0d0)))))
+    (if (> d 180.0d0) (- 360.0d0 d) d)))
+
+;;; ---------------------------------------------------------------------------
+;;; Point-in-polygon (ray casting)
+;;; ---------------------------------------------------------------------------
+
+(defun point-in-polygon-p (lat lon polygon)
+  "Return T if (LAT, LON) is inside POLYGON.
+POLYGON is a list of (lat lon) pairs forming a closed ring (last edge wraps to
+first vertex automatically). Uses the ray-casting algorithm on the lat/lon
+plane — accurate at TRACON scale (~60 NM)."
+  (let ((inside nil)
+        (n (length polygon)))
+    (loop for i from 0 below n
+          for (yi xi) = (nth i polygon)
+          for (yj xj) = (nth (mod (1+ i) n) polygon)
+          when (and (not (eq (> yi lat) (> yj lat)))
+                    (< lon (+ xi (/ (* (- xj xi) (- lat yi))
+                                    (- yj yi)))))
+            do (setf inside (not inside)))
+    inside))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Temporal interval helpers

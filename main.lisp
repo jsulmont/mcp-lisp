@@ -266,6 +266,9 @@
                 #:all-pairs-check
                 #:consecutive-pairs-check
                 #:haversine-distance-nm
+                #:initial-bearing-deg
+                #:heading-difference-deg
+                #:point-in-polygon-p
                 #:intervals-overlap-p
                 #:interval-contains-p
                 #:interval-before-p
@@ -516,6 +519,9 @@
    #:all-pairs-check
    #:consecutive-pairs-check
    #:haversine-distance-nm
+   #:initial-bearing-deg
+   #:heading-difference-deg
+   #:point-in-polygon-p
    #:intervals-overlap-p
    #:interval-contains-p
    #:interval-before-p
