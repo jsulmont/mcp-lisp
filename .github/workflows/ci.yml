@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SBCL and system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sbcl libev-dev libssl-dev
+
+      - name: Cache Quicklisp
+        uses: actions/cache@v4
+        with:
+          path: ~/quicklisp
+          key: quicklisp-${{ hashFiles('mcp-lisp.asd') }}
+          restore-keys: quicklisp-
+
+      - name: Install Quicklisp
+        run: |
+          if [ ! -f ~/quicklisp/setup.lisp ]; then
+            curl -o /tmp/quicklisp.lisp https://beta.quicklisp.org/quicklisp.lisp
+            sbcl --non-interactive \
+              --load /tmp/quicklisp.lisp \
+              --eval '(quicklisp-quickstart:install)'
+          fi
+
+      - name: Link project into Quicklisp local-projects
+        run: ln -sf $GITHUB_WORKSPACE ~/quicklisp/local-projects/mcp-lisp
+
+      - name: Run tests
+        run: |
+          sbcl --non-interactive \
+            --load ~/quicklisp/setup.lisp \
+            --eval '(ql:quickload :mcp-lisp/tests :silent t)' \
+            --eval '(unless (mcp-lisp/tests:run-tests) (uiop:quit 1))'

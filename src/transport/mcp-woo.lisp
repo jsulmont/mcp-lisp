@@ -1,4 +1,4 @@
-s;;;; src/transport/mcp-woo.lisp
+;;;; src/transport/mcp-woo.lisp
 ;;;;
 ;;;; MCP Streamable HTTP transport using Woo (libev).
 ;;;;
