@@ -1,0 +1,311 @@
+(defpackage #:mcp-lisp/src/spec/rules
+  (:use #:cl)
+  (:import-from #:mcp-lisp/src/spec/registry
+                #:*entities*
+                #:*rules*
+                #:*invariants*
+                #:*config*)
+  (:import-from #:mcp-lisp/src/spec/introspection
+                #:describe-entity
+                #:describe-rule
+                #:list-rules
+                #:entity-fields
+                #:entity-variants)
+  (:import-from #:mcp-lisp/src/spec/transitions
+                #:detect-state-fields
+                #:field-default)
+  (:import-from #:mcp-lisp/src/spec/pbt-util
+                #:get-compiled-fn
+                #:field-keyword
+                #:getf-field-p)
+  (:import-from #:mcp-lisp/src/spec/checking
+                #:invariants-for
+                #:check-invariants)
+  (:import-from #:mcp-lisp/src/spec/generation
+                #:generate-instance
+                #:ensure-entity-accessors
+                #:ensure-variant-accessors
+                #:ensure-config-accessor)
+  (:export #:rule-when-matches-p
+           #:extract-state-target
+           #:extract-field-assignments
+           #:applicable-rules
+           #:apply-rule
+           #:random-walk))
+
+(in-package #:mcp-lisp/src/spec/rules)
+
+;;; ---------------------------------------------------------------------------
+;;; Rule execution
+;;; ---------------------------------------------------------------------------
+
+(defun rule-when-matches-p (when-clause entity-name instance)
+  "Check if a rule's :when clause matches ENTITY-NAME and INSTANCE's state.
+Returns (values match-p state-field expected-state) or (values nil nil nil)."
+  (when (and (consp when-clause) (>= (length when-clause) 3))
+    (let* ((entity-sym (first when-clause))
+           (field-kw (second when-clause))
+           (value-spec (third when-clause))
+           (ename (string-downcase (symbol-name entity-sym))))
+      (when (and (string-equal ename (string-downcase (string entity-name)))
+                 (keywordp field-kw))
+        (let ((current (getf instance field-kw)))
+          (cond
+            ((keywordp value-spec)
+             (values (eq current value-spec) field-kw value-spec))
+            ((and (consp value-spec) (eq (car value-spec) 'member))
+             (values (member current (cdr value-spec)) field-kw value-spec))
+            (t (values nil field-kw value-spec))))))))
+
+(defun extract-state-target (ensures entity-sym state-fields)
+  "Extract (state-field . target-value) from :ensures forms.
+Recognizes (eq accessor :keyword) patterns for state field assignments."
+  (dolist (ens ensures)
+    (when (and (consp ens) (eq (first ens) 'eq) (= (length ens) 3))
+      (let ((lhs (second ens))
+            (rhs (third ens)))
+        (flet ((match-accessor (form)
+                 (cond
+                   ((and (consp form) (eq (first form) 'getf)
+                         (= (length form) 3) (keywordp (third form))
+                         (member (third form) state-fields))
+                    (third form))
+                   (t (let ((field (getf-field-p form entity-sym)))
+                        (when (and field (member field state-fields))
+                          field))))))
+          (let ((lf (match-accessor lhs))
+                (rf (match-accessor rhs)))
+            (cond
+              ((and lf (keywordp rhs)) (return (cons lf rhs)))
+              ((and rf (keywordp lhs)) (return (cons rf lhs))))))))))
+
+(defun extract-field-assignments (ensures entity-sym state-fields)
+  "Extract non-state field assignments from :ensures forms.
+Returns list of (field . value) for (= accessor constant) or (eq accessor constant)
+patterns where field is NOT a state field."
+  (let ((assignments nil))
+    (dolist (ens ensures)
+      (when (and (consp ens) (member (first ens) '(= eq)) (= (length ens) 3))
+        (let ((lhs (second ens))
+              (rhs (third ens)))
+          (flet ((match-field (form)
+                   (cond
+                     ((and (consp form) (eq (first form) 'getf)
+                           (= (length form) 3) (keywordp (third form))
+                           (not (member (third form) state-fields)))
+                      (third form))
+                     (t (let ((field (getf-field-p form entity-sym)))
+                          (when (and field (not (member field state-fields)))
+                            field))))))
+            (let ((lf (match-field lhs))
+                  (rf (match-field rhs)))
+              (cond
+                ((and lf (atom rhs) (not (symbolp rhs)))
+                 (push (cons lf rhs) assignments))
+                ((and lf (keywordp rhs))
+                 (push (cons lf rhs) assignments))
+                ((and rf (atom lhs) (not (symbolp lhs)))
+                 (push (cons rf lhs) assignments))
+                ((and rf (keywordp lhs))
+                 (push (cons rf lhs) assignments))))))))
+    (nreverse assignments)))
+
+(defun applicable-rules (entity-name instance)
+  "Return list of rule name strings whose :when clause matches INSTANCE's current state."
+  (let ((result nil))
+    (dolist (rname (list-rules))
+      (let* ((rule (describe-rule rname))
+             (when-clause (getf rule :when)))
+        (when (rule-when-matches-p when-clause entity-name instance)
+          (push rname result))))
+    (nreverse result)))
+
+(defun apply-rule (entity-name instance rule-name)
+  "Apply a rule to an entity instance, performing the state transition.
+Returns (values new-instance applied-p rejection-reason).
+  applied-p is T if the rule fired, NIL otherwise.
+  rejection-reason is :when-mismatch, (:guard-failed form), or NIL."
+  (ensure-entity-accessors entity-name)
+  (let* ((rname (string-downcase (string rule-name)))
+         (rule (describe-rule rname)))
+    (unless rule
+      (return-from apply-rule (values instance nil :unknown-rule)))
+    (let* ((when-clause (getf rule :when))
+           (requires (getf rule :requires))
+           (sets-clause (getf rule :sets))
+           (ensures (getf rule :ensures))
+           (let-bindings (getf rule :let))
+           (entity-sym (intern (string-upcase (string entity-name))))
+           (state-fields (detect-state-fields entity-name)))
+      ;; 1. Check :when
+      (unless (rule-when-matches-p when-clause entity-name instance)
+        (return-from apply-rule (values instance nil :when-mismatch)))
+      ;; 2. Evaluate :let bindings (best-effort; cross-entity refs will error)
+      (let ((let-vars nil)
+            (let-vals nil))
+        (dolist (binding let-bindings)
+          (when (and (consp binding) (= (length binding) 2))
+            (let ((var (first binding))
+                  (expr (second binding)))
+              (handler-case
+                  (let ((fn (handler-bind ((warning #'muffle-warning))
+                              (compile nil `(lambda (,entity-sym)
+                                              (declare (ignorable ,entity-sym))
+                                              ,expr)))))
+                    (push var let-vars)
+                    (push (funcall fn instance) let-vals))
+                (error () nil)))))
+        ;; 3. Check :requires
+        (dolist (req requires)
+          (handler-case
+              (let* ((params (cons entity-sym (reverse let-vars)))
+                     (fn (handler-bind ((warning #'muffle-warning))
+                           (compile nil `(lambda ,params
+                                           (declare (ignorable ,@params))
+                                           ,req)))))
+                (unless (apply fn instance (reverse let-vals))
+                  (return-from apply-rule
+                    (values instance nil (list :guard-failed req)))))
+            (error ()
+              (return-from apply-rule
+                (values instance nil (list :guard-failed req))))))
+        ;; 4. Apply state transition and field assignments from :ensures
+        (let* ((target (extract-state-target ensures entity-sym state-fields))
+               (field-assignments (extract-field-assignments ensures entity-sym state-fields))
+               (new (copy-list instance)))
+          (when target
+            (setf (getf new (car target)) (cdr target)))
+          (dolist (assignment field-assignments)
+            (setf (getf new (car assignment)) (cdr assignment)))
+          ;; 5. Check immutable fields before applying :sets
+          (let ((immutable-keys nil))
+            (dolist (field (getf (describe-entity entity-name) :fields))
+              (when (getf (cddr field) :immutable)
+                (push (field-keyword (first field)) immutable-keys)))
+            (when immutable-keys
+              (loop for (accessor-form _vf) on sets-clause by #'cddr
+                    for fkw = (getf-field-p accessor-form entity-sym)
+                    when (and fkw (member fkw immutable-keys)
+                              (getf instance fkw))
+                      do (return-from apply-rule
+                           (values instance nil (list :immutable-violation fkw))))))
+          ;; 6. Apply :sets — evaluate each (accessor-form value-form) pair
+          (loop for (accessor-form value-form) on sets-clause by #'cddr
+                do (handler-case
+                       (let* ((params (cons entity-sym (reverse let-vars)))
+                              (val-fn (handler-bind ((warning #'muffle-warning))
+                                        (compile nil `(lambda ,params
+                                                        (declare (ignorable ,@params))
+                                                        ,value-form))))
+                              (field-kw (getf-field-p accessor-form entity-sym)))
+                         (when field-kw
+                           (setf (getf new field-kw)
+                                 (apply val-fn new (reverse let-vals)))))
+                     (error () nil)))
+          (values new t nil))))))
+
+(defun random-walk (entity-name &key (steps 20) (trials 50) (verbose t))
+  "Random walk PBT: generate instances and apply random applicable rules,
+checking invariants at each step. Reports violations with the rule trace
+that led to them.
+Returns a result plist:
+  :entity — entity name
+  :trials — number of trials
+  :steps — max steps per trial
+  :passed — trials with no violations
+  :failed — trials with at least one violation
+  :failures — list of failure plists (:trace :violation :instance)"
+  (ensure-entity-accessors entity-name)
+  (dolist (vname (entity-variants entity-name))
+    (ensure-variant-accessors vname))
+  (when *config*
+    (ensure-config-accessor))
+  (let ((passed 0)
+        (failed 0)
+        (failures nil))
+    (dotimes (_trial trials)
+      (let ((instance (let ((state-fields (detect-state-fields entity-name)))
+                        (if state-fields
+                            (let ((overrides nil))
+                              (dolist (sf state-fields)
+                                (let ((default (field-default entity-name sf)))
+                                  (when default
+                                    (push default overrides)
+                                    (push sf overrides))))
+                              (generate-instance entity-name overrides))
+                            (generate-instance entity-name))))
+            (trace nil)
+            (violation nil))
+        ;; Check initial invariants
+        (let* ((result (check-invariants entity-name instance))
+               (violations (when (eq (car result) :fail) (cdr result))))
+          (when violations
+            (setf violation (list :step 0
+                                  :after "initial"
+                                  :violated violations
+                                  :instance (copy-list instance)))))
+        ;; Walk
+        (unless violation
+          (loop for step from 1 to steps
+                for rules = (applicable-rules entity-name instance)
+                while (and rules (not violation))
+                do (let ((shuffled (let ((v (coerce (copy-list rules) 'vector)))
+                                      (loop for i from (1- (length v)) downto 1
+                                            for j = (random (1+ i))
+                                            do (rotatef (aref v i) (aref v j)))
+                                      (coerce v 'list)))
+                         (applied nil))
+                     ;; Try rules in random order until one applies
+                     (dolist (rname shuffled)
+                       (multiple-value-bind (new ok _reason)
+                           (apply-rule entity-name instance rname)
+                         (declare (ignore _reason))
+                         (when ok
+                           (push rname trace)
+                           (setf instance new
+                                 applied t)
+                           ;; Check invariants after transition
+                           (let* ((r2 (check-invariants entity-name instance))
+                                  (violations (when (eq (car r2) :fail) (cdr r2))))
+                             (when violations
+                               (setf violation
+                                     (list :step step
+                                           :after rname
+                                           :violated violations
+                                           :instance (copy-list instance)
+                                           :trace (reverse trace)))))
+                           (return))))
+                     (unless applied (return)))))
+        (if violation
+            (progn
+              (incf failed)
+              (when (< (length failures) 10)
+                (push violation failures)))
+            (incf passed))))
+    ;; Print results
+    (let* ((inv-count (length (invariants-for entity-name)))
+           (result (list :entity entity-name
+                         :trials trials
+                         :steps steps
+                         :invariants inv-count
+                         :passed passed
+                         :failed failed
+                         :failures (nreverse failures))))
+      (when verbose
+        (format t "~%=== Random Walk Results ===~%")
+        (format t "  ~A (~A invariants, ~A steps/trial)~%"
+                entity-name inv-count steps)
+        (if (zerop failed)
+            (format t "    ~A/~A passed~%" passed trials)
+            (progn
+              (format t "    ~A/~A passed, ~A FAILED~%" passed trials failed)
+              (dolist (f (getf result :failures))
+                (let ((after (getf f :after))
+                      (violated (getf f :violated))
+                      (trace (getf f :trace))
+                      (inst (getf f :instance)))
+                  (format t "    after ~A~@[ (trace: ~{~A~^ → ~})~]:~%"
+                          after trace)
+                  (dolist (v violated)
+                    (format t "      ~A: ~S~%" v inst)))))))
+      result)))

@@ -309,7 +309,7 @@ Handles both status-code returns and dexador condition signals."
 When TOOL-CHOICE is :none, tools are omitted entirely.
 THINKING-BUDGET: Anthropic-only, enables extended thinking with this token budget."
   (unless *api-key*
-    (error "API key not set. Set *api-key*, env var, or key file (~/.anthropic-key etc)."))
+    (error "API key not set. Set *api-key*, env var, or key file (~~/.anthropic-key etc)."))
   (let ((effective-tools (if (eq tool-choice :none) nil tools)))
     (ecase *provider*
       ((:groq :openai)
