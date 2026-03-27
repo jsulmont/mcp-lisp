@@ -881,12 +881,17 @@ Only :postgresql dialect is currently supported."
           (setf (getf inst kw) (generate-seed-id entity-name)))))
     instances))
 
+(defun format-number-for-sql (value)
+  "Format a number as a clean decimal string without CL exponent markers (d0, f0, etc.)."
+  (let ((*read-default-float-format* 'double-float))
+    (format nil "~A" (if (floatp value) (coerce value 'double-float) value))))
+
 (defun list-to-json (lst)
   "Convert a Lisp list to a JSON array string."
   (format nil "[~{~A~^, ~}]"
           (mapcar (lambda (v)
                     (cond ((stringp v) (format nil "~S" v))
-                          ((numberp v) (format nil "~A" v))
+                          ((numberp v) (format-number-for-sql v))
                           ((keywordp v) (format nil "~S" (lisp-to-sql (symbol-name v))))
                           ((consp v) (list-to-json v))
                           ((null v) "null")
@@ -911,7 +916,7 @@ Only :postgresql dialect is currently supported."
      (format nil "'~A'" (lisp-to-sql (symbol-name value))))
     ((stringp value)
      (format nil "'~A'" (substitute #\' #\' value)))  ; basic escaping
-    ((numberp value) (format nil "~A" value))
+    ((numberp value) (format-number-for-sql value))
     (t (format nil "'~A'" value))))
 
 (defun entity-belongs-to-targets (entity-name)
