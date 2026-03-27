@@ -81,7 +81,10 @@
                 #:entity-accessor-p
                 #:config-accessor-p
                 #:variant-accessor-p
-                #:decompose-accessor)
+                #:decompose-accessor
+                #:list-dsl-forms
+                #:describe-dsl
+                #:spec-reference)
   (:export ;; Registries
            #:*entities*
            #:*rules*
@@ -155,7 +158,11 @@
            #:specs-to-data
            #:data-to-specs
            #:write-specs
-           #:read-specs))
+           #:read-specs
+           ;; Reflection
+           #:list-dsl-forms
+           #:describe-dsl
+           #:spec-reference))
 
 (in-package #:mcp-lisp/src/spec/spec)
 

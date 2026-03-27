@@ -12,7 +12,8 @@
                 #:*config*
                 #:*current-config*
                 #:*scenarios*
-                #:*requirements*)
+                #:*requirements*
+                #:*dsl-docs*)
   (:export #:list-entities
            #:describe-entity
            #:entity-fields
@@ -33,7 +34,10 @@
            #:entity-accessor-p
            #:config-accessor-p
            #:variant-accessor-p
-           #:decompose-accessor))
+           #:decompose-accessor
+           #:list-dsl-forms
+           #:describe-dsl
+           #:spec-reference))
 
 (in-package #:mcp-lisp/src/spec/introspection)
 
@@ -259,3 +263,96 @@ Returns NIL if SYM is not a recognized accessor."
                          (values ekey suffix)))))))
              *entities*)
     nil))
+
+;;; ---------------------------------------------------------------------------
+;;; DSL reflection
+;;; ---------------------------------------------------------------------------
+
+(defun list-dsl-forms ()
+  "Return registered DSL form names sorted by section and order."
+  (let ((entries nil))
+    (maphash (lambda (k v) (declare (ignore k)) (push v entries)) *dsl-docs*)
+    (sort entries (lambda (a b)
+                    (let ((sa (or (getf a :section) ""))
+                          (sb (or (getf b :section) "")))
+                      (if (string= sa sb)
+                          (< (or (getf a :order) 0) (or (getf b :order) 0))
+                          (string< sa sb)))))))
+
+(defun describe-dsl (name)
+  "Return the documentation plist for DSL form NAME, or NIL."
+  (gethash (string-downcase (string name)) *dsl-docs*))
+
+(defun spec-reference ()
+  "Generate a markdown spec DSL reference from live system metadata.
+Covers all registered DSL forms with synopsis, example, and options."
+  (with-output-to-string (out)
+    (format out "## Spec DSL Reference~%~%")
+    (format out "All macros and functions are available in the `eval_lisp` sandbox with no imports.~%~%")
+    (let ((current-section nil))
+      (dolist (entry (list-dsl-forms))
+        (let ((name (getf entry :name))
+              (synopsis (getf entry :synopsis))
+              (example (getf entry :example))
+              (options (getf entry :options))
+              (section (getf entry :section)))
+          (when (and section (not (equal section current-section)))
+            (format out "### ~A~%~%" section)
+            (setf current-section section))
+          (format out "#### `~A`~%~%" name)
+          (when synopsis
+            (format out "~A~%~%" synopsis))
+          (when example
+            (format out "```lisp~%~A~%```~%~%" example))
+          (when options
+            (dolist (opt options)
+              (format out "- **~A**: ~A~%" (first opt) (second opt)))
+            (format out "~%")))))
+    ;; Querying specs section
+    (format out "### Querying specs~%~%")
+    (format out "- `(list-entities)`, `(describe-entity name)`, `(entity-fields name)`, `(entity-relations name)`~%")
+    (format out "- `(list-rules)`, `(describe-rule name)`~%")
+    (format out "- `(list-invariants)`, `(describe-invariant name)`~%")
+    (format out "- `(list-variants)`, `(describe-variant name)`, `(entity-variants entity-name)`~%")
+    (format out "- `(list-valuesets)` — named value sets from `defvalueset`~%")
+    (format out "- `(list-requirements)` — non-invariant requirements from `defreq`~%")
+    (format out "- `(list-scenarios)`, `(describe-scenario name)`~%")
+    (format out "- `(describe-config)`, `(config-fields)`~%")
+    (format out "- `(validate-specs)` — structural validation~%")
+    (format out "- `(suggest-invariants)` — propose missing invariants~%")
+    (format out "- `(compliance-matrix)` — requirement-to-invariant mapping~%")
+    (format out "- `(invariant-coverage-summary)` — coverage ratio per entity~%")
+    (format out "- `(clear-specs)` — reset all registries~%")
+    (format out "~%### Spec analysis~%~%")
+    (format out "- `(invariant-coverage \"entity\")` — fields covered by invariants~%")
+    (format out "- `(field-index \"entity\" :field)` — reverse lookup: what invariants/rules touch a field~%")
+    (format out "- `(generation-feasibility \"entity\")` — can the default generator produce valid instances?~%")
+    (format out "- `(scenario-feasibility \"scenario\")` — does a scenario need a custom generator?~%")
+    (format out "- `(simulate-trace \"entity\" instance '(\"rule1\" \"rule2\"))` — step through rules~%")
+    (format out "~%### State machine analysis~%~%")
+    (format out "- `(detect-state-fields \"entity\")` — find member fields used in rules~%")
+    (format out "- `(extract-transitions \"entity\")` — transition graph~%")
+    (format out "- `(analyze-state-machine \"entity\")` — full analysis: states, terminal, unreachable, dead-ends~%")
+    (format out "- `(validate-transitions)` — warn about unreachable states and dead ends~%")
+    (format out "~%### Property-based testing~%~%")
+    (format out "```lisp~%(run-pbt :trials 200)~%(run-pbt :trials 100 :config-trials 5)~%(run-pbt :scenario \"name\" :trials 50)~%(run-pbt :trials 200 :negative-trials 100)~%```~%~%")
+    (format out "- `(generate-instance \"entity\")` — constraint-aware random instance~%")
+    (format out "- `(check-invariants \"entity\" instance)` — targeted checking~%")
+    (format out "- `(extract-generation-constraints \"entity\")` — inspect extracted constraints~%")
+    (format out "- `(generate-config)` — random config within declared bounds~%")
+    (format out "- `(generate-scenario \"scenario\")` — generate scenario instance~%")
+    (format out "- `(check-scenario \"scenario\" instance)` — debug a scenario generator~%")
+    (format out "~%### Rule execution~%~%")
+    (format out "- `(apply-rule \"entity\" instance \"rule\")` — apply a single rule~%")
+    (format out "- `(applicable-rules \"entity\" instance)` — which rules can fire~%")
+    (format out "- `(random-walk \"entity\" :steps 20 :trials 50)` — random walk PBT~%")
+    (format out "~%### Code generation~%~%")
+    (format out "- `(specs-to-sql)` — PostgreSQL DDL~%")
+    (format out "- `(specs-to-sql-seed :rows-per-entity 20)` — INSERT statements~%")
+    (format out "- `(specs-to-lisp)` — loadable .lisp file~%")
+    (format out "~%### Serialization~%~%")
+    (format out "- `(specs-to-json)` — export as JSON~%")
+    (format out "- `(json-to-specs json-string)` — import from JSON~%")
+    (format out "- `(spec-json-schema)` — JSON Schema~%")
+    (format out "- `(write-specs #p\"/path/to/file.sexp\")` — write s-expression~%")
+    (format out "- `(read-specs #p\"/path/to/file.sexp\")` — read s-expression~%")))

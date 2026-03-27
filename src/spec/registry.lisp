@@ -24,7 +24,9 @@
            #:*requirements*
            #:+known-field-keys+
            #:+relation-types+
-           #:clear-specs))
+           #:clear-specs
+           #:*dsl-docs*
+           #:register-dsl-doc))
 
 (in-package #:mcp-lisp/src/spec/registry)
 
@@ -61,6 +63,27 @@
 
 (defparameter +known-field-keys+ '(:required :default :unique :min :max :derived-from :immutable :nullable))
 (defparameter +relation-types+ '(:has-many :has-one :belongs-to))
+
+;;; ---------------------------------------------------------------------------
+;;; DSL documentation registry
+;;; ---------------------------------------------------------------------------
+
+(defvar *dsl-docs* (make-hash-table :test #'equal)
+  "Documentation entries for DSL forms. Keys are lowercase name strings.
+Each value is a plist (:name :type :synopsis :example :options :section :order).")
+
+(defun register-dsl-doc (name &key type synopsis example options section (order 0))
+  "Register documentation for a DSL form.
+TYPE is :macro, :function, or :variable.
+SECTION groups entries in the generated reference."
+  (setf (gethash (string-downcase (string name)) *dsl-docs*)
+        (list :name (string-downcase (string name))
+              :type type
+              :synopsis synopsis
+              :example example
+              :options options
+              :section section
+              :order order)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; clear-specs

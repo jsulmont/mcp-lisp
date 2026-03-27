@@ -4,7 +4,7 @@ A specification DSL embedded in Common Lisp for capturing domain models as struc
 
 Inspired by [JUXT Allium](https://github.com/juxt/allium) but executable from day one. See [mcp-lisp vs allium v3](../mcp-lisp-vs-allium-v3.md) for a detailed comparison.
 
-For API reference (every function and macro), see [spec-reference.md](spec-reference.md).
+For API reference (every function and macro), call `(spec-reference)` at the REPL or via `eval_lisp` — it generates a complete reference from live system metadata. A static snapshot is also available in [spec-reference.md](spec-reference.md).
 
 ## Why
 

@@ -17,7 +17,8 @@
                 #:*requirements*
                 #:*compiled-fn-cache*
                 #:+known-field-keys+
-                #:+relation-types+)
+                #:+relation-types+
+                #:register-dsl-doc)
   (:export #:defentity
            #:defrule
            #:definvariant
@@ -316,3 +317,115 @@ Used for API-level, authorization, operational, or performance requirements.
 (defun list-requirements ()
   "Return a list of registered requirement ID strings."
   (loop for k being the hash-keys of *requirements* collect k))
+
+;;; ---------------------------------------------------------------------------
+;;; DSL documentation registration
+;;; ---------------------------------------------------------------------------
+
+(register-dsl-doc 'defentity
+  :type :macro :section "Defining specs" :order 1
+  :synopsis "Define a specification entity with typed fields, relations, and constraints."
+  :example "(defentity user ()
+  (id string :required t :unique t)
+  (name string)
+  (email string :required t)
+  (role (member :admin :member :guest) :default :member)
+  (:has-many orders :of order)
+  (:unique-together email role)
+  (:derived display-name (lambda (u) (or (name u) (email u)))))"
+  :options '(("Field types" "string, number, integer, boolean, (member :a :b ...), (list-of type)")
+             (":required" "Field must be non-nil")
+             (":unique" "Field value must be unique across instances")
+             (":default" "Default value for generation")
+             (":min / :max" "Numeric bounds for generation and SQL CHECK")
+             (":immutable" "Field cannot be changed after initial set")
+             (":nullable" "Generator produces nil ~30% of the time")
+             (":derived-from" "Field computed from other fields")
+             (":has-many" "One-to-many relation; :of names target entity; :cardinality (min max) bounds count")
+             (":has-one" "One-to-one relation")
+             (":belongs-to" "Many-to-one relation; auto-generates FK field")
+             (":unique-together" "Composite uniqueness constraint across fields")))
+
+(register-dsl-doc 'defrule
+  :type :macro :section "Defining specs" :order 2
+  :synopsis "Define a state transition rule with guards and side effects."
+  :example "(defrule place-order
+  :when (order :state :draft)
+  :let ((customer (order-customer order)))
+  :requires ((active-account-p customer))
+  :sets ((order-placed-at order) (get-universal-time))
+  :ensures ((eq (order-state order) :placed))
+  :reqs (\"REQ-ORD-001\"))"
+  :options '((":when" "(entity :field :value) — required source state; accepts (member ...) for multiple")
+             (":let" "Bind local variables for use in :requires/:sets")
+             (":requires" "Guard predicates — all must be true")
+             (":sets" "Alternating (accessor value) pairs for field updates")
+             (":ensures" "Target state assertions after transition")
+             (":reqs" "Requirement IDs for compliance traceability")))
+
+(register-dsl-doc 'definvariant
+  :type :macro :section "Defining specs" :order 3
+  :synopsis "Define a property that must always hold on an entity, variant, scenario, or config."
+  :example "(definvariant positive-balance
+  :on account
+  :check (>= (account-balance account) 0))"
+  :options '((":on" "Entity, variant, scenario name, or :config")
+             (":check" "Lisp form evaluated against instances; must return non-nil")
+             (":reqs" "Requirement IDs for compliance traceability")))
+
+(register-dsl-doc 'defvariant
+  :type :macro :section "Defining specs" :order 4
+  :synopsis "Define a variant (discriminated union arm) of an entity."
+  :example "(defvariant branch (node :kind :branch)
+  (children list :required t))"
+  :options '(("parent" "Base entity name")
+             ("discriminator" "Keyword field used for dispatch")
+             ("value" "Discriminator value identifying this variant")
+             ("fields" "Additional fields specific to this variant")))
+
+(register-dsl-doc 'defconfig
+  :type :macro :section "Defining specs" :order 5
+  :synopsis "Define typed configuration parameters with defaults and bounds."
+  :example "(defconfig
+  (max-leverage number :default 10.0 :min 1.0 :max 100.0)
+  (allow-short-selling boolean :default t))"
+  :options '(("Field modifiers" "Same as defentity: :default, :min, :max")
+             ("PBT" ":config-trials generates random configs within declared bounds")
+             ("Invariants" "Reference config values with (config :key)")))
+
+(register-dsl-doc 'defscenario
+  :type :macro :section "Defining specs" :order 6
+  :synopsis "Define a multi-entity test scenario for cross-entity PBT."
+  :example "(defscenario order-fulfillment
+  :entities ((warehouses (1 3) warehouse)
+             (orders     (5 20) order)
+             (items      (1 5) line-item :per orders)))"
+  :options '(("Cardinality" "(min max) produces a list; bare N produces a single plist")
+             (":per" "Generate instances per parent binding")
+             (":refs" "Auto-wire FK fields: ((local-field :from binding :field field) ...)")))
+
+(register-dsl-doc 'defhelper
+  :type :macro :section "Defining specs" :order 7
+  :synopsis "Define a persistent utility function for use in invariant :check forms."
+  :example "(defhelper haversine-distance-nm (lat1 lon1 lat2 lon2)
+  (let* ((to-rad (/ pi 180.0d0)) ...) ...))"
+  :options '(("Persistence" "Source stored in registry; survives JSON round-trips")
+             ("clear-specs" "Also clears registered helpers")))
+
+(register-dsl-doc 'defvalueset
+  :type :macro :section "Defining specs" :order 8
+  :synopsis "Define a named set of values for use in invariant checks via in-set."
+  :example "(defvalueset valid-codes (1 2 3 4 5 6 7 8 9 10 11 13 14 252 253 254))"
+  :options '(("in-set" "(in-set 'valid-codes value) — membership check; translates to SQL IN (...)")))
+
+(register-dsl-doc 'defreq
+  :type :macro :section "Defining specs" :order 9
+  :synopsis "Register a non-invariant requirement for compliance tracking."
+  :example "(defreq \"REQ-API-001\" \"Return 404 for unauthorized access\"
+  :category :api
+  :status :not-expressible
+  :notes \"HTTP-level behavior, not a data property\")"
+  :options '((":category" ":api, :authorization, :operational, :performance, or custom")
+             (":status" ":not-expressible or :partial")
+             (":notes" "Free-text explanation")
+             ("compliance-matrix" "Appears alongside invariant-backed requirements")))

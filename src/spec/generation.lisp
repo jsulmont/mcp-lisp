@@ -1,6 +1,7 @@
 (defpackage #:mcp-lisp/src/spec/generation
   (:use #:cl)
   (:import-from #:mcp-lisp/src/spec/registry
+                #:register-dsl-doc
                 #:*entities*
                 #:*generators*
                 #:*generator-sources*
@@ -544,3 +545,43 @@ of the scenario invariants reject it, the negative generator is flagged as broke
        (setf (gethash ,key *scenario-negative-generator-sources*)
              '(defscenario-negative-generator ,scenario-name (,overrides-var) ,@body))
        ',scenario-name)))
+
+;;; ---------------------------------------------------------------------------
+;;; DSL documentation registration
+;;; ---------------------------------------------------------------------------
+
+(register-dsl-doc 'defgenerator
+  :type :macro :section "Defining specs" :order 10
+  :synopsis "Register a custom instance generator for an entity."
+  :example "(defgenerator triple (overrides)
+  (let* ((inst (default-generate-instance \"triple\" overrides))
+         (a (getf inst :a))
+         (b (getf inst :b)))
+    (setf (getf inst :result) (- (* b b) a))
+    inst))"
+  :options '(("overrides" "Plist of :keyword value or NIL; use override-val / override-present-p to read")
+             ("default-generate-instance" "Constraint-aware base generator — use as starting point")
+             ("generate-value" "Generate individual typed values: (generate-value 'number :min 0 :max 10)")))
+
+(register-dsl-doc 'defscenario-generator
+  :type :macro :section "Defining specs" :order 11
+  :synopsis "Register a custom scenario generator. Required when scenario invariants use aggregates."
+  :example "(defscenario-generator order-fulfillment (overrides)
+  (declare (ignore overrides))
+  (let* ((warehouses (list (generate-instance \"warehouse\")))
+         (orders (loop repeat 5 collect (generate-instance \"order\"))))
+    (list :warehouses warehouses :orders orders)))"
+  :options '(("Return format" "Plist mapping binding keywords to instances (lists or single plists)")
+             ("config" "Use (config :key) — returns :default outside PBT, live value during PBT")))
+
+(register-dsl-doc 'defscenario-negative-generator
+  :type :macro :section "Defining specs" :order 12
+  :synopsis "Register a targeted negative generator for scenario invariant testing."
+  :example "(defscenario-negative-generator raft-cluster (overrides)
+  (declare (ignore overrides))
+  (let ((term (+ 1 (random 10))))
+    (list :servers
+          (list (generate-instance \"server\" (list :state :leader :current-term term))
+                (generate-instance \"server\" (list :state :leader :current-term term))))))"
+  :options '(("Purpose" "Produce instances that SHOULD violate at least one scenario invariant")
+             ("Validation" "During negative PBT, instances passing all invariants are flagged as broken")))

@@ -224,7 +224,10 @@
                 #:specs-to-data
                 #:data-to-specs
                 #:write-specs
-                #:read-specs)
+                #:read-specs
+                #:list-dsl-forms
+                #:describe-dsl
+                #:spec-reference)
   ;; Spec transitions
   (:import-from #:mcp-lisp/src/spec/transitions
                 #:detect-state-fields
@@ -529,6 +532,10 @@
    #:suggest-invariants
    ;; Spec codegen
    #:specs-to-sql
-   #:specs-to-sql-seed))
+   #:specs-to-sql-seed
+   ;; Spec reflection
+   #:list-dsl-forms
+   #:describe-dsl
+   #:spec-reference))
 
 (in-package #:mcp-lisp/main)
