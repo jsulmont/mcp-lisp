@@ -155,3 +155,104 @@
       (is (search ":after" lisp-src))
       (is (search ":creates" lisp-src))
       (is (search ":deletes" lisp-src)))))
+
+;;; ===========================================================================
+;;; set-of type
+;;; ===========================================================================
+
+(test set-of-generates-subset
+  "generate-value for (set-of ...) produces a subset of the choices"
+  (dotimes (i 50)
+    (let ((v (mcp-lisp:generate-value '(set-of :a :b :c :d))))
+      (is (listp v))
+      (is (every (lambda (x) (member x '(:a :b :c :d))) v)))))
+
+(test set-of-in-entity
+  "Entity with (set-of ...) field generates valid subsets"
+  (with-rule-specs
+    (mcp-lisp:defentity device ()
+      (id string :required t)
+      (modes-supported (set-of :heat :cool :auto :fan))
+      (modes-enabled (set-of :heat :cool :auto :fan)))
+    (dotimes (i 20)
+      (let ((inst (mcp-lisp:generate-instance "device")))
+        (is (listp (getf inst :modes-supported)))
+        (is (listp (getf inst :modes-enabled)))
+        (is (every (lambda (m) (member m '(:heat :cool :auto :fan)))
+                   (getf inst :modes-supported)))))))
+
+;;; ===========================================================================
+;;; diff-specs — completeness verification
+;;; ===========================================================================
+
+(test diff-specs-reports-missing-and-extra
+  "diff-specs compares registered entities against expected list"
+  (with-rule-specs
+    (mcp-lisp:defentity alpha () (id string :required t))
+    (mcp-lisp:defentity beta () (id string :required t))
+    (let ((result (mcp-lisp:diff-specs '("alpha" "beta" "gamma"))))
+      (is (equal '("gamma") (getf result :missing)))
+      (is (null (getf result :extra)))
+      (is (= 2 (length (getf result :matched))))
+      (is (< (getf result :coverage) 0.7)))))
+
+;;; ===========================================================================
+;;; distribute-values / partition-into — generation helpers
+;;; ===========================================================================
+
+(test distribute-values-sums-within-total
+  "distribute-values produces N values summing to at most total"
+  (dotimes (i 50)
+    (let ((vals (mcp-lisp:distribute-values 5 100)))
+      (is (= 5 (length vals)))
+      (is (<= (reduce #'+ vals) 100))
+      (is (every #'numberp vals)))))
+
+(test partition-into-distributes-all-items
+  "partition-into puts every item into exactly one group"
+  (let* ((items '(1 2 3 4 5 6 7 8))
+         (groups (mcp-lisp:partition-into items 3)))
+    (is (= 3 (length groups)))
+    (is (= 8 (reduce #'+ groups :key #'length)))
+    (is (null (set-difference items (apply #'append groups))))))
+
+;;; ===========================================================================
+;;; Cross-entity invariant :path stored
+;;; ===========================================================================
+
+(test invariant-path-stored
+  "definvariant stores :path clause"
+  (with-rule-specs
+    (mcp-lisp:defentity der ()
+      (id string :required t))
+    (mcp-lisp:definvariant settings-bounded
+      :on der
+      :path ((settings der-settings :via :has-one))
+      :check (<= (der-settings-set-max-w settings) 1000))
+    (let ((inv (mcp-lisp:describe-invariant "settings-bounded")))
+      (is (not (null (getf inv :path)))))))
+
+;;; ===========================================================================
+;;; Scenario-aware random walk
+;;; ===========================================================================
+
+(test random-walk-scenario-runs
+  "random-walk-scenario generates and walks a scenario"
+  (with-rule-specs
+    (mcp-lisp:defentity account ()
+      (id string :required t)
+      (balance number :required t :min 0.0 :max 1000.0)
+      (status (member :active :frozen) :default :active))
+    (mcp-lisp:defrule freeze-account
+      :when (account :status :active)
+      :requires ((< (account-balance account) 10))
+      :ensures ((eq (account-status account) :frozen)))
+    (mcp-lisp:definvariant balance-non-negative
+      :on account
+      :check (>= (account-balance account) 0))
+    (mcp-lisp:defscenario multi-account
+      :entities ((accounts (2 5) account)))
+    (let ((result (mcp-lisp:random-walk-scenario "multi-account"
+                    :steps 10 :trials 10 :verbose nil)))
+      (is (not (null result)))
+      (is (= 0 (getf result :failed))))))

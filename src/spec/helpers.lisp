@@ -7,6 +7,8 @@
   (:use #:cl)
   (:export #:all-pairs-check
            #:consecutive-pairs-check
+           #:distribute-values
+           #:partition-into
            #:haversine-distance-nm
            #:initial-bearing-deg
            #:heading-difference-deg
@@ -138,3 +140,35 @@ plane — accurate at TRACON scale (~60 NM)."
   "Return T if NOW is still within RETENTION-DURATION of EVENT-TIME.
 I.e. (- now event-time) < retention-duration."
   (< (- now event-time) retention-duration))
+
+;;; ---------------------------------------------------------------------------
+;;; Generation strategies for cross-entity constraints
+;;; ---------------------------------------------------------------------------
+
+(defun distribute-values (n total &key (min 0))
+  "Generate N non-negative numbers that sum to at most TOTAL, each >= MIN.
+Useful in scenario generators: distribute child demands within parent capacity."
+  (let* ((remaining (- total (* n min)))
+         (result nil))
+    (when (< remaining 0) (setf remaining 0))
+    (dotimes (i n)
+      (let ((share (if (= i (1- n))
+                       remaining
+                       (random (1+ (floor remaining (max 1 (- n i))))))))
+        (push (+ min share) result)
+        (decf remaining share)))
+    (nreverse result)))
+
+(defun partition-into (items n)
+  "Randomly partition ITEMS into N non-empty groups (when possible).
+Returns a list of N lists. Useful for assigning children to parents."
+  (let ((groups (make-array n :initial-element nil))
+        (shuffled (let ((v (coerce (copy-list items) 'vector)))
+                    (loop for i from (1- (length v)) downto 1
+                          for j = (random (1+ i))
+                          do (rotatef (aref v i) (aref v j)))
+                    (coerce v 'list))))
+    (loop for item in shuffled
+          for i from 0
+          do (push item (aref groups (mod i n))))
+    (coerce groups 'list)))

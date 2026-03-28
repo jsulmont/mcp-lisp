@@ -267,8 +267,11 @@
                 #:apply-rule
                 #:applicable-rules
                 #:random-walk
+                #:random-walk-scenario
                 #:all-pairs-check
                 #:consecutive-pairs-check
+                #:distribute-values
+                #:partition-into
                 #:haversine-distance-nm
                 #:initial-bearing-deg
                 #:heading-difference-deg
@@ -286,7 +289,8 @@
                 #:field-index
                 #:generation-feasibility
                 #:simulate-trace
-                #:scenario-feasibility)
+                #:scenario-feasibility
+                #:diff-specs)
   ;; Spec codegen
   (:import-from #:mcp-lisp/src/spec/codegen
                 #:specs-to-sql
@@ -524,8 +528,11 @@
    #:apply-rule
    #:applicable-rules
    #:random-walk
+   #:random-walk-scenario
    #:all-pairs-check
    #:consecutive-pairs-check
+   #:distribute-values
+   #:partition-into
    #:haversine-distance-nm
    #:initial-bearing-deg
    #:heading-difference-deg
@@ -543,6 +550,7 @@
    #:generation-feasibility
    #:simulate-trace
    #:scenario-feasibility
+   #:diff-specs
    #:suggest-invariants
    ;; Spec codegen
    #:specs-to-sql

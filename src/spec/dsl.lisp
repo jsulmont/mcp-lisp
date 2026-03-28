@@ -302,20 +302,24 @@ Names in SUPERS that match registered mixins have their fields merged in.
 ;;; definvariant
 ;;; ---------------------------------------------------------------------------
 
-(defmacro definvariant (name &key on check reqs)
+(defmacro definvariant (name &key on check path reqs)
   "Define a spec invariant. Stored as quoted form, not compiled.
 Optional :reqs maps to requirement IDs for compliance traceability.
+Optional :path declares cross-entity relation traversal bindings:
 
-  (definvariant positive-balance
-    :on account
-    :reqs (\"REQ-001\")
-    :check (>= (account-balance account) 0))"
+  (definvariant settings-bounded-by-capability
+    :on der
+    :path ((settings der-settings :via :has-one)
+           (capability der-capability :via :has-one))
+    :check (<= (der-settings-set-max-w settings)
+               (der-capability-rtg-max-w capability)))"
   (let ((key (string-downcase (string name))))
     `(progn
        (setf (gethash ,key *invariants*)
              (list :name ',name
                    :on ',on
                    :check ',check
+                   ,@(when path `(:path ',path))
                    ,@(when reqs `(:reqs ',reqs))))
        (clrhash *compiled-fn-cache*)
        ',name)))

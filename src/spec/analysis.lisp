@@ -39,7 +39,8 @@
            #:field-index
            #:generation-feasibility
            #:simulate-trace
-           #:scenario-feasibility))
+           #:scenario-feasibility
+           #:diff-specs))
 
 (in-package #:mcp-lisp/src/spec/analysis)
 
@@ -423,3 +424,25 @@ Returns a plist:
           :verdict (cond
                      ((and needs-custom (not has-custom)) :needs-custom-generator)
                      (t :ok)))))
+
+;;; ---------------------------------------------------------------------------
+;;; 6. diff-specs — completeness verification against a source list
+;;; ---------------------------------------------------------------------------
+
+(defun diff-specs (expected-names)
+  "Compare registered entities against EXPECTED-NAMES (list of strings).
+Returns a plist:
+  :missing — names in EXPECTED-NAMES but not registered
+  :extra — registered names not in EXPECTED-NAMES
+  :matched — names present in both
+  :coverage — ratio of matched to expected"
+  (let* ((registered (mapcar #'string-downcase (list-entities)))
+         (expected (mapcar #'string-downcase expected-names))
+         (matched (intersection registered expected :test #'string=))
+         (missing (set-difference expected registered :test #'string=))
+         (extra (set-difference registered expected :test #'string=)))
+    (list :missing (sort (copy-list missing) #'string<)
+          :extra (sort (copy-list extra) #'string<)
+          :matched (sort (copy-list matched) #'string<)
+          :coverage (if (zerop (length expected)) 1.0
+                        (float (/ (length matched) (length expected)))))))

@@ -31,6 +31,8 @@
   (:import-from #:mcp-lisp/src/spec/helpers
                 #:all-pairs-check
                 #:consecutive-pairs-check
+                #:distribute-values
+                #:partition-into
                 #:haversine-distance-nm
                 #:initial-bearing-deg
                 #:heading-difference-deg
@@ -78,7 +80,8 @@
   (:import-from #:mcp-lisp/src/spec/rules
                 #:apply-rule
                 #:applicable-rules
-                #:random-walk)
+                #:random-walk
+                #:random-walk-scenario)
   (:export ;; Re-exports from sub-modules
            #:generate-value
            #:generate-instance
@@ -105,8 +108,11 @@
            #:apply-rule
            #:applicable-rules
            #:random-walk
+           #:random-walk-scenario
            #:all-pairs-check
            #:consecutive-pairs-check
+           #:distribute-values
+           #:partition-into
            #:haversine-distance-nm
            #:initial-bearing-deg
            #:heading-difference-deg

@@ -49,7 +49,8 @@
            #:data-to-specs
            #:write-specs
            #:read-specs
-           #:form-to-compact-string))
+           #:form-to-compact-string
+           #:load-spec-file))
 
 (in-package #:mcp-lisp/src/spec/serialization)
 
@@ -1183,3 +1184,22 @@ Merges with existing specs — call CLEAR-SPECS first for a clean import."
       (dict "type" "object"
             "properties"
             (dict "fields" (dict "type" "array" "items" field-schema)))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Spec modularization — file-based composition
+;;; ---------------------------------------------------------------------------
+
+(defun load-spec-file (path)
+  "Load a .lisp spec file, evaluating all forms. Returns a plist summarizing
+what was added: (:entities (...) :rules (...) :invariants (...)).
+Use to compose specs from multiple files."
+  (let ((before-entities (loop for k being the hash-keys of *entities* collect k))
+        (before-rules (loop for k being the hash-keys of *rules* collect k))
+        (before-invariants (loop for k being the hash-keys of *invariants* collect k)))
+    (load path)
+    (let ((after-entities (loop for k being the hash-keys of *entities* collect k))
+          (after-rules (loop for k being the hash-keys of *rules* collect k))
+          (after-invariants (loop for k being the hash-keys of *invariants* collect k)))
+      (list :entities (set-difference after-entities before-entities :test #'string=)
+            :rules (set-difference after-rules before-rules :test #'string=)
+            :invariants (set-difference after-invariants before-invariants :test #'string=)))))

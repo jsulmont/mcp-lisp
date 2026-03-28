@@ -10,7 +10,9 @@
                 #:describe-rule
                 #:list-rules
                 #:entity-fields
-                #:entity-variants)
+                #:entity-variants
+                #:describe-scenario
+                #:list-scenarios)
   (:import-from #:mcp-lisp/src/spec/transitions
                 #:detect-state-fields
                 #:field-default)
@@ -20,9 +22,11 @@
                 #:getf-field-p)
   (:import-from #:mcp-lisp/src/spec/checking
                 #:invariants-for
-                #:check-invariants)
+                #:check-invariants
+                #:check-scenario-invariants)
   (:import-from #:mcp-lisp/src/spec/generation
                 #:generate-instance
+                #:generate-scenario
                 #:ensure-entity-accessors
                 #:ensure-variant-accessors
                 #:ensure-config-accessor)
@@ -31,7 +35,8 @@
            #:extract-field-assignments
            #:applicable-rules
            #:apply-rule
-           #:random-walk))
+           #:random-walk
+           #:random-walk-scenario))
 
 (in-package #:mcp-lisp/src/spec/rules)
 
@@ -345,4 +350,133 @@ Returns a result plist:
                           after trace)
                   (dolist (v violated)
                     (format t "      ~A: ~S~%" v inst)))))))
+      result)))
+
+;;; ---------------------------------------------------------------------------
+;;; Scenario-aware random walk
+;;; ---------------------------------------------------------------------------
+
+(defun build-entity-index (scenario-instance scenario)
+  "Build a hash table mapping entity-name → list of instances from a scenario instance."
+  (let ((index (make-hash-table :test #'equal)))
+    (dolist (espec (getf scenario :entities))
+      (let* ((binding (getf espec :binding))
+             (entity-name (getf espec :entity))
+             (val (getf scenario-instance binding))
+             (instances (cond
+                          ((null val) nil)
+                          ((and (listp val) (not (keywordp (car val)))) val)
+                          (t (list val)))))
+        (setf (gethash entity-name index) instances)))
+    index))
+
+(defun rebuild-scenario-instance (entity-index scenario)
+  "Rebuild a scenario instance plist from the entity index."
+  (let ((result nil))
+    (dolist (espec (getf scenario :entities))
+      (let* ((binding (getf espec :binding))
+             (entity-name (getf espec :entity))
+             (singular (getf espec :singular))
+             (instances (gethash entity-name entity-index)))
+        (setf (getf result binding)
+              (if singular (first instances) instances))))
+    result))
+
+(defun random-walk-scenario (scenario-name &key (steps 20) (trials 50) (verbose t)
+                                                (clock-start 0) (clock-step 10))
+  "Scenario-aware random walk: operates on a multi-entity working set.
+Each step picks a random entity instance, finds applicable rules, applies one.
+:creates adds new instances; :deletes removes instances from the working set.
+Checks both entity-level and scenario-level invariants after each step.
+
+Returns a result plist like random-walk."
+  (let* ((sname (string-downcase (string scenario-name)))
+         (scenario (describe-scenario sname))
+         (entity-specs (getf scenario :entities))
+         (passed 0)
+         (failed 0)
+         (failures nil)
+         (use-clock nil))
+    ;; Set up accessors
+    (dolist (espec entity-specs)
+      (let ((ename (getf espec :entity)))
+        (ensure-entity-accessors ename)
+        (dolist (vname (entity-variants ename))
+          (ensure-variant-accessors vname))
+        (when (has-after-rules-p ename)
+          (setf use-clock t))))
+    (when *config* (ensure-config-accessor))
+    ;; Run trials
+    (dotimes (_trial trials)
+      (let* ((scenario-instance (generate-scenario sname))
+             (entity-index (build-entity-index scenario-instance scenario))
+             (now clock-start)
+             (trace nil)
+             (violation nil))
+        ;; Walk
+        (loop for step from 1 to steps
+              while (not violation)
+              do (when use-clock (incf now (1+ (random clock-step))))
+                 (let ((candidates nil))
+                   ;; Collect (entity-name instance index) triples with applicable rules
+                   (maphash (lambda (entity-name instances)
+                              (loop for inst in instances
+                                    for idx from 0
+                                    for rules = (applicable-rules entity-name inst)
+                                    when rules
+                                      do (push (list entity-name inst idx rules) candidates)))
+                            entity-index)
+                   (unless candidates (return))
+                   ;; Pick a random candidate
+                   (let* ((pick (nth (random (length candidates)) candidates))
+                          (entity-name (first pick))
+                          (inst (second pick))
+                          (inst-idx (third pick))
+                          (rules (fourth pick))
+                          (rname (nth (random (length rules)) rules))
+                          (applied nil))
+                     (multiple-value-bind (new ok _reason)
+                         (apply-rule entity-name inst rname :now (when use-clock now))
+                       (declare (ignore _reason))
+                       (when ok
+                         (setf applied t)
+                         (push (format nil "~A[~A].~A" entity-name inst-idx rname) trace)
+                         ;; Update instance in index
+                         (let ((instances (gethash entity-name entity-index)))
+                           (setf (nth inst-idx instances) new))
+                         ;; Check entity invariants on the changed instance
+                         (let* ((r (check-invariants entity-name new))
+                                (vs (when (eq (car r) :fail) (cdr r))))
+                           (when vs
+                             (setf violation (list :step step :after rname
+                                                   :violated vs :trace (reverse trace)))))))
+                     ;; Check scenario invariants
+                     (when (and applied (not violation))
+                       (let* ((rebuilt (rebuild-scenario-instance entity-index scenario))
+                              (sr (check-scenario-invariants sname rebuilt))
+                              (sv (when (eq (car sr) :fail) (cdr sr))))
+                         (when sv
+                           (setf violation (list :step step :after rname
+                                                  :violated sv :trace (reverse trace)))))))))
+        (if violation
+            (progn (incf failed)
+                   (when (< (length failures) 10) (push violation failures)))
+            (incf passed))))
+    ;; Results
+    (let ((result (list :entity (format nil "scenario:~A" sname)
+                        :trials trials :steps steps
+                        :passed passed :failed failed
+                        :failures (nreverse failures))))
+      (when verbose
+        (format t "~%=== Scenario Random Walk Results ===~%")
+        (format t "  ~A (~A steps/trial)~%" sname steps)
+        (if (zerop failed)
+            (format t "    ~A/~A passed~%" passed trials)
+            (progn
+              (format t "    ~A/~A passed, ~A FAILED~%" passed trials failed)
+              (dolist (f (getf result :failures))
+                (format t "    step ~A after ~A: ~{~A~^, ~}~%"
+                        (getf f :step) (getf f :after) (getf f :violated))
+                (when (getf f :trace)
+                  (format t "      trace: ~{~A~^ → ~}~%" (getf f :trace)))))))
       result)))

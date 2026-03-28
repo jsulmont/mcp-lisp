@@ -67,7 +67,8 @@
                 #:specs-to-data
                 #:data-to-specs
                 #:write-specs
-                #:read-specs)
+                #:read-specs
+                #:load-spec-file)
   (:import-from #:mcp-lisp/src/spec/introspection
                 #:list-entities
                 #:describe-entity
@@ -170,6 +171,7 @@
            #:spec-json-schema
            ;; Lisp serialization
            #:specs-to-lisp
+           #:load-spec-file
            ;; S-expression data serialization
            #:specs-to-data
            #:data-to-specs
