@@ -194,7 +194,42 @@ with bounds derived from invariant check forms."
                        (generate-value ftype :min eff-min :max eff-max))
                    instance)
              (push key instance))))))
-    ;; Phase 2.5: generate FK fields from belongs-to relations
+    ;; Phase 2.5a: enforce :nil-when / :non-nil-when from invariant constraints
+    (maphash (lambda (key constraints)
+               (dolist (c constraints)
+                 (let ((nil-when (getf c :nil-when))
+                       (non-nil-when (getf c :non-nil-when)))
+                   (when (and nil-when (condition-satisfied-p nil-when instance))
+                     (setf (getf instance key) nil))
+                   (when (and non-nil-when (condition-satisfied-p non-nil-when instance)
+                              (null (getf instance key)))
+                     (let ((field (find key fields
+                                        :key (lambda (f) (field-keyword (first f))))))
+                       (when field
+                         (let ((ftype (second field))
+                               (fc (field-constraints field)))
+                           (setf (getf instance key)
+                                 (generate-value ftype :min (getf fc :min)
+                                                       :max (getf fc :max))))))))))
+             inv-constraints)
+    ;; Phase 2.5b: enforce :present-when constraints
+    (dolist (field fields)
+      (let* ((fname (first field))
+             (key (field-keyword fname))
+             (kwargs (cddr field))
+             (pw (getf kwargs :present-when)))
+        (when pw
+          (let* ((cond-field (first pw))
+                 (cond-value (second pw))
+                 (actual (getf instance cond-field)))
+            (if (eq actual cond-value)
+                (when (null (getf instance key))
+                  (let ((ftype (second field))
+                        (fc (field-constraints field)))
+                    (setf (getf instance key)
+                          (generate-value ftype :min (getf fc :min) :max (getf fc :max)))))
+                (setf (getf instance key) nil))))))
+    ;; Phase 2.5b: generate FK fields from belongs-to relations
     (let ((relations (getf entity :relations)))
       (dolist (rel relations)
         (when (eq (first rel) :belongs-to)

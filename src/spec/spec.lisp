@@ -17,6 +17,8 @@
                 #:*generators*
                 #:*generator-sources*
                 #:*variants*
+                #:*mixins*
+                #:*compounds*
                 #:*config*
                 #:*current-config*
                 #:*scenarios*
@@ -34,6 +36,8 @@
                 #:clear-specs)
   (:import-from #:mcp-lisp/src/spec/dsl
                 #:defentity
+                #:defmixin
+                #:defcompound
                 #:defrule
                 #:definvariant
                 #:defvariant
@@ -43,9 +47,13 @@
                 #:defvalueset
                 #:defreq
                 #:register-entity-accessors
+                #:expand-compound-fields
+                #:merge-mixin-fields
                 #:in-set
                 #:list-valuesets
-                #:list-requirements)
+                #:list-requirements
+                #:list-mixins
+                #:list-compounds)
   (:import-from #:mcp-lisp/src/spec/validation
                 #:validate-specs
                 #:suggest-invariants)
@@ -92,10 +100,14 @@
            #:*generators*
            #:*generator-sources*
            #:*variants*
+           #:*mixins*
+           #:*compounds*
            #:*config*
            #:*current-config*
            ;; Macros
            #:defentity
+           #:defmixin
+           #:defcompound
            #:defrule
            #:definvariant
            #:defvariant
@@ -137,6 +149,10 @@
            #:list-requirements
            ;; Utilities
            #:register-entity-accessors
+           #:expand-compound-fields
+           #:merge-mixin-fields
+           #:list-mixins
+           #:list-compounds
            #:clear-specs
            #:entity-accessor-p
            #:config-accessor-p

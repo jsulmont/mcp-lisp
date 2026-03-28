@@ -62,6 +62,26 @@ the names of violated invariants."
                   (push inv-name violations)))
             (error (e)
               (push (format nil "~A (error: ~A)" inv-name e) violations))))))
+    ;; :present-when field constraints
+    (let ((fields (getf (describe-entity entity-name) :fields)))
+      (dolist (field fields)
+        (let* ((fname (first field))
+               (key (intern (symbol-name fname) :keyword))
+               (kwargs (cddr field))
+               (pw (getf kwargs :present-when)))
+          (when pw
+            (let* ((cond-field (first pw))
+                   (cond-value (second pw))
+                   (actual (getf instance cond-field)))
+              (if (eq actual cond-value)
+                  (when (null (getf instance key))
+                    (push (format nil "~A:~A (present-when ~A=~A but field is nil)"
+                                  entity-name fname cond-field cond-value)
+                          violations))
+                  (when (not (null (getf instance key)))
+                    (push (format nil "~A:~A (absent-when ~A/=~A but field is non-nil)"
+                                  entity-name fname cond-field cond-value)
+                          violations))))))))
     ;; Variant-specific invariants
     (dolist (vkey (entity-variants entity-name))
       (let* ((variant (describe-variant vkey))

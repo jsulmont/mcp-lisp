@@ -204,6 +204,26 @@ Returns a list of constraint plists."
                      (extract-constraints-from-form else-form entity-var
                                                     (or condition neg-cond)))))))))))
 
+      ;; (null (field-access)) — field should be nil
+      ((null)
+       (when (and (= (length form) 2) (getf-field-p (second form) entity-var))
+         (let ((field (getf-field-p (second form) entity-var)))
+           (list (if condition
+                     (list :field field :nil-when condition)
+                     (list :field field :nil t))))))
+
+      ;; (not (null (field-access))) — field should be non-nil
+      ((not)
+       (when (and (= (length form) 2)
+                  (consp (second form))
+                  (eq (first (second form)) 'null)
+                  (= (length (second form)) 2)
+                  (getf-field-p (second (second form)) entity-var))
+         (let ((field (getf-field-p (second (second form)) entity-var)))
+           (list (if condition
+                     (list :field field :non-nil-when condition)
+                     (list :field field :non-nil t))))))
+
       ;; Comparison operators
       ((> >= < <= =)
        (let ((constraints (extract-comparison form entity-var)))

@@ -10,6 +10,8 @@
            #:*generators*
            #:*generator-sources*
            #:*variants*
+           #:*mixins*
+           #:*compounds*
            #:*config*
            #:*current-config*
            #:*scenarios*
@@ -54,6 +56,10 @@
 (defvar *helper-sources* (make-hash-table :test #'equal))
 (defvar *valuesets* (make-hash-table :test #'equal)
   "Named value sets for use in invariant checks via IN-SET.")
+(defvar *mixins* (make-hash-table :test #'equal)
+  "Mixin field sets for entity inheritance via supers.")
+(defvar *compounds* (make-hash-table :test #'equal)
+  "Compound (value object) type definitions for field expansion.")
 (defvar *requirements* (make-hash-table :test #'equal)
   "Non-invariant requirements tracked for compliance matrices.")
 
@@ -61,8 +67,8 @@
 ;;; Known keywords for validation at macroexpand time
 ;;; ---------------------------------------------------------------------------
 
-(defparameter +known-field-keys+ '(:required :default :unique :min :max :derived-from :immutable :nullable))
-(defparameter +relation-types+ '(:has-many :has-one :belongs-to))
+(defparameter +known-field-keys+ '(:required :default :unique :min :max :derived-from :immutable :nullable :present-when))
+(defparameter +relation-types+ '(:has-many :has-one :belongs-to :many-to-many))
 
 ;;; ---------------------------------------------------------------------------
 ;;; DSL documentation registry
@@ -102,6 +108,8 @@ SECTION groups entries in the generated reference."
   (clrhash *scenario-generator-sources*)
   (clrhash *scenario-negative-generators*)
   (clrhash *scenario-negative-generator-sources*)
+  (clrhash *mixins*)
+  (clrhash *compounds*)
   (clrhash *helpers*)
   (clrhash *helper-sources*)
   (clrhash *valuesets*)

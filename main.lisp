@@ -182,6 +182,8 @@
                 #:*config*
                 #:*current-config*
                 #:defentity
+                #:defmixin
+                #:defcompound
                 #:defrule
                 #:definvariant
                 #:defvariant
@@ -202,6 +204,8 @@
                 #:config-fields
                 #:*scenarios*
                 #:*scenario-generators*
+                #:list-mixins
+                #:list-compounds
                 #:defscenario
                 #:defhelper
                 #:defvalueset
@@ -441,6 +445,8 @@
    #:*config*
    #:*current-config*
    #:defentity
+   #:defmixin
+   #:defcompound
    #:defrule
    #:definvariant
    #:defvariant
@@ -461,6 +467,8 @@
    #:config-fields
    #:*scenarios*
    #:*scenario-generators*
+   #:list-mixins
+   #:list-compounds
    #:defscenario
    #:defhelper
    #:defvalueset

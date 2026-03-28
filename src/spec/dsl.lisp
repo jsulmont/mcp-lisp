@@ -9,6 +9,8 @@
                 #:*rules*
                 #:*invariants*
                 #:*variants*
+                #:*mixins*
+                #:*compounds*
                 #:*config*
                 #:*scenarios*
                 #:*helpers*
@@ -20,6 +22,8 @@
                 #:+relation-types+
                 #:register-dsl-doc)
   (:export #:defentity
+           #:defmixin
+           #:defcompound
            #:defrule
            #:definvariant
            #:defvariant
@@ -31,9 +35,13 @@
            #:register-entity-accessors
            #:parse-entity-slots
            #:parse-scenario-cardinality
+           #:expand-compound-fields
+           #:merge-mixin-fields
            #:in-set
            #:list-valuesets
-           #:list-requirements))
+           #:list-requirements
+           #:list-mixins
+           #:list-compounds))
 
 (in-package #:mcp-lisp/src/spec/dsl)
 
@@ -61,6 +69,109 @@ Called automatically by DEFENTITY so accessors exist immediately."
                 (let ((k key)) (lambda (instance) (getf instance k)))))))))
 
 ;;; ---------------------------------------------------------------------------
+;;; defmixin
+;;; ---------------------------------------------------------------------------
+
+(defmacro defmixin (name &body slots)
+  "Define a reusable field set. Entities list mixin names in supers to inherit fields.
+
+  (defmixin event-resource
+    (event-status (member :scheduled :active :cancelled :completed) :default :scheduled)
+    (creation-time number :required t :immutable t))"
+  (let ((key (string-downcase (string name))))
+    (multiple-value-bind (fields relations derived constraints)
+        (parse-entity-slots slots)
+      `(progn
+         (setf (gethash ,key *mixins*)
+               (list :name ',name
+                     :fields ',fields
+                     :relations ',relations
+                     :derived ',derived
+                     ,@(when constraints `(:constraints ',constraints))))
+         ',name))))
+
+(defun list-mixins ()
+  "Return a list of registered mixin name strings."
+  (loop for k being the hash-keys of *mixins* collect k))
+
+;;; ---------------------------------------------------------------------------
+;;; defcompound
+;;; ---------------------------------------------------------------------------
+
+(defmacro defcompound (name &body fields)
+  "Define a compound (value object) type. Fields using this type expand to
+prefixed sub-fields at defentity time.
+
+  (defcompound active-power
+    (multiplier integer :required t)
+    (value number :required t))
+
+  (defentity inverter ()
+    (max-power active-power))
+  ;; expands to: (max-power-multiplier integer :required t)
+  ;;             (max-power-value number :required t)"
+  (let ((key (string-downcase (string name))))
+    `(progn
+       (setf (gethash ,key *compounds*)
+             (list :name ',name :fields ',fields))
+       ',name)))
+
+(defun list-compounds ()
+  "Return a list of registered compound type name strings."
+  (loop for k being the hash-keys of *compounds* collect k))
+
+;;; ---------------------------------------------------------------------------
+;;; Field expansion helpers
+;;; ---------------------------------------------------------------------------
+
+(defun expand-compound-fields (fields)
+  "Expand fields whose type is a registered compound into prefixed sub-fields.
+Non-compound fields pass through unchanged."
+  (let ((result nil))
+    (dolist (field fields)
+      (let* ((fname (first field))
+             (ftype (second field))
+             (fkwargs (cddr field))
+             (compound (when (and (symbolp ftype) (not (member ftype '(string number integer boolean))))
+                         (gethash (string-downcase (symbol-name ftype)) *compounds*))))
+        (if compound
+            (dolist (sub-field (getf compound :fields))
+              (let* ((sub-name (first sub-field))
+                     (sub-type (second sub-field))
+                     (sub-kwargs (cddr sub-field))
+                     (expanded-name (intern (format nil "~A-~A"
+                                                    (symbol-name fname)
+                                                    (symbol-name sub-name)))))
+                (push (list* expanded-name sub-type
+                             (append fkwargs sub-kwargs))
+                      result)))
+            (push field result))))
+    (nreverse result)))
+
+(defun merge-mixin-fields (supers fields relations derived constraints)
+  "Merge fields/relations/derived/constraints from mixin SUPERS into entity slots.
+Entity's own fields win on name collision."
+  (let ((merged-fields (copy-list fields))
+        (merged-relations (copy-list relations))
+        (merged-derived (copy-list derived))
+        (merged-constraints (copy-list constraints))
+        (own-field-names (mapcar (lambda (f) (symbol-name (first f))) fields)))
+    (dolist (super supers)
+      (let ((mixin (gethash (string-downcase (string super)) *mixins*)))
+        (when mixin
+          (dolist (mf (getf mixin :fields))
+            (unless (member (symbol-name (first mf)) own-field-names :test #'string=)
+              (push mf merged-fields)
+              (push (symbol-name (first mf)) own-field-names)))
+          (dolist (mr (getf mixin :relations))
+            (push mr merged-relations))
+          (dolist (md (getf mixin :derived))
+            (push md merged-derived))
+          (dolist (mc (getf mixin :constraints))
+            (push mc merged-constraints)))))
+    (values merged-fields merged-relations merged-derived merged-constraints)))
+
+;;; ---------------------------------------------------------------------------
 ;;; defentity
 ;;; ---------------------------------------------------------------------------
 
@@ -85,8 +196,54 @@ Returns (values fields relations derived constraints)."
            (push slot fields)))))
     (values (nreverse fields) (nreverse relations) (nreverse derived) (nreverse constraints))))
 
+(defun %register-entity (name supers raw-fields relations derived constraints)
+  "Runtime entity registration with mixin merging, compound expansion, and M:N join generation."
+  (multiple-value-bind (merged-fields merged-relations merged-derived merged-constraints)
+      (merge-mixin-fields supers raw-fields relations derived constraints)
+    (let* ((expanded-fields (expand-compound-fields merged-fields))
+           (key (string-downcase (string name))))
+      (setf (gethash key *entities*)
+            (list :name name
+                  :supers supers
+                  :fields expanded-fields
+                  :relations merged-relations
+                  :derived merged-derived
+                  :constraints merged-constraints))
+      (register-entity-accessors name expanded-fields merged-relations)
+      (dolist (rel merged-relations)
+        (when (eq (first rel) :many-to-many)
+          (let* ((rel-name (second rel))
+                 (target (getf (cddr rel) :of))
+                 (join-name (intern (format nil "~A-~A" (symbol-name name) (symbol-name rel-name))))
+                 (join-key (string-downcase (string join-name)))
+                 (src-fk-name (intern (format nil "~A-ID" (symbol-name name))))
+                 (tgt-fk-name (intern (format nil "~A-ID" (symbol-name target))))
+                 (src-fk-kw (intern (symbol-name src-fk-name) :keyword))
+                 (tgt-fk-kw (intern (symbol-name tgt-fk-name) :keyword))
+                 (join-fields `((id string :required t)
+                                (,src-fk-name string :required t)
+                                (,tgt-fk-name string :required t)))
+                 (join-relations `((:belongs-to ,(intern (string-downcase (symbol-name name)))
+                                    :of ,name)
+                                   (:belongs-to ,(intern (string-downcase (symbol-name target)))
+                                    :of ,target)))
+                 (join-constraints (list (list src-fk-kw tgt-fk-kw))))
+            (setf (gethash join-key *entities*)
+                  (list :name join-name
+                        :supers nil
+                        :fields join-fields
+                        :relations join-relations
+                        :derived nil
+                        :constraints join-constraints
+                        :auto-generated t
+                        :join-for (list (string-downcase (string name))
+                                        (string-downcase (string target)))))
+            (register-entity-accessors join-name join-fields join-relations))))
+      name)))
+
 (defmacro defentity (name (&rest supers) &body slots)
   "Define a specification entity. Stores metadata in *entities* — no class generation.
+Names in SUPERS that match registered mixins have their fields merged in.
 
   (defentity user ()
     (id string :required t)
@@ -97,17 +254,7 @@ Returns (values fields relations derived constraints)."
     (:derived display-name (lambda (u) (or (name u) (email u)))))"
   (multiple-value-bind (fields relations derived constraints)
       (parse-entity-slots slots)
-    (let ((key (string-downcase (string name))))
-      `(progn
-         (setf (gethash ,key *entities*)
-               (list :name ',name
-                     :supers ',supers
-                     :fields ',fields
-                     :relations ',relations
-                     :derived ',derived
-                     ,@(when constraints `(:constraints ',constraints))))
-         (register-entity-accessors ',name ',fields ',relations)
-         ',name))))
+    `(%register-entity ',name ',supers ',fields ',relations ',derived ',constraints)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; defrule
@@ -344,7 +491,11 @@ Used for API-level, authorization, operational, or performance requirements.
              (":has-many" "One-to-many relation; :of names target entity; :cardinality (min max) bounds count")
              (":has-one" "One-to-one relation")
              (":belongs-to" "Many-to-one relation; auto-generates FK field. Aliased: (:belongs-to sender :of user) creates :sender-id FK, allowing multiple FKs to same entity")
-             (":unique-together" "Composite uniqueness constraint across fields")))
+             (":many-to-many" "Auto-generates a join entity with FKs and unique-together; (:many-to-many roles :of role)")
+             (":present-when" "Field must be non-nil when condition holds: :present-when (:discriminator-field :value)")
+             (":unique-together" "Composite uniqueness constraint across fields")
+             ("supers" "Names of defmixin forms whose fields are merged into this entity")
+             ("compound types" "Fields whose type matches a defcompound expand to prefixed sub-fields")))
 
 (register-dsl-doc 'defrule
   :type :macro :section "Defining specs" :order 2
@@ -429,3 +580,29 @@ Used for API-level, authorization, operational, or performance requirements.
              (":status" ":not-expressible or :partial")
              (":notes" "Free-text explanation")
              ("compliance-matrix" "Appears alongside invariant-backed requirements")))
+
+(register-dsl-doc 'defmixin
+  :type :macro :section "Defining specs" :order 10
+  :synopsis "Define a reusable field set for entity inheritance via supers."
+  :example "(defmixin event-resource
+  (event-status (member :scheduled :active :cancelled) :default :scheduled)
+  (creation-time number :required t :immutable t))
+
+(defentity demand-response (event-resource)
+  (id string :required t)
+  (signal-type (member :price :load)))"
+  :options '(("fields" "Same syntax as defentity fields")
+             ("supers" "Entity lists mixin name in supers to inherit fields; entity fields override on collision")))
+
+(register-dsl-doc 'defcompound
+  :type :macro :section "Defining specs" :order 11
+  :synopsis "Define a compound (value object) type that expands to prefixed sub-fields."
+  :example "(defcompound active-power
+  (multiplier integer :required t)
+  (value number :required t))
+
+(defentity inverter ()
+  (max-power active-power))
+;; expands to: max-power-multiplier, max-power-value"
+  :options '(("expansion" "Field (name compound-type) expands to (name-subfield1 type1 ...) (name-subfield2 type2 ...)")
+             ("kwargs" "Field-level kwargs like :required propagate to all sub-fields")))
