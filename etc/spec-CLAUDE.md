@@ -21,9 +21,9 @@ This project uses a behavioral specification DSL via the `eval_lisp` MCP tool. W
 9. Run `(validate-specs)` to catch dangling references, non-exhaustive variant handling, invalid scenario bindings, `:unique-together` fields that don't exist, rules whose `:sets` touch `:immutable` fields, and entity-level invariants that reference has-many accessors (which require scenario-level testing if the relation lacks `:cardinality`). FK-like field warnings are only emitted when the field prefix matches a known entity name — domain identifiers like `log-event-id` are not flagged.
 10. Run `(run-pbt :trials 500 :negative-trials 200)` — positive trials test correctness, negative trials verify invariants aren't trivially true
 11. Run `(run-pbt :scenario "name" :trials 50)` for each scenario
-12. Run `(random-walk "entity" :steps 20 :trials 50)` for entities with rules — tests invariants across rule sequences, not just freshly generated instances
-13. Generate SQL: `(specs-to-sql)` for DDL, `(specs-to-sql-seed :rows-per-entity 20)` for seed data
-14. For compliance specs, run `(compliance-matrix)` to verify requirement-to-invariant coverage from `:reqs` tags and `defreq` entries
-15. Save the spec via `(specs-to-lisp)` — produces a loadable `.lisp` file. This is the canonical format.
+12. Run `(random-walk "entity" :steps 20 :trials 50)` for entities with rules — tests invariants across rule sequences, not just freshly generated instances. For multi-entity scenarios with rules, use `(random-walk-scenario "scenario" :steps 20 :trials 50)`.
+13. For compliance specs, run `(compliance-matrix)` to verify requirement-to-invariant coverage from `:reqs` tags and `defreq` entries
+14. Save the spec via `(specs-to-lisp)` — produces a loadable `.lisp` file. This is the canonical export format.
+15. **Optional — SQL codegen**: When the domain maps to a relational model, `(specs-to-sql)` for DDL and `(specs-to-sql-seed :rows-per-entity 20)` for seed data. Skip for protocol specs, state machines, or anything without a storage layer.
 
 Always spec first, code second.
