@@ -125,3 +125,38 @@
            (entry (first summary)))
       (is (= 1 (getf entry :covered)))
       (is (= 1 (getf entry :uncovered))))))
+
+;;; ---------------------------------------------------------------------------
+;;; invariant-coverage-summary global totals
+;;; ---------------------------------------------------------------------------
+
+(test coverage-summary-global-totals
+  "invariant-coverage-summary returns global totals as second value"
+  (with-fresh-analysis-specs
+    (mcp-lisp:defentity alpha ()
+      (id string :required t)
+      (x number :required t))
+    (mcp-lisp:definvariant alpha-x
+      :on alpha
+      :check (>= (alpha-x alpha) 0))
+    (mcp-lisp:defentity beta ()
+      (id string :required t)
+      (y number :required t)
+      (z number :required t))
+    (multiple-value-bind (per-entity totals)
+        (mcp-lisp:invariant-coverage-summary)
+      (is (= 2 (length per-entity)))
+      (is (not (null totals)))
+      (is (= 5 (getf totals :fields)))
+      (is (= 1 (getf totals :covered)))
+      (is (= 4 (getf totals :uncovered)))
+      (is (< (getf totals :ratio) 0.21)))))
+
+(test coverage-summary-global-totals-empty
+  "Global totals for empty spec return ratio 1.0"
+  (with-fresh-analysis-specs
+    (multiple-value-bind (per-entity totals)
+        (mcp-lisp:invariant-coverage-summary)
+      (is (null per-entity))
+      (is (= 0 (getf totals :fields)))
+      (is (> (getf totals :ratio) 0.99)))))

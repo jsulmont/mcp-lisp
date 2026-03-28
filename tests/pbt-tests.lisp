@@ -1092,3 +1092,56 @@
       (is (= 1 (length results)))
       (is (string= "curve" (getf (first results) :entity)))
       (is (= 0 (getf (first results) :failed))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Negative testing: inequality forced equality
+;;; ---------------------------------------------------------------------------
+
+(test negative-trials-forces-inequality-rejection
+  "Negative trials reject inequality invariants via forced field equality"
+  (with-fresh-specs
+    (mcp-lisp:defentity msg ()
+      (id string :required t)
+      (sender string :required t)
+      (receiver string :required t))
+    (mcp-lisp:definvariant sender-neq-receiver
+      :on msg
+      :check (string/= (msg-sender msg) (msg-receiver msg)))
+    (mcp-lisp:ensure-entity-accessors "msg")
+    (let* ((stats (mcp-lisp/src/spec/pbt::run-negative-trials 300))
+           (inv-stats (gethash "sender-neq-receiver" stats)))
+      (is (not (null inv-stats)))
+      (is (plusp (getf inv-stats :tested)))
+      (is (plusp (getf inv-stats :rejected))))))
+
+(test negative-trials-not-eq-pattern
+  "Negative trials detect (not (equal ...)) inequality pattern"
+  (with-fresh-specs
+    (mcp-lisp:defentity transfer ()
+      (id string :required t)
+      (from-acct string :required t)
+      (to-acct string :required t))
+    (mcp-lisp:definvariant no-self-transfer
+      :on transfer
+      :check (not (equal (transfer-from-acct transfer) (transfer-to-acct transfer))))
+    (mcp-lisp:ensure-entity-accessors "transfer")
+    (let* ((stats (mcp-lisp/src/spec/pbt::run-negative-trials 300))
+           (inv-stats (gethash "no-self-transfer" stats)))
+      (is (not (null inv-stats)))
+      (is (plusp (getf inv-stats :rejected))))))
+
+(test extract-inequality-field-pairs-finds-pairs
+  "extract-inequality-field-pairs extracts field pairs from inequality invariants"
+  (with-fresh-specs
+    (mcp-lisp:defentity msg ()
+      (id string :required t)
+      (sender string :required t)
+      (receiver string :required t))
+    (mcp-lisp:definvariant sender-neq-receiver
+      :on msg
+      :check (string/= (msg-sender msg) (msg-receiver msg)))
+    (let* ((entries (mcp-lisp/src/spec/pbt::invariants-for "msg"))
+           (pairs (mcp-lisp/src/spec/pbt::extract-inequality-field-pairs entries)))
+      (is (= 1 (length pairs)))
+      (is (member :sender (first pairs)))
+      (is (member :receiver (first pairs))))))

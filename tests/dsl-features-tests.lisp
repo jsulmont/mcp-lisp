@@ -312,3 +312,18 @@
     (let ((lisp-src (mcp-lisp:specs-to-lisp)))
       (is (search ":reqs" lisp-src))
       (is (search "REQ-001" lisp-src)))))
+
+;;; ===========================================================================
+;;; Feature 8: spec-reference documentation completeness
+;;; ===========================================================================
+
+(test spec-reference-documents-aliased-belongs-to
+  "spec-reference includes aliased belongs-to documentation"
+  (let ((ref (mcp-lisp:spec-reference)))
+    (is (search ":belongs-to sender :of" ref))))
+
+(test spec-reference-documents-rule-templates
+  "spec-reference includes rule template section"
+  (let ((ref (mcp-lisp:spec-reference)))
+    (is (search "Rule templates" ref))
+    (is (search "defmacro" ref))))

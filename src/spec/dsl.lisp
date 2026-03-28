@@ -343,7 +343,7 @@ Used for API-level, authorization, operational, or performance requirements.
              (":derived-from" "Field computed from other fields")
              (":has-many" "One-to-many relation; :of names target entity; :cardinality (min max) bounds count")
              (":has-one" "One-to-one relation")
-             (":belongs-to" "Many-to-one relation; auto-generates FK field")
+             (":belongs-to" "Many-to-one relation; auto-generates FK field. Aliased: (:belongs-to sender :of user) creates :sender-id FK, allowing multiple FKs to same entity")
              (":unique-together" "Composite uniqueness constraint across fields")))
 
 (register-dsl-doc 'defrule

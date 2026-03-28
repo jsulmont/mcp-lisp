@@ -131,14 +131,19 @@ Helps identify unconstrained fields that may need invariants."
 (defun invariant-coverage-summary ()
   "Return a coverage summary across all entities.
 Each entry is a plist (:entity :fields :covered :uncovered :ratio :uncovered-fields).
-The list is sorted by coverage ratio ascending (worst-covered first)."
-  (let ((result nil))
+The list is sorted by coverage ratio ascending (worst-covered first).
+Second return value is a global summary plist (:fields :covered :uncovered :ratio)."
+  (let ((result nil)
+        (total-fields 0)
+        (total-covered 0))
     (dolist (ename (list-entities))
       (let* ((cov (invariant-coverage ename))
              (total (length cov))
              (covered (count-if #'cdr cov))
              (uncov (- total covered))
              (uncov-fields (mapcar #'car (remove-if #'cdr cov))))
+        (incf total-fields total)
+        (incf total-covered covered)
         (push (list :entity ename
                     :fields total
                     :covered covered
@@ -147,7 +152,12 @@ The list is sorted by coverage ratio ascending (worst-covered first)."
                                (float (/ covered total)))
                     :uncovered-fields uncov-fields)
               result)))
-    (sort result #'< :key (lambda (e) (getf e :ratio)))))
+    (values (sort result #'< :key (lambda (e) (getf e :ratio)))
+            (list :fields total-fields
+                  :covered total-covered
+                  :uncovered (- total-fields total-covered)
+                  :ratio (if (zerop total-fields) 1.0
+                             (float (/ total-covered total-fields)))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; 2. field-index
