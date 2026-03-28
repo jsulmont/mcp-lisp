@@ -256,3 +256,44 @@
                     :steps 10 :trials 10 :verbose nil)))
       (is (not (null result)))
       (is (= 0 (getf result :failed))))))
+
+(test random-walk-scenario-cross-entity-let
+  "random-walk-scenario passes scenario bindings so :let can see other entities"
+  (with-rule-specs
+    (mcp-lisp:defentity warehouse ()
+      (id string :required t)
+      (capacity number :required t :min 100 :max 500)
+      (status (member :open :closed) :default :open))
+    (mcp-lisp:defentity shipment ()
+      (id string :required t)
+      (size number :required t :min 1 :max 50)
+      (state (member :pending :delivered) :default :pending)
+      (:belongs-to warehouse))
+    (mcp-lisp:defrule deliver-shipment
+      :when (shipment :state :pending)
+      :let ((wh (find (getf shipment :warehouse-id)
+                      warehouses
+                      :key (lambda (w) (getf w :id))
+                      :test #'equal)))
+      :requires ((and wh (eq (getf wh :status) :open)))
+      :ensures ((eq (shipment-state shipment) :delivered)))
+    (mcp-lisp:definvariant size-positive
+      :on shipment
+      :check (> (shipment-size shipment) 0))
+    (mcp-lisp:defscenario delivery
+      :entities ((warehouses 2 warehouse)
+                 (shipments (3 6) shipment)))
+    (mcp-lisp:defscenario-generator delivery (overrides)
+      (declare (ignore overrides))
+      (let* ((wh1 (mcp-lisp:generate-instance "warehouse"))
+             (wh2 (mcp-lisp:generate-instance "warehouse"))
+             (whs (list wh1 wh2)))
+        (list :warehouses whs
+              :shipments (loop repeat (+ 3 (random 4))
+                               collect (mcp-lisp:generate-instance "shipment"
+                                         (list :warehouse-id
+                                               (getf (nth (random 2) whs) :id)))))))
+    (let ((result (mcp-lisp:random-walk-scenario "delivery"
+                    :steps 15 :trials 20 :verbose nil)))
+      (is (not (null result)))
+      (is (= 0 (getf result :failed))))))

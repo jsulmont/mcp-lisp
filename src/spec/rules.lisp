@@ -125,12 +125,13 @@ patterns where field is NOT a state field."
           (push rname result))))
     (nreverse result)))
 
-(defun apply-rule (entity-name instance rule-name &key (now nil))
+(defun apply-rule (entity-name instance rule-name &key (now nil) (bindings nil))
   "Apply a rule to an entity instance, performing the state transition.
 Returns (values new-instance applied-p rejection-reason).
   applied-p is T if the rule fired, NIL otherwise.
   rejection-reason is :when-mismatch, (:after-failed form), (:guard-failed form), or NIL.
-  NOW, if provided, is the simulated clock value for :after evaluation."
+  NOW, if provided, is the simulated clock value for :after evaluation.
+  BINDINGS is an alist of (symbol . value) for cross-entity scenario context."
   (ensure-entity-accessors entity-name)
   (let* ((rname (string-downcase (string rule-name)))
          (rule (describe-rule rname)))
@@ -143,7 +144,9 @@ Returns (values new-instance applied-p rejection-reason).
            (after-clause (getf rule :after))
            (let-bindings (getf rule :let))
            (entity-sym (intern (string-upcase (string entity-name))))
-           (state-fields (detect-state-fields entity-name)))
+           (state-fields (detect-state-fields entity-name))
+           (ctx-syms (mapcar #'car bindings))
+           (ctx-vals (mapcar #'cdr bindings)))
       ;; 1. Check :when
       (unless (rule-when-matches-p when-clause entity-name instance)
         (return-from apply-rule (values instance nil :when-mismatch)))
@@ -151,17 +154,18 @@ Returns (values new-instance applied-p rejection-reason).
       (when after-clause
         (handler-case
             (let* ((now-sym (intern "NOW"))
+                   (all-params (list* entity-sym now-sym ctx-syms))
                    (fn (handler-bind ((warning #'muffle-warning))
-                         (compile nil `(lambda (,entity-sym ,now-sym)
-                                         (declare (ignorable ,entity-sym ,now-sym))
+                         (compile nil `(lambda ,all-params
+                                         (declare (ignorable ,@all-params))
                                          ,after-clause)))))
-              (unless (funcall fn instance (or now 0))
+              (unless (apply fn instance (or now 0) ctx-vals)
                 (return-from apply-rule
                   (values instance nil (list :after-failed after-clause)))))
           (error ()
             (return-from apply-rule
               (values instance nil (list :after-failed after-clause))))))
-      ;; 2. Evaluate :let bindings (best-effort; cross-entity refs will error)
+      ;; 2. Evaluate :let bindings with scenario context
       (let ((let-vars nil)
             (let-vals nil))
         (dolist (binding let-bindings)
@@ -169,22 +173,23 @@ Returns (values new-instance applied-p rejection-reason).
             (let ((var (first binding))
                   (expr (second binding)))
               (handler-case
-                  (let ((fn (handler-bind ((warning #'muffle-warning))
-                              (compile nil `(lambda (,entity-sym)
-                                              (declare (ignorable ,entity-sym))
-                                              ,expr)))))
+                  (let* ((all-params (list* entity-sym (append ctx-syms (reverse let-vars))))
+                         (fn (handler-bind ((warning #'muffle-warning))
+                               (compile nil `(lambda ,all-params
+                                               (declare (ignorable ,@all-params))
+                                               ,expr)))))
                     (push var let-vars)
-                    (push (funcall fn instance) let-vals))
+                    (push (apply fn instance (append ctx-vals (reverse let-vals))) let-vals))
                 (error () nil)))))
         ;; 3. Check :requires
         (dolist (req requires)
           (handler-case
-              (let* ((params (cons entity-sym (reverse let-vars)))
+              (let* ((params (list* entity-sym (append (reverse let-vars) ctx-syms)))
                      (fn (handler-bind ((warning #'muffle-warning))
                            (compile nil `(lambda ,params
                                            (declare (ignorable ,@params))
                                            ,req)))))
-                (unless (apply fn instance (reverse let-vals))
+                (unless (apply fn instance (append (reverse let-vals) ctx-vals))
                   (return-from apply-rule
                     (values instance nil (list :guard-failed req)))))
             (error ()
@@ -213,7 +218,7 @@ Returns (values new-instance applied-p rejection-reason).
           ;; 6. Apply :sets — evaluate each (accessor-form value-form) pair
           (loop for (accessor-form value-form) on sets-clause by #'cddr
                 do (handler-case
-                       (let* ((params (cons entity-sym (reverse let-vars)))
+                       (let* ((params (list* entity-sym (append (reverse let-vars) ctx-syms)))
                               (val-fn (handler-bind ((warning #'muffle-warning))
                                         (compile nil `(lambda ,params
                                                         (declare (ignorable ,@params))
@@ -221,7 +226,7 @@ Returns (values new-instance applied-p rejection-reason).
                               (field-kw (getf-field-p accessor-form entity-sym)))
                          (when field-kw
                            (setf (getf new field-kw)
-                                 (apply val-fn new (reverse let-vals)))))
+                                 (apply val-fn new (append (reverse let-vals) ctx-vals)))))
                      (error () nil)))
           (values new t nil))))))
 
@@ -412,7 +417,11 @@ Returns a result plist like random-walk."
              (entity-index (build-entity-index scenario-instance scenario))
              (now clock-start)
              (trace nil)
-             (violation nil))
+             (violation nil)
+             (ctx-bindings (mapcar (lambda (espec)
+                                     (let ((sym (intern (symbol-name (getf espec :binding)))))
+                                       (cons sym (gethash (getf espec :entity) entity-index))))
+                                   entity-specs)))
         ;; Walk
         (loop for step from 1 to steps
               while (not violation)
@@ -436,14 +445,21 @@ Returns a result plist like random-walk."
                           (rname (nth (random (length rules)) rules))
                           (applied nil))
                      (multiple-value-bind (new ok _reason)
-                         (apply-rule entity-name inst rname :now (when use-clock now))
+                         (apply-rule entity-name inst rname
+                                     :now (when use-clock now)
+                                     :bindings ctx-bindings)
                        (declare (ignore _reason))
                        (when ok
                          (setf applied t)
                          (push (format nil "~A[~A].~A" entity-name inst-idx rname) trace)
-                         ;; Update instance in index
+                         ;; Update instance in index and refresh bindings
                          (let ((instances (gethash entity-name entity-index)))
                            (setf (nth inst-idx instances) new))
+                         (setf ctx-bindings
+                               (mapcar (lambda (espec)
+                                         (let ((sym (intern (symbol-name (getf espec :binding)))))
+                                           (cons sym (gethash (getf espec :entity) entity-index))))
+                                       entity-specs))
                          ;; Check entity invariants on the changed instance
                          (let* ((r (check-invariants entity-name new))
                                 (vs (when (eq (car r) :fail) (cdr r))))
