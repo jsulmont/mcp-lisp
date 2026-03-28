@@ -499,7 +499,7 @@ Used for API-level, authorization, operational, or performance requirements.
   (:has-many orders :of order)
   (:unique-together email role)
   (:derived display-name (lambda (u) (or (name u) (email u)))))"
-  :options '(("Field types" "string, number, integer, boolean, (member :a :b ...), (list-of type)")
+  :options '(("Field types" "string, number, integer, boolean, (member :a :b ...), (list-of type), (set-of :a :b ...) — random subset")
              (":required" "Field must be non-nil")
              (":unique" "Field value must be unique across instances")
              (":default" "Default value for generation")
