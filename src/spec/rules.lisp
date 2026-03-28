@@ -144,6 +144,7 @@ Returns (values new-instance applied-p rejection-reason).
            (after-clause (getf rule :after))
            (let-bindings (getf rule :let))
            (entity-sym (intern (string-upcase (string entity-name))))
+           (now-sym (intern "NOW"))
            (state-fields (detect-state-fields entity-name))
            (ctx-syms (mapcar #'car bindings))
            (ctx-vals (mapcar #'cdr bindings)))
@@ -153,8 +154,7 @@ Returns (values new-instance applied-p rejection-reason).
       ;; 1b. Check :after (temporal guard)
       (when after-clause
         (handler-case
-            (let* ((now-sym (intern "NOW"))
-                   (all-params (list* entity-sym now-sym ctx-syms))
+            (let* ((all-params (list* entity-sym now-sym ctx-syms))
                    (fn (handler-bind ((warning #'muffle-warning))
                          (compile nil `(lambda ,all-params
                                          (declare (ignorable ,@all-params))
@@ -173,23 +173,23 @@ Returns (values new-instance applied-p rejection-reason).
             (let ((var (first binding))
                   (expr (second binding)))
               (handler-case
-                  (let* ((all-params (list* entity-sym (append ctx-syms (reverse let-vars))))
+                  (let* ((all-params (list* entity-sym now-sym (append ctx-syms (reverse let-vars))))
                          (fn (handler-bind ((warning #'muffle-warning))
                                (compile nil `(lambda ,all-params
                                                (declare (ignorable ,@all-params))
                                                ,expr)))))
                     (push var let-vars)
-                    (push (apply fn instance (append ctx-vals (reverse let-vals))) let-vals))
+                    (push (apply fn instance (or now 0) (append ctx-vals (reverse let-vals))) let-vals))
                 (error () nil)))))
         ;; 3. Check :requires
         (dolist (req requires)
           (handler-case
-              (let* ((params (list* entity-sym (append (reverse let-vars) ctx-syms)))
+              (let* ((params (list* entity-sym now-sym (append (reverse let-vars) ctx-syms)))
                      (fn (handler-bind ((warning #'muffle-warning))
                            (compile nil `(lambda ,params
                                            (declare (ignorable ,@params))
                                            ,req)))))
-                (unless (apply fn instance (append (reverse let-vals) ctx-vals))
+                (unless (apply fn instance (or now 0) (append (reverse let-vals) ctx-vals))
                   (return-from apply-rule
                     (values instance nil (list :guard-failed req)))))
             (error ()
@@ -218,7 +218,7 @@ Returns (values new-instance applied-p rejection-reason).
           ;; 6. Apply :sets — evaluate each (accessor-form value-form) pair
           (loop for (accessor-form value-form) on sets-clause by #'cddr
                 do (handler-case
-                       (let* ((params (list* entity-sym (append (reverse let-vars) ctx-syms)))
+                       (let* ((params (list* entity-sym now-sym (append (reverse let-vars) ctx-syms)))
                               (val-fn (handler-bind ((warning #'muffle-warning))
                                         (compile nil `(lambda ,params
                                                         (declare (ignorable ,@params))
@@ -226,7 +226,7 @@ Returns (values new-instance applied-p rejection-reason).
                               (field-kw (getf-field-p accessor-form entity-sym)))
                          (when field-kw
                            (setf (getf new field-kw)
-                                 (apply val-fn new (append (reverse let-vals) ctx-vals)))))
+                                 (apply val-fn new (or now 0) (append (reverse let-vals) ctx-vals)))))
                      (error () nil)))
           (values new t nil))))))
 
