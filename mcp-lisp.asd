@@ -42,6 +42,7 @@
                (:file "analysis-tests")
                (:file "dsl-features-tests")
                (:file "gaps-medium-tests")
+               (:file "gaps-hard-tests")
                (:file "issues-tests"))
   :perform (test-op (o c)
                     (symbol-call :fiveam :run!

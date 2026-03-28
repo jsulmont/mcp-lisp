@@ -120,11 +120,12 @@ patterns where field is NOT a state field."
           (push rname result))))
     (nreverse result)))
 
-(defun apply-rule (entity-name instance rule-name)
+(defun apply-rule (entity-name instance rule-name &key (now nil))
   "Apply a rule to an entity instance, performing the state transition.
 Returns (values new-instance applied-p rejection-reason).
   applied-p is T if the rule fired, NIL otherwise.
-  rejection-reason is :when-mismatch, (:guard-failed form), or NIL."
+  rejection-reason is :when-mismatch, (:after-failed form), (:guard-failed form), or NIL.
+  NOW, if provided, is the simulated clock value for :after evaluation."
   (ensure-entity-accessors entity-name)
   (let* ((rname (string-downcase (string rule-name)))
          (rule (describe-rule rname)))
@@ -134,12 +135,27 @@ Returns (values new-instance applied-p rejection-reason).
            (requires (getf rule :requires))
            (sets-clause (getf rule :sets))
            (ensures (getf rule :ensures))
+           (after-clause (getf rule :after))
            (let-bindings (getf rule :let))
            (entity-sym (intern (string-upcase (string entity-name))))
            (state-fields (detect-state-fields entity-name)))
       ;; 1. Check :when
       (unless (rule-when-matches-p when-clause entity-name instance)
         (return-from apply-rule (values instance nil :when-mismatch)))
+      ;; 1b. Check :after (temporal guard)
+      (when after-clause
+        (handler-case
+            (let* ((now-sym (intern "NOW"))
+                   (fn (handler-bind ((warning #'muffle-warning))
+                         (compile nil `(lambda (,entity-sym ,now-sym)
+                                         (declare (ignorable ,entity-sym ,now-sym))
+                                         ,after-clause)))))
+              (unless (funcall fn instance (or now 0))
+                (return-from apply-rule
+                  (values instance nil (list :after-failed after-clause)))))
+          (error ()
+            (return-from apply-rule
+              (values instance nil (list :after-failed after-clause))))))
       ;; 2. Evaluate :let bindings (best-effort; cross-entity refs will error)
       (let ((let-vars nil)
             (let-vals nil))
@@ -204,10 +220,26 @@ Returns (values new-instance applied-p rejection-reason).
                      (error () nil)))
           (values new t nil))))))
 
-(defun random-walk (entity-name &key (steps 20) (trials 50) (verbose t))
+(defun has-after-rules-p (entity-name)
+  "Return T if any rule for ENTITY-NAME has an :after clause."
+  (dolist (rname (list-rules))
+    (let* ((rule (describe-rule rname))
+           (when-clause (getf rule :when)))
+      (when (and when-clause (symbolp (car when-clause))
+                 (string-equal (symbol-name (car when-clause))
+                               (string entity-name))
+                 (getf rule :after))
+        (return t)))))
+
+(defun random-walk (entity-name &key (steps 20) (trials 50) (verbose t)
+                                     (clock-start 0) (clock-step 10))
   "Random walk PBT: generate instances and apply random applicable rules,
 checking invariants at each step. Reports violations with the rule trace
 that led to them.
+
+When rules have :after clauses, a simulated clock advances by CLOCK-STEP
+each step. The clock value is passed as `now` to :after predicates.
+
 Returns a result plist:
   :entity — entity name
   :trials — number of trials
@@ -222,7 +254,8 @@ Returns a result plist:
     (ensure-config-accessor))
   (let ((passed 0)
         (failed 0)
-        (failures nil))
+        (failures nil)
+        (use-clock (has-after-rules-p entity-name)))
     (dotimes (_trial trials)
       (let ((instance (let ((state-fields (detect-state-fields entity-name)))
                         (if state-fields
@@ -234,6 +267,7 @@ Returns a result plist:
                                     (push sf overrides))))
                               (generate-instance entity-name overrides))
                             (generate-instance entity-name))))
+            (now clock-start)
             (trace nil)
             (violation nil))
         ;; Check initial invariants
@@ -249,7 +283,9 @@ Returns a result plist:
           (loop for step from 1 to steps
                 for rules = (applicable-rules entity-name instance)
                 while (and rules (not violation))
-                do (let ((shuffled (let ((v (coerce (copy-list rules) 'vector)))
+                do (when use-clock
+                     (incf now (1+ (random clock-step))))
+                   (let ((shuffled (let ((v (coerce (copy-list rules) 'vector)))
                                       (loop for i from (1- (length v)) downto 1
                                             for j = (random (1+ i))
                                             do (rotatef (aref v i) (aref v j)))
@@ -258,7 +294,8 @@ Returns a result plist:
                      ;; Try rules in random order until one applies
                      (dolist (rname shuffled)
                        (multiple-value-bind (new ok _reason)
-                           (apply-rule entity-name instance rname)
+                           (apply-rule entity-name instance rname
+                                       :now (when use-clock now))
                          (declare (ignore _reason))
                          (when ok
                            (push rname trace)

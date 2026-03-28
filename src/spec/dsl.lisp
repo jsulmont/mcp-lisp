@@ -260,7 +260,7 @@ Names in SUPERS that match registered mixins have their fields merged in.
 ;;; defrule
 ;;; ---------------------------------------------------------------------------
 
-(defmacro defrule (name &key when let requires sets ensures reqs)
+(defmacro defrule (name &key when let requires sets ensures after creates deletes reqs)
   "Define a behavioral rule. Metadata-only — nothing is compiled or executed.
 
   (defrule place-order
@@ -270,7 +270,19 @@ Names in SUPERS that match registered mixins have their fields merged in.
                (pos (account-balance customer)))
     :sets ((order-placed-at order) (get-universal-time))
     :ensures ((eq (order-state order) :placed))
-    :reqs (\"REQ-ORD-001\"))"
+    :reqs (\"REQ-ORD-001\"))
+
+  ;; Temporal guard:
+  (defrule expire-lease
+    :when (lease :state :active)
+    :after (>= (- now (lease-granted-at lease)) (lease-duration lease))
+    :ensures ((eq (lease-state lease) :expired)))
+
+  ;; Structural mutations:
+  (defrule revoke-role
+    :when (user-role :state :active)
+    :ensures ((eq (user-role-state user-role) :revoked))
+    :deletes (user-role))"
   (let ((key (string-downcase (string name))))
     `(progn
        (setf (gethash ,key *rules*)
@@ -280,6 +292,9 @@ Names in SUPERS that match registered mixins have their fields merged in.
                    :requires ',requires
                    :sets ',sets
                    :ensures ',ensures
+                   ,@(when after `(:after ',after))
+                   ,@(when creates `(:creates ',creates))
+                   ,@(when deletes `(:deletes ',deletes))
                    ,@(when reqs `(:reqs ',reqs))))
        ',name)))
 
@@ -510,8 +525,11 @@ Used for API-level, authorization, operational, or performance requirements.
   :options '((":when" "(entity :field :value) — required source state; accepts (member ...) for multiple")
              (":let" "Bind local variables for use in :requires/:sets")
              (":requires" "Guard predicates — all must be true")
+             (":after" "Temporal guard — predicate over `now` and entity time fields; checked by random-walk with simulated clock")
              (":sets" "Alternating (accessor value) pairs for field updates")
              (":ensures" "Target state assertions after transition")
+             (":creates" "((entity-type :field1 val1 ...)) — create new entity instances during random-walk")
+             (":deletes" "(entity-var) — remove the entity instance from the scenario working set")
              (":reqs" "Requirement IDs for compliance traceability")))
 
 (register-dsl-doc 'definvariant
