@@ -131,10 +131,34 @@ Returns the target state keyword or NIL."
 ;;; detect-state-fields
 ;;; ---------------------------------------------------------------------------
 
+(defun scan-sets-for-target (sets-forms entity-name field-keyword)
+  "Scan a :sets plist for a state field assignment.
+:sets is a flat plist of (accessor-form value-form ...).
+Returns the target keyword if found, or NIL."
+  (loop for (accessor-form value-form) on sets-forms by #'cddr
+        when (and (consp accessor-form) (keywordp value-form))
+          do (let ((ekey nil) (fname nil))
+               (cond
+                 ((and (= (length accessor-form) 2)
+                       (symbolp (first accessor-form)))
+                  (multiple-value-setq (ekey fname)
+                    (decompose-accessor (first accessor-form))))
+                 ((and (eq (first accessor-form) 'getf)
+                       (= (length accessor-form) 3)
+                       (keywordp (third accessor-form)))
+                  (let ((var (second accessor-form)))
+                    (when (string-equal (symbol-name var) (string entity-name))
+                      (setf ekey (string-downcase (string entity-name))
+                            fname (string-downcase (symbol-name (third accessor-form))))))))
+               (when (and ekey
+                          (string-equal ekey (string-downcase (string entity-name)))
+                          (string-equal fname (string-downcase (symbol-name field-keyword))))
+                 (return value-form)))))
+
 (defun detect-state-fields (entity-name)
   "Auto-detect which member-typed fields of ENTITY-NAME are state fields.
 A state field is a member field that appears as a source in at least one
-rule's :when AND as a target in at least one rule's :ensures.
+rule's :when AND as a target in at least one rule's :ensures or :sets.
 Returns a list of field keywords."
   (let ((member-fields (entity-member-fields entity-name))
         (result nil))
@@ -149,7 +173,8 @@ Returns a list of field keywords."
               (declare (ignore _ekey _states))
               (when (eq fkw field-kw)
                 (setf seen-source t)))
-            (when (scan-ensures-for-target (getf rule :ensures) entity-name field-kw)
+            (when (or (scan-ensures-for-target (getf rule :ensures) entity-name field-kw)
+                      (scan-sets-for-target (getf rule :sets) entity-name field-kw))
               (setf seen-target t))))
         (when (and seen-source seen-target)
           (push field-kw result))))
@@ -175,8 +200,10 @@ Returns NIL if no state field is found."
               (parse-when-source (getf rule :when) entity-name)
             (declare (ignore _ekey))
             (when (eq fkw field-kw)
-              (let ((target (scan-ensures-for-target
-                             (getf rule :ensures) entity-name field-kw))
+              (let ((target (or (scan-ensures-for-target
+                                 (getf rule :ensures) entity-name field-kw)
+                                (scan-sets-for-target
+                                 (getf rule :sets) entity-name field-kw)))
                     (guards (extract-guards (getf rule :requires))))
                 (when target
                   (dolist (src source-states)

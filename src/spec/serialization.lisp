@@ -9,6 +9,18 @@
                 #:dict
                 #:encode-json
                 #:decode-json)
+  (:import-from #:mcp-lisp/src/spec/dsl
+                #:defentity
+                #:defmixin
+                #:defcompound
+                #:defrule
+                #:definvariant
+                #:defvariant
+                #:defconfig
+                #:defscenario
+                #:defhelper
+                #:defvalueset
+                #:defreq)
   (:import-from #:mcp-lisp/src/spec/registry
                 #:*entities*
                 #:*rules*
