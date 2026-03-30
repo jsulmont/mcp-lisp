@@ -188,233 +188,298 @@ Returns alist of ((sql-type-name . (val1 val2 ...)) ...)."
     (when (string= (lisp-to-sql (string (first f))) field-sql-name)
       (return (second f)))))
 
+;;; ---------------------------------------------------------------------------
+;;; Lisp-to-SQL translation — field refs and dispatch infrastructure
+;;; ---------------------------------------------------------------------------
+
+(defun sql-field-ref (form ename)
+  (cond
+    ((and (consp form) (eq (first form) 'getf) (= (length form) 3)
+          (symbolp (second form)) (keywordp (third form))
+          (string-equal (symbol-name (second form)) ename))
+     (lisp-to-sql (symbol-name (third form))))
+    ((and (consp form) (= (length form) 2) (symbolp (first form)) (symbolp (second form))
+          (string-equal (symbol-name (second form)) ename))
+     (multiple-value-bind (ekey fname) (decompose-accessor (first form))
+       (when (and ekey (string-equal ekey ename))
+         (lisp-to-sql fname))))
+    (t nil)))
+
+(declaim (ftype (function (t t t) (or string null)) sql-xlate))
+
+;;; ---------------------------------------------------------------------------
+;;; SQL translation handlers — symbol-dispatched
+;;; ---------------------------------------------------------------------------
+
+(defun sql-xlate-comparison (form entity-name ename)
+  (when (= (length form) 3)
+    (let ((l (sql-xlate (second form) entity-name ename))
+          (r (sql-xlate (third form) entity-name ename))
+          (op (case (first form) (>= ">=") (<= "<=") (> ">") (< "<") (= "="))))
+      (when (and l r) (format nil "~A ~A ~A" l op r)))))
+
+(defun sql-xlate-equality (form entity-name ename)
+  (when (= (length form) 3)
+    (let ((l (sql-xlate (second form) entity-name ename))
+          (r (sql-xlate (third form) entity-name ename)))
+      (when (and l r) (format nil "~A = ~A" l r)))))
+
+(defun sql-xlate-not-equal (form entity-name ename)
+  (when (= (length form) 3)
+    (let ((l (sql-xlate (second form) entity-name ename))
+          (r (sql-xlate (third form) entity-name ename)))
+      (when (and l r) (format nil "~A <> ~A" l r)))))
+
+(defun sql-xlate-logical-parts (form entity-name ename)
+  (loop for sub in (cdr form)
+        for fr = (sql-field-ref sub ename)
+        for ftype = (when fr (field-type-for entity-name fr))
+        collect (if (and fr ftype (not (eq ftype 'boolean)))
+                    (format nil "~A IS NOT NULL" (quote-ident fr))
+                    (sql-xlate sub entity-name ename))))
+
+(defun sql-xlate-and (form entity-name ename)
+  (let ((parts (sql-xlate-logical-parts form entity-name ename)))
+    (when (every #'identity parts)
+      (format nil "(~{~A~^ AND ~})" parts))))
+
+(defun sql-xlate-or (form entity-name ename)
+  (let ((parts (sql-xlate-logical-parts form entity-name ename)))
+    (when (every #'identity parts)
+      (format nil "(~{~A~^ OR ~})" parts))))
+
+(defun sql-xlate-not (form entity-name ename)
+  (when (= (length form) 2)
+    (let ((inner (second form)))
+      (cond
+        ((and (consp inner)
+              (member (first inner) '(eq equal string= string-equal =))
+              (= (length inner) 3))
+         (let ((l (sql-xlate (second inner) entity-name ename))
+               (r (sql-xlate (third inner) entity-name ename)))
+           (when (and l r) (format nil "~A <> ~A" l r))))
+        ((sql-field-ref inner ename)
+         (let* ((fr (sql-field-ref inner ename))
+                (ftype (field-type-for entity-name fr)))
+           (if (and ftype (not (eq ftype 'boolean)))
+               (format nil "~A IS NULL" (quote-ident fr))
+               (format nil "NOT (~A)" (quote-ident fr)))))
+        (t
+         (let ((sql (sql-xlate inner entity-name ename)))
+           (when sql (format nil "NOT (~A)" sql))))))))
+
+(defun sql-xlate-if (form entity-name ename)
+  (when (= (length form) 4)
+    (let* ((test-form (second form))
+           (test (sql-xlate test-form entity-name ename))
+           (then (sql-xlate (third form) entity-name ename))
+           (else-form (fourth form))
+           (test-field (when (consp test-form) (sql-field-ref test-form ename)))
+           (test-ftype (when test-field
+                         (field-type-for entity-name test-field)))
+           (negated-test
+             (when test
+               (if (and test-field test-ftype (not (eq test-ftype 'boolean)))
+                   (format nil "~A IS NULL" (quote-ident test-field))
+                   (format nil "NOT (~A)" test)))))
+      (cond
+        ((and negated-test then (eq else-form t))
+         (format nil "(~A OR (~A))" negated-test then))
+        ((and test (eq (third form) t) (sql-xlate else-form entity-name ename))
+         (format nil "((~A) OR (~A))" test (sql-xlate else-form entity-name ename)))
+        ((and test then (sql-xlate else-form entity-name ename))
+         (format nil "(CASE WHEN ~A THEN (~A) ELSE (~A) END)"
+                 test then (sql-xlate else-form entity-name ename)))
+        (t nil)))))
+
+(defun sql-xlate-member (form entity-name ename)
+  (when (= (length form) 3)
+    (let ((field (sql-xlate (second form) entity-name ename))
+          (vals (when (and (consp (third form)) (eq (car (third form)) 'quote))
+                  (mapcar (lambda (v) (format nil "'~A'" (lisp-to-sql (princ-to-string v))))
+                          (cadr (third form))))))
+      (when (and field vals)
+        (format nil "~A IN (~{~A~^, ~})" field vals)))))
+
+(defun sql-xlate-arithmetic (form entity-name ename)
+  (when (= (length form) 3)
+    (let ((l (sql-xlate (second form) entity-name ename))
+          (r (sql-xlate (third form) entity-name ename))
+          (op (string (first form))))
+      (when (and l r) (format nil "(~A ~A ~A)" l op r)))))
+
+(defun sql-xlate-bitwise (form entity-name ename)
+  (when (= (length form) 3)
+    (let ((l (sql-xlate (second form) entity-name ename))
+          (r (sql-xlate (third form) entity-name ename))
+          (op (case (first form) (logand "&") (logior "|") (logxor "#"))))
+      (when (and l r) (format nil "(~A ~A ~A)" l op r)))))
+
+(defun sql-xlate-lognot (form entity-name ename)
+  (when (= (length form) 2)
+    (let ((inner (sql-xlate (second form) entity-name ename)))
+      (when inner (format nil "(~~~A)" inner)))))
+
+(defun sql-xlate-ash (form entity-name ename)
+  (when (= (length form) 3)
+    (let ((l (sql-xlate (second form) entity-name ename))
+          (r (sql-xlate (third form) entity-name ename)))
+      (when (and l r) (format nil "(~A << ~A)" l r)))))
+
+(defun sql-xlate-abs (form entity-name ename)
+  (when (= (length form) 2)
+    (let ((inner (sql-xlate (second form) entity-name ename)))
+      (when inner (format nil "abs(~A)" inner)))))
+
+(defun sql-xlate-length (form entity-name ename)
+  (when (= (length form) 2)
+    (let* ((inner (sql-xlate (second form) entity-name ename))
+           (inner-field (when (consp (second form)) (sql-field-ref (second form) ename)))
+           (inner-ftype (when inner-field
+                          (field-type-for entity-name inner-field)))
+           (fn (if (or (eq inner-ftype 'list)
+                       (and (consp inner-ftype)
+                            (symbolp (car inner-ftype))
+                            (string-equal (symbol-name (car inner-ftype)) "LIST-OF")))
+                   "jsonb_array_length" "length")))
+      (when inner (format nil "~A(~A)" fn inner)))))
+
+;;; ---------------------------------------------------------------------------
+;;; SQL translation handlers — name-dispatched (domain helpers)
+;;; ---------------------------------------------------------------------------
+
+(defun sql-xlate-intervals-overlap (form entity-name ename)
+  (when (= (length form) 5)
+    (let ((s1 (sql-xlate (second form) entity-name ename))
+          (d1 (sql-xlate (third form) entity-name ename))
+          (s2 (sql-xlate (fourth form) entity-name ename))
+          (d2 (sql-xlate (fifth form) entity-name ename)))
+      (when (and s1 d1 s2 d2)
+        (format nil "(~A < ~A + ~A AND ~A < ~A + ~A)"
+                s1 s2 d2 s2 s1 d1)))))
+
+(defun sql-xlate-interval-contains (form entity-name ename)
+  (when (= (length form) 5)
+    (let ((os (sql-xlate (second form) entity-name ename))
+          (od (sql-xlate (third form) entity-name ename))
+          (is (sql-xlate (fourth form) entity-name ename))
+          (id (sql-xlate (fifth form) entity-name ename)))
+      (when (and os od is id)
+        (format nil "(~A <= ~A AND ~A + ~A <= ~A + ~A)"
+                os is is id os od)))))
+
+(defun sql-xlate-interval-before (form entity-name ename)
+  (when (= (length form) 4)
+    (let ((s1 (sql-xlate (second form) entity-name ename))
+          (d1 (sql-xlate (third form) entity-name ename))
+          (s2 (sql-xlate (fourth form) entity-name ename)))
+      (when (and s1 d1 s2)
+        (format nil "(~A + ~A <= ~A)" s1 d1 s2)))))
+
+(defun sql-xlate-elapsed-since (form entity-name ename)
+  (when (= (length form) 3)
+    (let ((ts (sql-xlate (second form) entity-name ename))
+          (now (sql-xlate (third form) entity-name ename)))
+      (when (and ts now)
+        (format nil "(~A - ~A)" now ts)))))
+
+(defun sql-xlate-duration-at-least (form entity-name ename)
+  (when (= (length form) 4)
+    (let ((ts (sql-xlate (second form) entity-name ename))
+          (now (sql-xlate (third form) entity-name ename))
+          (dur (sql-xlate (fourth form) entity-name ename)))
+      (when (and ts now dur)
+        (format nil "((~A - ~A) >= ~A)" now ts dur)))))
+
+(defun sql-xlate-within-retention (form entity-name ename)
+  (when (= (length form) 4)
+    (let ((et (sql-xlate (second form) entity-name ename))
+          (dur (sql-xlate (third form) entity-name ename))
+          (now (sql-xlate (fourth form) entity-name ename)))
+      (when (and et dur now)
+        (format nil "((~A - ~A) < ~A)" now et dur)))))
+
+(defun sql-xlate-in-set (form entity-name ename)
+  (when (= (length form) 3)
+    (let* ((set-name (second form))
+           (set-key (cond
+                      ((and (consp set-name) (eq (first set-name) 'quote))
+                       (string-downcase (string (second set-name))))
+                      ((stringp set-name) set-name)
+                      ((symbolp set-name) (string-downcase (symbol-name set-name)))))
+           (values (when set-key
+                     (gethash set-key mcp-lisp/src/spec/spec::*valuesets*)))
+           (val-expr (sql-xlate (third form) entity-name ename)))
+      (when (and values val-expr)
+        (format nil "~A IN (~{~A~^, ~})" val-expr values)))))
+
+;;; ---------------------------------------------------------------------------
+;;; Dispatch tables and main translator
+;;; ---------------------------------------------------------------------------
+
+(defparameter *sql-xlate-dispatch*
+  '((>=     . sql-xlate-comparison)
+    (<=     . sql-xlate-comparison)
+    (>      . sql-xlate-comparison)
+    (<      . sql-xlate-comparison)
+    (=      . sql-xlate-comparison)
+    (eq     . sql-xlate-equality)
+    (equal  . sql-xlate-equality)
+    (string=      . sql-xlate-equality)
+    (string-equal . sql-xlate-equality)
+    (/=     . sql-xlate-not-equal)
+    (and    . sql-xlate-and)
+    (or     . sql-xlate-or)
+    (not    . sql-xlate-not)
+    (if     . sql-xlate-if)
+    (member . sql-xlate-member)
+    (+      . sql-xlate-arithmetic)
+    (-      . sql-xlate-arithmetic)
+    (*      . sql-xlate-arithmetic)
+    (/      . sql-xlate-arithmetic)
+    (logand . sql-xlate-bitwise)
+    (logior . sql-xlate-bitwise)
+    (logxor . sql-xlate-bitwise)
+    (lognot . sql-xlate-lognot)
+    (ash    . sql-xlate-ash)
+    (abs    . sql-xlate-abs)
+    (length . sql-xlate-length)))
+
+(defparameter *sql-xlate-name-dispatch*
+  '(("INTERVALS-OVERLAP-P"      . sql-xlate-intervals-overlap)
+    ("INTERVAL-CONTAINS-P"       . sql-xlate-interval-contains)
+    ("INTERVAL-BEFORE-P"         . sql-xlate-interval-before)
+    ("ELAPSED-SINCE"             . sql-xlate-elapsed-since)
+    ("DURATION-AT-LEAST-P"       . sql-xlate-duration-at-least)
+    ("WITHIN-RETENTION-PERIOD-P" . sql-xlate-within-retention)
+    ("IN-SET"                    . sql-xlate-in-set)))
+
+(defun sql-xlate (form entity-name ename)
+  (cond
+    ((null form) nil)
+    ((eq form t) nil)
+    ((numberp form) (format nil "~A" form))
+    ((keywordp form) (format nil "'~A'" (lisp-to-sql (symbol-name form))))
+    ((stringp form) (format nil "'~A'" form))
+    ((symbolp form)
+     (sql-field-ref (list form (intern (string-upcase ename))) ename))
+    ((not (consp form)) nil)
+    ((sql-field-ref form ename) (quote-ident (sql-field-ref form ename)))
+    (t
+     (let* ((head (first form))
+            (handler (when (symbolp head)
+                       (cdr (assoc head *sql-xlate-dispatch*)))))
+       (if handler
+           (funcall handler form entity-name ename)
+           (when (symbolp head)
+             (let ((nh (cdr (assoc (symbol-name head) *sql-xlate-name-dispatch*
+                                   :test #'string-equal))))
+               (when nh (funcall nh form entity-name ename)))))))))
+
 (defun form-to-sql (form entity-name)
   "Translate a Lisp invariant check form to a SQL expression string.
 Returns the SQL string or NIL if the form can't be translated."
-  (let ((ename (string-downcase (string entity-name))))
-    (labels
-        ((field-ref (f)
-           (cond
-             ((and (consp f) (eq (first f) 'getf) (= (length f) 3)
-                   (symbolp (second f)) (keywordp (third f))
-                   (string-equal (symbol-name (second f)) ename))
-              (lisp-to-sql (symbol-name (third f))))
-             ((and (consp f) (= (length f) 2) (symbolp (first f)) (symbolp (second f))
-                   (string-equal (symbol-name (second f)) ename))
-              (multiple-value-bind (ekey fname) (decompose-accessor (first f))
-                (when (and ekey (string-equal ekey ename))
-                  (lisp-to-sql fname))))
-             (t nil)))
-         (xlate (f)
-           (cond
-             ((null f) nil)
-             ((eq f t) nil)
-             ((numberp f) (format nil "~A" f))
-             ((keywordp f)
-              (format nil "'~A'" (lisp-to-sql (symbol-name f))))
-             ((stringp f) (format nil "'~A'" f))
-             ((symbolp f)
-              (let ((fr (field-ref (list f (intern (string-upcase ename))))))
-                (when fr fr)))
-             ((not (consp f)) nil)
-             ;; Field access
-             ((field-ref f) (quote-ident (field-ref f)))
-             ;; Comparisons
-             ((and (member (first f) '(>= <= > < =)) (= (length f) 3))
-              (let ((l (xlate (second f)))
-                    (r (xlate (third f)))
-                    (op (case (first f) (>= ">=") (<= "<=") (> ">") (< "<") (= "="))))
-                (when (and l r) (format nil "~A ~A ~A" l op r))))
-             ;; eq / equal / string= for equality
-             ((and (member (first f) '(eq equal string= string-equal)) (= (length f) 3))
-              (let ((l (xlate (second f)))
-                    (r (xlate (third f))))
-                (when (and l r) (format nil "~A = ~A" l r))))
-             ;; /= for numeric not-equal
-             ((and (eq (first f) '/=) (= (length f) 3))
-              (let ((l (xlate (second f)))
-                    (r (xlate (third f))))
-                (when (and l r) (format nil "~A <> ~A" l r))))
-             ;; and
-             ((eq (first f) 'and)
-              (let ((parts (loop for sub in (cdr f)
-                                 for fr = (field-ref sub)
-                                 for ftype = (when fr (field-type-for entity-name fr))
-                                 collect (if (and fr ftype (not (eq ftype 'boolean)))
-                                             (format nil "~A IS NOT NULL" (quote-ident fr))
-                                             (xlate sub)))))
-                (when (every #'identity parts)
-                  (format nil "(~{~A~^ AND ~})" parts))))
-             ;; or
-             ((eq (first f) 'or)
-              (let ((parts (loop for sub in (cdr f)
-                                 for fr = (field-ref sub)
-                                 for ftype = (when fr (field-type-for entity-name fr))
-                                 collect (if (and fr ftype (not (eq ftype 'boolean)))
-                                             (format nil "~A IS NOT NULL" (quote-ident fr))
-                                             (xlate sub)))))
-                (when (every #'identity parts)
-                  (format nil "(~{~A~^ OR ~})" parts))))
-             ;; not — special-case (not (eq/equal a b)) → a <> b
-             ;;        special-case (not (field entity)) → field IS NULL
-             ((and (eq (first f) 'not) (= (length f) 2))
-              (let ((inner (second f)))
-                (cond
-                  ;; (not (eq a b)) → a <> b
-                  ((and (consp inner)
-                        (member (first inner) '(eq equal string= string-equal =))
-                        (= (length inner) 3))
-                   (let ((l (xlate (second inner)))
-                         (r (xlate (third inner))))
-                     (when (and l r) (format nil "~A <> ~A" l r))))
-                  ;; (not (accessor entity)) where accessor is a field ref
-                  ;; non-boolean → IS NULL, boolean → NOT (field)
-                  ((field-ref inner)
-                   (let* ((fr (field-ref inner))
-                          (ftype (field-type-for entity-name fr)))
-                     (if (and ftype (not (eq ftype 'boolean)))
-                         (format nil "~A IS NULL" (quote-ident fr))
-                         (format nil "NOT (~A)" (quote-ident fr)))))
-                  (t
-                   (let ((sql (xlate inner)))
-                     (when sql (format nil "NOT (~A)" sql)))))))
-             ;; if with T else → conditional invariant: (if test consequent t)
-             ;; → NOT (test) OR (consequent)
-             ((and (eq (first f) 'if) (= (length f) 4))
-              (let* ((test-form (second f))
-                     (test (xlate test-form))
-                     (then (xlate (third f)))
-                     (else-form (fourth f))
-                     ;; When test is a bare field accessor on a non-boolean field,
-                     ;; negate as "field IS NULL" instead of "NOT (field)"
-                     (test-field (when (consp test-form) (field-ref test-form)))
-                     (test-ftype (when test-field
-                                   (field-type-for entity-name test-field)))
-                     (negated-test
-                       (when test
-                         (if (and test-field test-ftype (not (eq test-ftype 'boolean)))
-                             (format nil "~A IS NULL" (quote-ident test-field))
-                             (format nil "NOT (~A)" test)))))
-                (cond
-                  ;; (if test consequent t) → negated-test OR (consequent)
-                  ((and negated-test then (eq else-form t))
-                   (format nil "(~A OR (~A))" negated-test then))
-                  ;; (if test t else) → (test) OR (else)
-                  ((and test (eq (third f) t) (xlate else-form))
-                   (format nil "((~A) OR (~A))" test (xlate else-form)))
-                  ;; Both branches translatable
-                  ((and test then (xlate else-form))
-                   (format nil "(CASE WHEN ~A THEN (~A) ELSE (~A) END)"
-                           test then (xlate else-form)))
-                  (t nil))))
-             ;; member check: (member field '(vals...))
-             ((and (eq (first f) 'member) (= (length f) 3))
-              (let ((field (xlate (second f)))
-                    (vals (when (and (consp (third f)) (eq (car (third f)) 'quote))
-                            (mapcar (lambda (v) (format nil "'~A'" (lisp-to-sql (princ-to-string v))))
-                                    (cadr (third f))))))
-                (when (and field vals)
-                  (format nil "~A IN (~{~A~^, ~})" field vals))))
-             ;; Arithmetic
-             ((and (member (first f) '(+ - * /)) (= (length f) 3))
-              (let ((l (xlate (second f)))
-                    (r (xlate (third f)))
-                    (op (string (first f))))
-                (when (and l r) (format nil "(~A ~A ~A)" l op r))))
-             ;; Bitwise
-             ((and (member (first f) '(logand logior logxor)) (= (length f) 3))
-              (let ((l (xlate (second f)))
-                    (r (xlate (third f)))
-                    (op (case (first f) (logand "&") (logior "|") (logxor "#"))))
-                (when (and l r) (format nil "(~A ~A ~A)" l op r))))
-             ((and (eq (first f) 'lognot) (= (length f) 2))
-              (let ((inner (xlate (second f))))
-                (when inner (format nil "(~~~A)" inner))))
-             ((and (eq (first f) 'ash) (= (length f) 3))
-              (let ((l (xlate (second f)))
-                    (r (xlate (third f))))
-                (when (and l r) (format nil "(~A << ~A)" l r))))
-             ((and (eq (first f) 'abs) (= (length f) 2))
-              (let ((inner (xlate (second f))))
-                (when inner (format nil "abs(~A)" inner))))
-             ;; intervals-overlap-p
-             ((and (symbolp (first f))
-                   (string-equal (symbol-name (first f)) "INTERVALS-OVERLAP-P")
-                   (= (length f) 5))
-              (let ((s1 (xlate (second f))) (d1 (xlate (third f)))
-                    (s2 (xlate (fourth f))) (d2 (xlate (fifth f))))
-                (when (and s1 d1 s2 d2)
-                  (format nil "(~A < ~A + ~A AND ~A < ~A + ~A)"
-                          s1 s2 d2 s2 s1 d1))))
-             ;; interval-contains-p
-             ((and (symbolp (first f))
-                   (string-equal (symbol-name (first f)) "INTERVAL-CONTAINS-P")
-                   (= (length f) 5))
-              (let ((os (xlate (second f))) (od (xlate (third f)))
-                    (is (xlate (fourth f))) (id (xlate (fifth f))))
-                (when (and os od is id)
-                  (format nil "(~A <= ~A AND ~A + ~A <= ~A + ~A)"
-                          os is is id os od))))
-             ;; interval-before-p
-             ((and (symbolp (first f))
-                   (string-equal (symbol-name (first f)) "INTERVAL-BEFORE-P")
-                   (= (length f) 4))
-              (let ((s1 (xlate (second f))) (d1 (xlate (third f)))
-                    (s2 (xlate (fourth f))))
-                (when (and s1 d1 s2)
-                  (format nil "(~A + ~A <= ~A)" s1 d1 s2))))
-             ;; elapsed-since
-             ((and (symbolp (first f))
-                   (string-equal (symbol-name (first f)) "ELAPSED-SINCE")
-                   (= (length f) 3))
-              (let ((ts (xlate (second f))) (now (xlate (third f))))
-                (when (and ts now)
-                  (format nil "(~A - ~A)" now ts))))
-             ;; duration-at-least-p
-             ((and (symbolp (first f))
-                   (string-equal (symbol-name (first f)) "DURATION-AT-LEAST-P")
-                   (= (length f) 4))
-              (let ((ts (xlate (second f))) (now (xlate (third f)))
-                    (dur (xlate (fourth f))))
-                (when (and ts now dur)
-                  (format nil "((~A - ~A) >= ~A)" now ts dur))))
-             ;; within-retention-period-p
-             ((and (symbolp (first f))
-                   (string-equal (symbol-name (first f)) "WITHIN-RETENTION-PERIOD-P")
-                   (= (length f) 4))
-              (let ((et (xlate (second f))) (dur (xlate (third f)))
-                    (now (xlate (fourth f))))
-                (when (and et dur now)
-                  (format nil "((~A - ~A) < ~A)" now et dur))))
-             ;; in-set — translate to SQL IN (...)
-             ((and (symbolp (first f))
-                   (string-equal (symbol-name (first f)) "IN-SET")
-                   (= (length f) 3))
-              (let* ((set-name (second f))
-                     (set-key (cond
-                                ((and (consp set-name) (eq (first set-name) 'quote))
-                                 (string-downcase (string (second set-name))))
-                                ((stringp set-name) set-name)
-                                ((symbolp set-name) (string-downcase (symbol-name set-name)))))
-                     (values (when set-key
-                               (gethash set-key mcp-lisp/src/spec/spec::*valuesets*)))
-                     (val-expr (xlate (third f))))
-                (when (and values val-expr)
-                  (format nil "~A IN (~{~A~^, ~})" val-expr values))))
-             ;; length — use jsonb_array_length for list/JSONB fields
-             ((and (eq (first f) 'length) (= (length f) 2))
-              (let* ((inner (xlate (second f)))
-                     (inner-field (when (consp (second f)) (field-ref (second f))))
-                     (inner-ftype (when inner-field
-                                    (field-type-for entity-name inner-field)))
-                     (fn (if (or (eq inner-ftype 'list)
-                                (and (consp inner-ftype)
-                                     (symbolp (car inner-ftype))
-                                     (string-equal (symbol-name (car inner-ftype)) "LIST-OF")))
-                            "jsonb_array_length" "length")))
-                (when inner (format nil "~A(~A)" fn inner))))
-             (t nil))))
-      (xlate form))))
+  (sql-xlate form entity-name (string-downcase (string entity-name))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Table dependency ordering

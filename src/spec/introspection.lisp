@@ -125,28 +125,62 @@ field's :default value from the defconfig spec."
   "Return the plist for scenario NAME (string-downcased), or NIL."
   (gethash (string-downcase (string name)) *scenarios*))
 
+(defun build-req-invariant-map ()
+  (let ((req-map (make-hash-table :test #'equal))
+        (uncategorized nil))
+    (maphash (lambda (key plist)
+               (let ((reqs (getf plist :reqs)))
+                 (if reqs
+                     (dolist (req reqs) (push key (gethash req req-map)))
+                     (push key uncategorized))))
+             *invariants*)
+    (values req-map uncategorized)))
+
+(defun build-req-rule-map ()
+  (let ((rule-map (make-hash-table :test #'equal)))
+    (maphash (lambda (key plist)
+               (dolist (req (getf plist :reqs))
+                 (push key (gethash req rule-map))))
+             *rules*)
+    rule-map))
+
+(defun merge-defreq-entries (result)
+  (maphash (lambda (key plist)
+             (declare (ignore key))
+             (let* ((id (string (getf plist :id)))
+                    (existing (find id result
+                                    :key (lambda (e) (getf e :req))
+                                    :test #'string-equal))
+                    (defreq-status (getf plist :status)))
+               (if existing
+                   (progn
+                     (when (getf plist :description)
+                       (nconc existing (list :description (getf plist :description))))
+                     (when (getf plist :category)
+                       (nconc existing (list :category (getf plist :category))))
+                     (when defreq-status
+                       (setf (getf existing :status)
+                             (if (and (getf existing :invariants)
+                                      (member defreq-status '(:partial :not-expressible)))
+                                 :partial
+                                 defreq-status))))
+                   (push (list :req id
+                               :description (getf plist :description)
+                               :category (getf plist :category)
+                               :invariants nil
+                               :status (or defreq-status :not-expressible))
+                         result))))
+           *requirements*)
+  result)
+
 (defun compliance-matrix ()
   "Return a requirement-to-invariant mapping from :reqs metadata on invariants
 and rules, and :id from defreq entries.
 Each entry is (:req REQ-ID :invariants (inv-name1 ...) :rules (rule-name1 ...) :status :covered/:not-expressible).
 Invariants without :reqs are collected under :uncategorized."
-  (let ((req-map (make-hash-table :test #'equal))
-        (rule-map (make-hash-table :test #'equal))
-        (uncategorized nil))
-    (maphash (lambda (key plist)
-               (let ((reqs (getf plist :reqs)))
-                 (if reqs
-                     (dolist (req reqs)
-                       (push key (gethash req req-map)))
-                     (push key uncategorized))))
-             *invariants*)
-    (maphash (lambda (key plist)
-               (let ((reqs (getf plist :reqs)))
-                 (when reqs
-                   (dolist (req reqs)
-                     (push key (gethash req rule-map))))))
-             *rules*)
-    (let ((result nil))
+  (multiple-value-bind (req-map uncategorized) (build-req-invariant-map)
+    (let ((rule-map (build-req-rule-map))
+          (result nil))
       (maphash (lambda (req invs)
                  (push (list :req req :invariants (nreverse invs) :status :covered) result))
                req-map)
@@ -160,37 +194,10 @@ Invariants without :reqs are collected under :uncategorized."
                                    :rules (nreverse rules) :status :covered)
                              result))))
                rule-map)
-      (maphash (lambda (key plist)
-                 (declare (ignore key))
-                 (let* ((id (string (getf plist :id)))
-                        (existing (find id result
-                                        :key (lambda (e) (getf e :req))
-                                        :test #'string-equal))
-                        (defreq-status (getf plist :status)))
-                   (if existing
-                       (progn
-                         (when (getf plist :description)
-                           (nconc existing (list :description (getf plist :description))))
-                         (when (getf plist :category)
-                           (nconc existing (list :category (getf plist :category))))
-                         (when defreq-status
-                           (setf (getf existing :status)
-                                 (if (and (getf existing :invariants)
-                                          (member defreq-status '(:partial :not-expressible)))
-                                     :partial
-                                     defreq-status))))
-                       (push (list :req id
-                                   :description (getf plist :description)
-                                   :category (getf plist :category)
-                                   :invariants nil
-                                   :status (or defreq-status :not-expressible))
-                             result))))
-               *requirements*)
+      (setf result (merge-defreq-entries result))
       (setf result (sort result #'string<
                          :key (lambda (e) (let ((r (getf e :req)))
-                                            (if (keywordp r)
-                                                "~~~"
-                                                r)))))
+                                            (if (keywordp r) "~~~" r)))))
       (when uncategorized
         (setf result (append result
                              (list (list :req :uncategorized
@@ -201,25 +208,35 @@ Invariants without :reqs are collected under :uncategorized."
 ;;; Accessor predicates
 ;;; ---------------------------------------------------------------------------
 
-(defun entity-accessor-p (sym)
-  "Return T if SYM looks like an entity accessor (ENTITY-FIELD or ENTITY-RELATION)."
+(defun plist-field-names (plist)
+  (mapcar (lambda (f) (string-downcase (symbol-name (first f)))) (getf plist :fields)))
+
+(defun plist-relation-names (plist)
+  (mapcar (lambda (r) (string-downcase (symbol-name (second r)))) (getf plist :relations)))
+
+(defun find-accessor-match (sym registry suffix-extractors)
+  "Scan REGISTRY for a prefix match on SYM's downcased name.
+SUFFIX-EXTRACTORS is a list of functions, each taking a registry plist
+and returning valid suffix strings. Returns (values registry-key suffix) or NIL."
   (let ((name (string-downcase (symbol-name sym))))
-    (maphash (lambda (ekey plist)
-               (let ((prefix (concatenate 'string ekey "-")))
+    (maphash (lambda (rkey plist)
+               (let ((prefix (concatenate 'string rkey "-")))
                  (when (and (> (length name) (length prefix))
                             (string= prefix name :end2 (length prefix)))
                    (let ((suffix (subseq name (length prefix))))
-                     (when (or (some (lambda (f)
-                                       (string= suffix
-                                                (string-downcase (symbol-name (first f)))))
-                                     (getf plist :fields))
-                               (some (lambda (r)
-                                       (string= suffix
-                                                (string-downcase (symbol-name (second r)))))
-                                     (getf plist :relations)))
-                       (return-from entity-accessor-p t))))))
-             *entities*)
+                     (when (some (lambda (extractor)
+                                   (member suffix (funcall extractor plist)
+                                           :test #'string=))
+                                 suffix-extractors)
+                       (return-from find-accessor-match
+                         (values rkey suffix)))))))
+             registry)
     nil))
+
+(defun entity-accessor-p (sym)
+  "Return T if SYM looks like an entity accessor (ENTITY-FIELD or ENTITY-RELATION)."
+  (not (null (find-accessor-match sym *entities*
+               (list #'plist-field-names #'plist-relation-names)))))
 
 (defun config-accessor-p (sym)
   "Return T if SYM is the CONFIG accessor function (any package)."
@@ -227,42 +244,15 @@ Invariants without :reqs are collected under :uncategorized."
 
 (defun variant-accessor-p (sym)
   "Return T if SYM looks like a variant accessor (VARIANT-FIELD)."
-  (let ((name (string-downcase (symbol-name sym))))
-    (maphash (lambda (vkey vplist)
-               (let ((prefix (concatenate 'string vkey "-")))
-                 (when (and (> (length name) (length prefix))
-                            (string= prefix name :end2 (length prefix)))
-                   (let ((suffix (subseq name (length prefix))))
-                     (when (some (lambda (f)
-                                   (string= suffix
-                                            (string-downcase (symbol-name (first f)))))
-                                 (getf vplist :fields))
-                       (return-from variant-accessor-p t))))))
-             *variants*)
-    nil))
+  (not (null (find-accessor-match sym *variants*
+               (list #'plist-field-names)))))
 
 (defun decompose-accessor (sym)
   "If SYM names an entity accessor like ACCOUNT-BALANCE, return
 \(values entity-key field-name) where both are lowercase strings.
 Returns NIL if SYM is not a recognized accessor."
-  (let ((name (string-downcase (symbol-name sym))))
-    (maphash (lambda (ekey plist)
-               (let ((prefix (concatenate 'string ekey "-")))
-                 (when (and (> (length name) (length prefix))
-                            (string= prefix name :end2 (length prefix)))
-                   (let ((suffix (subseq name (length prefix))))
-                     (when (or (some (lambda (f)
-                                       (string= suffix
-                                                (string-downcase (symbol-name (first f)))))
-                                     (getf plist :fields))
-                               (some (lambda (r)
-                                       (string= suffix
-                                                (string-downcase (symbol-name (second r)))))
-                                     (getf plist :relations)))
-                       (return-from decompose-accessor
-                         (values ekey suffix)))))))
-             *entities*)
-    nil))
+  (find-accessor-match sym *entities*
+    (list #'plist-field-names #'plist-relation-names)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; DSL reflection

@@ -159,105 +159,104 @@ All fields are independently random — used for negative testing."
             (push fk-kw instance)))))
     instance))
 
+(defun form-uses-symbols-p (syms form)
+  (cond
+    ((and (symbolp form) (member (symbol-name form) syms :test #'string-equal)) t)
+    ((consp form) (some (lambda (f) (form-uses-symbols-p syms f)) form))))
+
+(defun form-uses-config-p (form)
+  (cond
+    ((and (consp form) (= (length form) 2)
+          (symbolp (first form))
+          (string-equal (symbol-name (first form)) "CONFIG"))
+     t)
+    ((consp form) (some #'form-uses-config-p form))))
+
+(defun check-has-many-accessor-p (check-form entity-name)
+  (when entity-name
+    (some (lambda (rel)
+            (when (eq (first rel) :has-many)
+              (let ((acc (format nil "~A-~A"
+                                 (string-upcase (string entity-name))
+                                 (symbol-name (second rel)))))
+                (form-uses-symbols-p (list acc) check-form))))
+          (entity-relations entity-name))))
+
+(defun all-entity-fields-bounded-p (entity-name)
+  (when entity-name
+    (let ((fields (entity-fields entity-name))
+          (all-bounded t))
+      (when fields
+        (dolist (field fields)
+          (let* ((ftype (second field))
+                 (kwargs (cddr field)))
+            (unless (or (getf kwargs :required) (getf kwargs :min)
+                        (getf kwargs :max) (member-type-p ftype))
+              (setf all-bounded nil)
+              (return))))
+        all-bounded))))
+
+(defun check-referenced-fields-bounded-p (check-form entity-name)
+  (when entity-name
+    (let ((fields (entity-fields entity-name))
+          (entity-sym (intern (string-upcase (string entity-name)))))
+      (labels ((collect-refs (form)
+                 (cond
+                   ((getf-field-p form entity-sym)
+                    (list (getf-field-p form entity-sym)))
+                   ((consp form) (mapcan #'collect-refs (cdr form)))
+                   (t nil))))
+        (let ((refs (remove-duplicates (collect-refs check-form))))
+          (when refs
+            (every (lambda (ref-kw)
+                     (let ((field (find ref-kw fields
+                                        :key (lambda (f) (field-keyword (first f))))))
+                       (when field
+                         (let ((ftype (second field))
+                               (kwargs (cddr field)))
+                           (or (getf kwargs :min) (getf kwargs :max)
+                               (member-type-p ftype))))))
+                   refs)))))))
+
+(defun form-has-negated-equality-p (form)
+  (and (consp form)
+       (or (and (symbolp (first form))
+                (string= (symbol-name (first form)) "NOT")
+                (consp (second form))
+                (symbolp (first (second form)))
+                (member (symbol-name (first (second form)))
+                        '("EQ" "EQL" "EQUAL" "STRING=")
+                        :test #'string=))
+           (some #'form-has-negated-equality-p (cdr form)))))
+
 (defun classify-zero-rejection (check-form &optional entity-name)
   "Classify why an invariant might never reject unconstrained data.
 Returns a string label or NIL. ENTITY-NAME, if provided, enables
 field-aware analysis (required/min/max, has-many accessors)."
   (when (consp check-form)
-    (labels ((uses-p (syms form)
-               (cond
-                 ((and (symbolp form) (member (symbol-name form) syms
-                                              :test #'string-equal))
-                  t)
-                 ((consp form) (some (lambda (f) (uses-p syms f)) form))))
-             (uses-config-p (form)
-               (cond
-                 ((and (consp form) (= (length form) 2)
-                       (symbolp (first form))
-                       (string-equal (symbol-name (first form)) "CONFIG"))
-                  t)
-                 ((consp form) (some #'uses-config-p form))))
-             (has-many-accessor-p ()
-               (when entity-name
-                 (let ((rels (entity-relations entity-name)))
-                   (some (lambda (rel)
-                           (when (eq (first rel) :has-many)
-                             (let ((acc (format nil "~A-~A"
-                                                (string-upcase (string entity-name))
-                                                (symbol-name (second rel)))))
-                               (uses-p (list acc) check-form))))
-                         rels))))
-             (all-fields-bounded-p ()
-               (when entity-name
-                 (let ((fields (entity-fields entity-name))
-                       (all-bounded t))
-                   (when fields
-                     (dolist (field fields)
-                       (let* ((ftype (second field))
-                              (kwargs (cddr field))
-                              (required (getf kwargs :required))
-                              (has-min (getf kwargs :min))
-                              (has-max (getf kwargs :max))
-                              (is-member (member-type-p ftype)))
-                         (unless (or required has-min has-max is-member)
-                           (setf all-bounded nil)
-                           (return))))
-                     all-bounded))))
-             (referenced-fields-bounded-p ()
-               (when entity-name
-                 (let ((fields (entity-fields entity-name))
-                       (entity-sym (intern (string-upcase (string entity-name)))))
-                   (labels ((collect-refs (form)
-                              (cond
-                                ((getf-field-p form entity-sym)
-                                 (list (getf-field-p form entity-sym)))
-                                ((consp form)
-                                 (mapcan #'collect-refs (cdr form)))
-                                (t nil))))
-                     (let ((refs (remove-duplicates (collect-refs check-form))))
-                       (when refs
-                         (every (lambda (ref-kw)
-                                  (let ((field (find ref-kw fields
-                                                     :key (lambda (f)
-                                                            (field-keyword (first f))))))
-                                    (when field
-                                      (let ((ftype (second field))
-                                            (kwargs (cddr field)))
-                                        (or (getf kwargs :min) (getf kwargs :max)
-                                            (member-type-p ftype))))))
-                                refs))))))))
-      (cond
-        ((has-many-accessor-p)
-         "requires scenario-level testing — uses has-many accessor")
-        ((uses-p '("REMOVE-DUPLICATES" "DELETE-DUPLICATES") check-form)
-         "structurally untestable — uniqueness over high-entropy field")
-        ((and (uses-p '("<" ">" "<=" ">=" "PLUSP") check-form)
-              (uses-config-p check-form))
-         "weak bounds — test with extreme config values")
-        ((and (uses-p '("NOT" "NULL") check-form)
-              (all-fields-bounded-p))
-         "enforced by schema — all fields required or typed")
-        ((and (uses-p '("<" ">" "<=" ">=" "PLUSP") check-form)
-              (not (uses-config-p check-form))
-              (or (all-fields-bounded-p) (referenced-fields-bounded-p)))
-         "enforced by field bounds — :min/:max or :required constraints")
-        ((or (uses-p '("/=" "STRING/=") check-form)
-             (labels ((has-not-eq (f)
-                        (and (consp f)
-                             (or (and (symbolp (first f))
-                                      (string= (symbol-name (first f)) "NOT")
-                                      (consp (second f))
-                                      (symbolp (first (second f)))
-                                      (member (symbol-name (first (second f)))
-                                              '("EQ" "EQL" "EQUAL" "STRING=")
-                                              :test #'string=))
-                                 (some #'has-not-eq (cdr f))))))
-               (has-not-eq check-form)))
-         "inequality over high-entropy fields — negative generator forces equality")
-        ((and (uses-p '("IF" "WHEN" "COND") check-form)
-              (uses-p '("EQ" "MEMBER") check-form))
-         "conditional — needs targeted negative generator (defscenario-negative-generator)")
-        (t nil)))))
+    (cond
+      ((check-has-many-accessor-p check-form entity-name)
+       "requires scenario-level testing — uses has-many accessor")
+      ((form-uses-symbols-p '("REMOVE-DUPLICATES" "DELETE-DUPLICATES") check-form)
+       "structurally untestable — uniqueness over high-entropy field")
+      ((and (form-uses-symbols-p '("<" ">" "<=" ">=" "PLUSP") check-form)
+            (form-uses-config-p check-form))
+       "weak bounds — test with extreme config values")
+      ((and (form-uses-symbols-p '("NOT" "NULL") check-form)
+            (all-entity-fields-bounded-p entity-name))
+       "enforced by schema — all fields required or typed")
+      ((and (form-uses-symbols-p '("<" ">" "<=" ">=" "PLUSP") check-form)
+            (not (form-uses-config-p check-form))
+            (or (all-entity-fields-bounded-p entity-name)
+                (check-referenced-fields-bounded-p check-form entity-name)))
+       "enforced by field bounds — :min/:max or :required constraints")
+      ((or (form-uses-symbols-p '("/=" "STRING/=") check-form)
+           (form-has-negated-equality-p check-form))
+       "inequality over high-entropy fields — negative generator forces equality")
+      ((and (form-uses-symbols-p '("IF" "WHEN" "COND") check-form)
+            (form-uses-symbols-p '("EQ" "MEMBER") check-form))
+       "conditional — needs targeted negative generator (defscenario-negative-generator)")
+      (t nil))))
 
 (defun extract-inequality-field-pairs (invariant-entries)
   "Extract field keyword pairs from inequality comparisons across INVARIANT-ENTRIES.
@@ -599,6 +598,156 @@ Failures store only violation descriptions, not full scenario instances."
           :failed failed
           :failures (nreverse failures))))
 
+(defun run-pbt-trial-rounds (trials &key config-trials scenario)
+  "Run PBT trial rounds, handling config/non-config uniformly.
+Returns (values all-results grand-passed grand-failed)."
+  (let ((all-results nil) (grand-passed 0) (grand-failed 0))
+    (flet ((run-one-round ()
+             (unless scenario
+               (multiple-value-bind (results passed failed)
+                   (run-pbt-trials trials)
+                 (setf all-results (append all-results results))
+                 (incf grand-passed passed)
+                 (incf grand-failed failed)))
+             (dolist (sname (if scenario
+                                (list (string-downcase (string scenario)))
+                                (list-scenarios)))
+               (when (scenario-invariants-for sname)
+                 (let ((r (run-scenario-trials sname trials)))
+                   (push r all-results)
+                   (incf grand-passed (getf r :passed))
+                   (incf grand-failed (getf r :failed)))))))
+      (if *config*
+          (dotimes (_ct config-trials)
+            (declare (ignore _ct))
+            (let ((*current-config* (generate-config)))
+              (run-one-round)))
+          (run-one-round)))
+    (values all-results grand-passed grand-failed)))
+
+(defun merge-pbt-results (all-results)
+  "Merge results by entity/scenario across config trials, capping failures at 3."
+  (let ((merged (make-hash-table :test #'equal)))
+    (dolist (r all-results)
+      (let* ((ename (getf r :entity))
+             (existing (gethash ename merged)))
+        (if existing
+            (progn
+              (incf (getf existing :passed) (getf r :passed))
+              (incf (getf existing :failed) (getf r :failed))
+              (incf (getf existing :trials) (getf r :trials))
+              (let ((new-failures (getf r :failures))
+                    (existing-f (getf existing :failures))
+                    (is-scenario (and (stringp ename)
+                                      (>= (length ename) 9)
+                                      (string= "scenario:" ename :end2 9))))
+                (when new-failures
+                  (if is-scenario
+                      (when (< (length existing-f) 3)
+                        (setf (getf existing :failures)
+                              (append existing-f
+                                      (subseq new-failures 0
+                                              (min (length new-failures)
+                                                   (- 3 (length existing-f)))))))
+                      (dolist (nf new-failures)
+                        (let* ((inv-name (car nf))
+                               (new-examples (cdr nf))
+                               (ef (assoc inv-name (getf existing :failures)
+                                          :test #'string=)))
+                          (if ef
+                              (let ((need (- 3 (length (cdr ef)))))
+                                (when (plusp need)
+                                  (setf (cdr ef)
+                                        (append (cdr ef)
+                                                (subseq new-examples 0
+                                                        (min (length new-examples)
+                                                             need))))))
+                              (push nf (getf existing :failures)))))))))
+            (setf (gethash ename merged) (copy-list r)))))
+    merged))
+
+(defun print-pbt-summary (merged grand-passed grand-failed
+                           &key config-trials trials verbose)
+  "Print compact PBT summary. Returns the final results list."
+  (let ((final-results nil))
+    (maphash (lambda (k v) (declare (ignore k)) (push v final-results)) merged)
+    (setf final-results (nreverse final-results))
+    (format t "~%=== PBT Results ===~%")
+    (when *config*
+      (format t "(~A config x ~A trials)~%" config-trials trials))
+    (dolist (r final-results)
+      (let ((entity (getf r :entity))
+            (inv-count (getf r :invariants))
+            (rpassed (getf r :passed))
+            (rtrials (getf r :trials))
+            (rfailed (getf r :failed))
+            (rfailures (getf r :failures)))
+        (if (zerop rfailed)
+            (format t "  ~A: ~A/~A passed (~A invariants)~%"
+                    entity rpassed rtrials inv-count)
+            (progn
+              (format t "  ~A: ~A/~A passed, ~A FAILED (~A invariants)~%"
+                      entity rpassed rtrials rfailed inv-count)
+              (when (and verbose rfailures)
+                (let ((is-scenario (and (stringp entity)
+                                       (>= (length entity) 9)
+                                       (string= "scenario:" entity :end2 9))))
+                  (if is-scenario
+                      (let ((unique (remove-duplicates
+                                    (loop for f in rfailures nconc (copy-list f))
+                                    :test #'string=)))
+                        (dolist (v unique)
+                          (format t "    ~A~%" v)))
+                      (dolist (entry rfailures)
+                        (let ((inv-name (car entry))
+                              (examples (cdr entry)))
+                          (dolist (ex examples)
+                            (format t "    ~A: ~S~%" inv-name ex)))))))))))
+    (format t "Total: ~A passed, ~A failed~%" grand-passed grand-failed)
+    final-results))
+
+(defun run-pbt-negative-phase (negative-trials)
+  "Run negative testing: generate unconstrained instances and check rejection rates."
+  (let ((neg-stats (run-negative-trials negative-trials))
+        (suspicious nil))
+    (multiple-value-bind (neg-scenario-stats neg-gen-ok neg-gen-broken)
+        (run-negative-scenario-trials negative-trials)
+      (maphash (lambda (k v) (setf (gethash k neg-stats) v)) neg-scenario-stats)
+      (format t "~%=== Negative Testing ===~%")
+      (maphash (lambda (inv-name stats)
+                 (let* ((tested (getf stats :tested))
+                        (rejected (getf stats :rejected))
+                        (pct (if (plusp tested)
+                                 (round (* 100 (/ rejected tested)))
+                                 0)))
+                   (format t "  ~A: ~A% (~A/~A rejected)~%"
+                           inv-name pct rejected tested)
+                   (when (zerop rejected)
+                     (push inv-name suspicious))))
+               neg-stats)
+      (when suspicious
+        (format t "~%WARNING: never rejected:~%")
+        (dolist (inv-name (nreverse suspicious))
+          (let* ((inv (describe-invariant inv-name))
+                 (check (when inv (getf inv :check)))
+                 (entity (when inv
+                           (let ((on (getf inv :on)))
+                             (when on (string-downcase (symbol-name on))))))
+                 (classification (classify-zero-rejection check entity)))
+            (format t "  ~A~A~%" inv-name
+                    (if classification
+                        (format nil " (~A)" classification)
+                        "")))))
+      (when neg-gen-ok
+        (format t "~%Negative generators validated:~%")
+        (dolist (sname neg-gen-ok)
+          (format t "  ~A: all generated instances correctly rejected~%" sname)))
+      (when neg-gen-broken
+        (format t "~%WARNING: broken negative generators:~%")
+        (dolist (entry neg-gen-broken)
+          (format t "  ~A: ~A/~A instances passed all invariants (should fail)~%"
+                  (car entry) (cdr entry) negative-trials))))))
+
 (defun run-pbt (&key (trials 100) (config-trials 5) scenario (negative-trials 0) (verbose t))
   "Run property-based testing on all entities with invariants.
 Generates TRIALS random instances per entity and checks all applicable
@@ -609,175 +758,18 @@ When NEGATIVE-TRIALS is positive, also generates unconstrained random instances
 and verifies that invariants reject them (catches trivially-true invariants).
 When VERBOSE is NIL, prints only pass/fail counts (no counterexamples).
 Returns a list of result plists and prints a summary."
-  ;; Set up accessors for all entities and variants
-  (dolist (name (list-entities))
-    (ensure-entity-accessors name))
-  (dolist (name (list-variants))
-    (ensure-variant-accessors name))
-  ;; Set up config accessor in caller's package
-  (when *config*
-    (ensure-config-accessor))
-  ;; Run trials
-  (let ((all-results nil)
-        (grand-passed 0)
-        (grand-failed 0))
-    (if *config*
-        ;; Config-aware: multiple config trials
-        (dotimes (ct config-trials)
-          (let ((*current-config* (generate-config)))
-            (unless scenario
-              (multiple-value-bind (results passed failed)
-                  (run-pbt-trials trials)
-                (setf all-results (append all-results results))
-                (incf grand-passed passed)
-                (incf grand-failed failed)))
-            ;; Scenario trials
-            (let ((scenario-names (if scenario
-                                      (list (string-downcase (string scenario)))
-                                      (list-scenarios))))
-              (dolist (sname scenario-names)
-                (when (scenario-invariants-for sname)
-                  (let ((r (run-scenario-trials sname trials)))
-                    (push r all-results)
-                    (incf grand-passed (getf r :passed))
-                    (incf grand-failed (getf r :failed))))))))
-        ;; No config
-        (progn
-          (unless scenario
-            (multiple-value-bind (results passed failed)
-                (run-pbt-trials trials)
-              (setf all-results results)
-              (setf grand-passed passed)
-              (setf grand-failed failed)))
-          ;; Scenario trials
-          (let ((scenario-names (if scenario
-                                    (list (string-downcase (string scenario)))
-                                    (list-scenarios))))
-            (dolist (sname scenario-names)
-              (when (scenario-invariants-for sname)
-                (let ((r (run-scenario-trials sname trials)))
-                  (push r all-results)
-                  (incf grand-passed (getf r :passed))
-                  (incf grand-failed (getf r :failed))))))))
-    ;; Merge results by entity/scenario (sum across config trials)
-    (let ((merged (make-hash-table :test #'equal)))
-      (dolist (r all-results)
-        (let* ((ename (getf r :entity))
-               (existing (gethash ename merged)))
-          (if existing
-              (progn
-                (incf (getf existing :passed) (getf r :passed))
-                (incf (getf existing :failed) (getf r :failed))
-                (incf (getf existing :trials) (getf r :trials))
-                (let ((new-failures (getf r :failures))
-                      (existing-f (getf existing :failures))
-                      (is-scenario (and (stringp ename)
-                                        (>= (length ename) 9)
-                                        (string= "scenario:" ename :end2 9))))
-                  (when new-failures
-                    (if is-scenario
-                        ;; Scenario: append violation lists, cap at 3
-                        (when (< (length existing-f) 3)
-                          (setf (getf existing :failures)
-                                (append existing-f
-                                        (subseq new-failures 0
-                                                (min (length new-failures)
-                                                     (- 3 (length existing-f)))))))
-                        ;; Entity: merge per-invariant alist, cap 3 per invariant
-                        (dolist (nf new-failures)
-                          (let* ((inv-name (car nf))
-                                 (new-examples (cdr nf))
-                                 (ef (assoc inv-name (getf existing :failures)
-                                            :test #'string=)))
-                            (if ef
-                                (let ((need (- 3 (length (cdr ef)))))
-                                  (when (plusp need)
-                                    (setf (cdr ef)
-                                          (append (cdr ef)
-                                                  (subseq new-examples 0
-                                                          (min (length new-examples)
-                                                               need))))))
-                                (push nf (getf existing :failures)))))))))
-              (setf (gethash ename merged) (copy-list r)))))
-      ;; Print compact summary
-      (let ((final-results nil))
-        (maphash (lambda (k v) (declare (ignore k)) (push v final-results)) merged)
-        (setf final-results (nreverse final-results))
-        (format t "~%=== PBT Results ===~%")
-        (when *config*
-          (format t "(~A config x ~A trials)~%" config-trials trials))
-        (dolist (r final-results)
-          (let ((entity (getf r :entity))
-                (inv-count (getf r :invariants))
-                (rpassed (getf r :passed))
-                (rtrials (getf r :trials))
-                (rfailed (getf r :failed))
-                (rfailures (getf r :failures)))
-            (if (zerop rfailed)
-                (format t "  ~A: ~A/~A passed (~A invariants)~%"
-                        entity rpassed rtrials inv-count)
-                (progn
-                  (format t "  ~A: ~A/~A passed, ~A FAILED (~A invariants)~%"
-                          entity rpassed rtrials rfailed inv-count)
-                  (when (and verbose rfailures)
-                    (let ((is-scenario (and (stringp entity)
-                                           (>= (length entity) 9)
-                                           (string= "scenario:" entity :end2 9))))
-                      (if is-scenario
-                          (let ((unique (remove-duplicates
-                                        (loop for f in rfailures nconc (copy-list f))
-                                        :test #'string=)))
-                            (dolist (v unique)
-                              (format t "    ~A~%" v)))
-                          (dolist (entry rfailures)
-                            (let ((inv-name (car entry))
-                                  (examples (cdr entry)))
-                              (dolist (ex examples)
-                                (format t "    ~A: ~S~%" inv-name ex)))))))))))
-        (format t "Total: ~A passed, ~A failed~%" grand-passed grand-failed)
-        ;; Negative testing
-        (when (and (plusp negative-trials) (not scenario))
-          (let ((neg-stats (run-negative-trials negative-trials))
-                (suspicious nil))
-            (multiple-value-bind (neg-scenario-stats neg-gen-ok neg-gen-broken)
-                (run-negative-scenario-trials negative-trials)
-              ;; Merge scenario stats into entity stats
-              (maphash (lambda (k v) (setf (gethash k neg-stats) v)) neg-scenario-stats)
-              (format t "~%=== Negative Testing ===~%")
-              (maphash (lambda (inv-name stats)
-                         (let* ((tested (getf stats :tested))
-                                (rejected (getf stats :rejected))
-                                (pct (if (plusp tested)
-                                         (round (* 100 (/ rejected tested)))
-                                         0)))
-                           (format t "  ~A: ~A% (~A/~A rejected)~%"
-                                   inv-name pct rejected tested)
-                           (when (zerop rejected)
-                             (push inv-name suspicious))))
-                       neg-stats)
-              (when suspicious
-                (format t "~%WARNING: never rejected:~%")
-                (dolist (inv-name (nreverse suspicious))
-                  (let* ((inv (describe-invariant inv-name))
-                         (check (when inv (getf inv :check)))
-                         (entity (when inv
-                                   (let ((on (getf inv :on)))
-                                     (when on (string-downcase (symbol-name on))))))
-                         (classification (classify-zero-rejection check entity)))
-                    (format t "  ~A~A~%" inv-name
-                            (if classification
-                                (format nil " (~A)" classification)
-                                "")))))
-              (when neg-gen-ok
-                (format t "~%Negative generators validated:~%")
-                (dolist (sname neg-gen-ok)
-                  (format t "  ~A: all generated instances correctly rejected~%" sname)))
-              (when neg-gen-broken
-                (format t "~%WARNING: broken negative generators:~%")
-                (dolist (entry neg-gen-broken)
-                  (format t "  ~A: ~A/~A instances passed all invariants (should fail)~%"
-                          (car entry) (cdr entry) negative-trials))))))
-        final-results))))
+  (dolist (name (list-entities)) (ensure-entity-accessors name))
+  (dolist (name (list-variants)) (ensure-variant-accessors name))
+  (when *config* (ensure-config-accessor))
+  (multiple-value-bind (all-results grand-passed grand-failed)
+      (run-pbt-trial-rounds trials :config-trials config-trials :scenario scenario)
+    (let* ((merged (merge-pbt-results all-results))
+           (final-results (print-pbt-summary merged grand-passed grand-failed
+                                             :config-trials config-trials
+                                             :trials trials :verbose verbose)))
+      (when (and (plusp negative-trials) (not scenario))
+        (run-pbt-negative-phase negative-trials))
+      final-results)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; check-scenario — convenience for debugging scenario generators

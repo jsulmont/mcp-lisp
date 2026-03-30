@@ -104,149 +104,161 @@
 ;;; Portable AST for JSON interchange
 ;;; ---------------------------------------------------------------------------
 
+;;; ---------------------------------------------------------------------------
+;;; form-to-ast handlers
+;;; ---------------------------------------------------------------------------
+
+(defun ast-handle-quote (form)
+  (let ((val (second form)))
+    (cond
+      ((keywordp val)
+       (dict "node" "keyword" "name" (string-downcase (symbol-name val))))
+      ((symbolp val)
+       (dict "node" "literal" "value" (string-downcase (symbol-name val))))
+      ((listp val)
+       (dict "node" "quote"
+             "elements" (coerce (mapcar #'form-to-ast
+                                        (mapcar (lambda (x) (list 'quote x)) val))
+                                'vector)))
+      (t (dict "node" "literal" "value" val)))))
+
+(defun ast-handle-varargs (form)
+  (dict "node" (string-downcase (symbol-name (car form)))
+        "args" (coerce (mapcar #'form-to-ast (cdr form)) 'vector)))
+
+(defun ast-handle-not (form)
+  (dict "node" "not" "arg" (form-to-ast (second form))))
+
+(defun ast-handle-if (form)
+  (dict "node" "if"
+        "test" (form-to-ast (second form))
+        "then" (form-to-ast (third form))
+        "else" (form-to-ast (fourth form))))
+
+(defun ast-handle-compare (form)
+  (dict "node" "compare"
+        "op" (symbol-name (car form))
+        "left" (form-to-ast (second form))
+        "right" (form-to-ast (third form))))
+
+(defun ast-handle-eq (form)
+  (dict "node" "eq"
+        "left" (form-to-ast (second form))
+        "right" (form-to-ast (third form))))
+
+(defun ast-handle-member (form)
+  (when (and (= (length form) 3)
+             (let ((set-form (third form)))
+               (and (consp set-form) (eq (car set-form) 'quote))))
+    (let ((set-items (second (third form))))
+      (dict "node" "member"
+            "value" (form-to-ast (second form))
+            "set" (coerce (mapcar #'form-to-ast
+                                  (if (listp set-items) set-items
+                                      (list set-items)))
+                          'vector)))))
+
+(defun ast-handle-getf (form)
+  (dict "node" "field"
+        "object" (form-to-ast (second form))
+        "field" (string-downcase (symbol-name (third form)))))
+
+(defun ast-handle-lambda (form)
+  (dict "node" "lambda"
+        "params" (coerce (mapcar (lambda (p) (string-downcase (symbol-name p)))
+                                 (second form))
+                         'vector)
+        "body" (form-to-ast (if (cdddr form)
+                                `(progn ,@(cddr form))
+                                (third form)))))
+
+(defun ast-handle-let (form)
+  (dict "node" (if (eq (car form) 'let*) "let*" "let")
+        "bindings" (coerce
+                    (mapcar (lambda (b)
+                              (if (consp b)
+                                  (dict "name" (string-downcase (symbol-name (car b)))
+                                        "value" (form-to-ast (second b)))
+                                  (dict "name" (string-downcase (symbol-name b))
+                                        "value" (form-to-ast nil))))
+                            (second form))
+                    'vector)
+        "body" (form-to-ast (if (cdddr form)
+                                `(progn ,@(cddr form))
+                                (third form)))))
+
+(defun ast-handle-cond (form)
+  (labels ((cond-to-if (clauses)
+             (cond
+               ((null clauses) (form-to-ast nil))
+               ((eq (caar clauses) t)
+                (form-to-ast (if (cddar clauses)
+                                 `(progn ,@(cdar clauses))
+                                 (cadar clauses))))
+               ((null (cdr clauses))
+                (dict "node" "if"
+                      "test" (form-to-ast (caar clauses))
+                      "then" (form-to-ast (if (cddar clauses)
+                                              `(progn ,@(cdar clauses))
+                                              (cadar clauses)))
+                      "else" (form-to-ast nil)))
+               (t
+                (dict "node" "if"
+                      "test" (form-to-ast (caar clauses))
+                      "then" (form-to-ast (if (cddar clauses)
+                                              `(progn ,@(cdar clauses))
+                                              (cadar clauses)))
+                      "else" (cond-to-if (cdr clauses)))))))
+    (cond-to-if (cdr form))))
+
+(defparameter *form-to-ast-dispatch*
+  '((quote  . ast-handle-quote)
+    (and    . ast-handle-varargs)
+    (or     . ast-handle-varargs)
+    (not    . ast-handle-not)
+    (if     . ast-handle-if)
+    (>=     . ast-handle-compare)
+    (<=     . ast-handle-compare)
+    (>      . ast-handle-compare)
+    (<      . ast-handle-compare)
+    (=      . ast-handle-compare)
+    (eq     . ast-handle-eq)
+    (member . ast-handle-member)
+    (getf   . ast-handle-getf)
+    (lambda . ast-handle-lambda)
+    (let    . ast-handle-let)
+    (let*   . ast-handle-let)
+    (cond   . ast-handle-cond)))
+
 (defun form-to-ast (form)
   "Convert a CL form to a portable AST hash table.
 Node types: literal, keyword, var, field, compare, eq, and, or, not,
 if, member, lambda, let, call."
   (cond
-    ((null form)
-     (dict "node" "literal" "value" nil))
-    ((eq form t)
-     (dict "node" "literal" "value" t))
-    ((keywordp form)
-     (dict "node" "keyword" "name" (string-downcase (symbol-name form))))
-    ((numberp form)
-     (dict "node" "literal" "value" form))
-    ((stringp form)
-     (dict "node" "literal" "value" form))
-    ((characterp form)
-     (dict "node" "literal" "type" "char" "value" (char-code form)))
-    ((symbolp form)
-     (dict "node" "var" "name" (string-downcase (symbol-name form))))
+    ((null form) (dict "node" "literal" "value" nil))
+    ((eq form t) (dict "node" "literal" "value" t))
+    ((keywordp form) (dict "node" "keyword" "name" (string-downcase (symbol-name form))))
+    ((numberp form) (dict "node" "literal" "value" form))
+    ((stringp form) (dict "node" "literal" "value" form))
+    ((characterp form) (dict "node" "literal" "type" "char" "value" (char-code form)))
+    ((symbolp form) (dict "node" "var" "name" (string-downcase (symbol-name form))))
     ((consp form)
-     (let ((head (car form)))
+     (let* ((head (car form))
+            (handler (when (symbolp head)
+                       (cdr (assoc head *form-to-ast-dispatch*))))
+            (result (when handler (funcall handler form))))
        (cond
-         ;; (quote x) — rare at top level; member handler unquotes inline
-         ((eq head 'quote)
-          (let ((val (second form)))
-            (cond
-              ((keywordp val)
-               (dict "node" "keyword" "name" (string-downcase (symbol-name val))))
-              ((symbolp val)
-               (dict "node" "literal" "value" (string-downcase (symbol-name val))))
-              ((listp val)
-               (dict "node" "quote"
-                     "elements" (coerce (mapcar #'form-to-ast
-                                                (mapcar (lambda (x) (list 'quote x)) val))
-                                        'vector)))
-              (t (dict "node" "literal" "value" val)))))
-         ;; (and ...)
-         ((eq head 'and)
-          (dict "node" "and"
-                "args" (coerce (mapcar #'form-to-ast (cdr form)) 'vector)))
-         ;; (or ...)
-         ((eq head 'or)
-          (dict "node" "or"
-                "args" (coerce (mapcar #'form-to-ast (cdr form)) 'vector)))
-         ;; (not x)
-         ((eq head 'not)
-          (dict "node" "not" "arg" (form-to-ast (second form))))
-         ;; (if test then else)
-         ((eq head 'if)
-          (dict "node" "if"
-                "test" (form-to-ast (second form))
-                "then" (form-to-ast (third form))
-                "else" (form-to-ast (fourth form))))
-         ;; comparison: >= <= > < =
-         ((member head '(>= <= > < =))
-          (dict "node" "compare"
-                "op" (symbol-name head)
-                "left" (form-to-ast (second form))
-                "right" (form-to-ast (third form))))
-         ;; (eq a b)
-         ((eq head 'eq)
-          (dict "node" "eq"
-                "left" (form-to-ast (second form))
-                "right" (form-to-ast (third form))))
-         ;; (member val '(items...)) — only for literal quoted sets
-         ;; with no extra keyword args; other forms fall through to call
-         ((and (eq head 'member)
-               (= (length form) 3)
-               (let ((set-form (third form)))
-                 (and (consp set-form) (eq (car set-form) 'quote))))
-          (let ((set-items (second (third form))))
-            (dict "node" "member"
-                  "value" (form-to-ast (second form))
-                  "set" (coerce (mapcar #'form-to-ast
-                                        (if (listp set-items) set-items
-                                            (list set-items)))
-                                'vector))))
-         ;; (getf obj :key) → field node
-         ((eq head 'getf)
-          (dict "node" "field"
-                "object" (form-to-ast (second form))
-                "field" (string-downcase (symbol-name (third form)))))
-         ;; (lambda (params...) body)
-         ((eq head 'lambda)
-          (dict "node" "lambda"
-                "params" (coerce (mapcar (lambda (p) (string-downcase (symbol-name p)))
-                                         (second form))
-                                 'vector)
-                "body" (form-to-ast (if (cdddr form)
-                                        `(progn ,@(cddr form))
-                                        (third form)))))
-         ;; (let/let* ((var init)...) body)
-         ((member head '(let let*))
-          (dict "node" (if (eq head 'let*) "let*" "let")
-                "bindings" (coerce
-                            (mapcar (lambda (b)
-                                      (if (consp b)
-                                          (dict "name" (string-downcase (symbol-name (car b)))
-                                                "value" (form-to-ast (second b)))
-                                          (dict "name" (string-downcase (symbol-name b))
-                                                "value" (form-to-ast nil))))
-                                    (second form))
-                            'vector)
-                "body" (form-to-ast (if (cdddr form)
-                                        `(progn ,@(cddr form))
-                                        (third form)))))
-         ;; (cond (test1 body1) ... [(t else)]) → nested if
-         ((eq head 'cond)
-          (labels ((cond-to-if (clauses)
-                     (cond
-                       ((null clauses) (form-to-ast nil))
-                       ((eq (caar clauses) t)
-                        (form-to-ast (if (cddar clauses)
-                                         `(progn ,@(cdar clauses))
-                                         (cadar clauses))))
-                       ((null (cdr clauses))
-                        (dict "node" "if"
-                              "test" (form-to-ast (caar clauses))
-                              "then" (form-to-ast (if (cddar clauses)
-                                                      `(progn ,@(cdar clauses))
-                                                      (cadar clauses)))
-                              "else" (form-to-ast nil)))
-                       (t
-                        (dict "node" "if"
-                              "test" (form-to-ast (caar clauses))
-                              "then" (form-to-ast (if (cddar clauses)
-                                                      `(progn ,@(cdar clauses))
-                                                      (cadar clauses)))
-                              "else" (cond-to-if (cdr clauses)))))))
-            (cond-to-if (cdr form))))
-         ;; entity accessor: (entity-field entity) → field node
+         (result result)
          ((and (symbolp head) (= (length form) 2) (decompose-accessor head))
           (multiple-value-bind (entity-key field-name) (decompose-accessor head)
             (declare (ignore entity-key))
             (dict "node" "field"
                   "object" (form-to-ast (second form))
                   "field" field-name)))
-         ;; default: function call
          ((symbolp head)
           (dict "node" "call"
                 "fn" (string-downcase (symbol-name head))
                 "args" (coerce (mapcar #'form-to-ast (cdr form)) 'vector)))
-         ;; fallback
          (t (dict "node" "call"
                   "fn" (format nil "~S" head)
                   "args" (coerce (mapcar #'form-to-ast (cdr form)) 'vector))))))
@@ -269,90 +281,113 @@ and the helpers package before falling back to *PACKAGE*."
               (when (and status (fboundp sym)) sym))))
         (intern uname))))
 
+;;; ---------------------------------------------------------------------------
+;;; ast-to-form handlers
+;;; ---------------------------------------------------------------------------
+
+(defun ast-from-literal (ast)
+  (let ((typ (gethash "type" ast))
+        (val (gethash "value" ast)))
+    (cond
+      ((and typ (string= typ "char")) (code-char val))
+      ((and (vectorp val) (not (stringp val))) (coerce val 'list))
+      (t val))))
+
+(defun ast-from-keyword (ast)
+  (intern (string-upcase (gethash "name" ast)) :keyword))
+
+(defun ast-from-var (ast)
+  (intern (string-upcase (gethash "name" ast))))
+
+(defun ast-from-field (ast)
+  (let* ((obj (ast-to-form (gethash "object" ast)))
+         (field (gethash "field" ast))
+         (accessor (when (symbolp obj)
+                     (intern (format nil "~A-~A"
+                                     (symbol-name obj) (string-upcase field))))))
+    (if (and accessor (entity-accessor-p accessor))
+        (list accessor obj)
+        (list 'getf obj (intern (string-upcase field) :keyword)))))
+
+(defun ast-from-compare (ast)
+  (list (find-symbol (gethash "op" ast) :cl)
+        (ast-to-form (gethash "left" ast))
+        (ast-to-form (gethash "right" ast))))
+
+(defun ast-from-eq (ast)
+  (list 'eq
+        (ast-to-form (gethash "left" ast))
+        (ast-to-form (gethash "right" ast))))
+
+(defun ast-from-logical (ast)
+  (cons (intern (string-upcase (gethash "node" ast)) :cl)
+        (map 'list #'ast-to-form (gethash "args" ast))))
+
+(defun ast-from-not (ast)
+  (list 'not (ast-to-form (gethash "arg" ast))))
+
+(defun ast-from-if (ast)
+  (list 'if
+        (ast-to-form (gethash "test" ast))
+        (ast-to-form (gethash "then" ast))
+        (ast-to-form (gethash "else" ast))))
+
+(defun ast-from-member (ast)
+  (list 'member
+        (ast-to-form (gethash "value" ast))
+        (list 'quote (map 'list #'ast-to-form (gethash "set" ast)))))
+
+(defun ast-from-quote (ast)
+  (list 'quote (map 'list #'ast-to-form (gethash "elements" ast))))
+
+(defun ast-from-lambda (ast)
+  (list 'lambda
+        (map 'list (lambda (p) (intern (string-upcase p)))
+             (gethash "params" ast))
+        (ast-to-form (gethash "body" ast))))
+
+(defun ast-from-let (ast)
+  (let ((node (gethash "node" ast)))
+    (list (if (string= node "let*") 'let* 'let)
+          (map 'list (lambda (b)
+                       (list (intern (string-upcase (gethash "name" b)))
+                             (ast-to-form (gethash "value" b))))
+               (gethash "bindings" ast))
+          (ast-to-form (gethash "body" ast)))))
+
+(defun ast-from-call (ast)
+  (cons (resolve-fn-symbol (gethash "fn" ast))
+        (map 'list #'ast-to-form (gethash "args" ast))))
+
+(defparameter *ast-to-form-dispatch*
+  '(("literal" . ast-from-literal)
+    ("keyword" . ast-from-keyword)
+    ("var"     . ast-from-var)
+    ("field"   . ast-from-field)
+    ("compare" . ast-from-compare)
+    ("eq"      . ast-from-eq)
+    ("and"     . ast-from-logical)
+    ("or"      . ast-from-logical)
+    ("not"     . ast-from-not)
+    ("if"      . ast-from-if)
+    ("member"  . ast-from-member)
+    ("quote"   . ast-from-quote)
+    ("lambda"  . ast-from-lambda)
+    ("let"     . ast-from-let)
+    ("let*"    . ast-from-let)
+    ("call"    . ast-from-call)))
+
 (defun ast-to-form (ast)
   "Convert a portable AST hash table back to a CL form."
   (cond
     ((null ast) nil)
     ((and (vectorp ast) (not (stringp ast))) (map 'list #'ast-to-form ast))
     ((hash-table-p ast)
-     (let ((node (gethash "node" ast)))
-       (cond
-         ((string= node "literal")
-          (let ((typ (gethash "type" ast))
-                (val (gethash "value" ast)))
-            (cond
-              ((and typ (string= typ "char")) (code-char val))
-              ((and (vectorp val) (not (stringp val))) (coerce val 'list))
-              (t val))))
-
-         ((string= node "keyword")
-          (intern (string-upcase (gethash "name" ast)) :keyword))
-
-         ((string= node "var")
-          (intern (string-upcase (gethash "name" ast))))
-
-         ((string= node "field")
-          (let* ((obj (ast-to-form (gethash "object" ast)))
-                 (field (gethash "field" ast))
-                 (accessor (when (symbolp obj)
-                             (intern (format nil "~A-~A"
-                                             (symbol-name obj) (string-upcase field))))))
-            (if (and accessor (entity-accessor-p accessor))
-                (list accessor obj)
-                (list 'getf obj (intern (string-upcase field) :keyword)))))
-
-         ((string= node "compare")
-          (list (find-symbol (gethash "op" ast) :cl)
-                (ast-to-form (gethash "left" ast))
-                (ast-to-form (gethash "right" ast))))
-
-         ((string= node "eq")
-          (list 'eq
-                (ast-to-form (gethash "left" ast))
-                (ast-to-form (gethash "right" ast))))
-
-         ((string= node "and")
-          (cons 'and (map 'list #'ast-to-form (gethash "args" ast))))
-
-         ((string= node "or")
-          (cons 'or (map 'list #'ast-to-form (gethash "args" ast))))
-
-         ((string= node "not")
-          (list 'not (ast-to-form (gethash "arg" ast))))
-
-         ((string= node "if")
-          (list 'if
-                (ast-to-form (gethash "test" ast))
-                (ast-to-form (gethash "then" ast))
-                (ast-to-form (gethash "else" ast))))
-
-         ((string= node "member")
-          (list 'member
-                (ast-to-form (gethash "value" ast))
-                (list 'quote (map 'list #'ast-to-form (gethash "set" ast)))))
-
-         ((string= node "quote")
-          (list 'quote (map 'list #'ast-to-form (gethash "elements" ast))))
-
-         ((string= node "lambda")
-          (list 'lambda
-                (map 'list (lambda (p) (intern (string-upcase p)))
-                     (gethash "params" ast))
-                (ast-to-form (gethash "body" ast))))
-
-         ((or (string= node "let") (string= node "let*"))
-          (list (if (string= node "let*") 'let* 'let)
-                (map 'list (lambda (b)
-                             (list (intern (string-upcase (gethash "name" b)))
-                                   (ast-to-form (gethash "value" b))))
-                     (gethash "bindings" ast))
-                (ast-to-form (gethash "body" ast))))
-
-         ((string= node "call")
-          (cons (resolve-fn-symbol (gethash "fn" ast))
-                (map 'list #'ast-to-form (gethash "args" ast))))
-
-         (t (error "Unknown AST node type: ~A" node)))))
+     (let* ((node (gethash "node" ast))
+            (handler (cdr (assoc node *ast-to-form-dispatch* :test #'string=))))
+       (if handler
+           (funcall handler ast)
+           (error "Unknown AST node type: ~A" node))))
     (t ast)))
 
 (defun field-to-ht (field-spec)
