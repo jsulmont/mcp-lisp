@@ -339,8 +339,8 @@
 
 ;;; --- Worker pool lifecycle integration ---
 
-(test start-sse-server-creates-tool-pool
-  "start-sse-server creates a worker pool and stop-sse-server destroys it"
+(test start-sse-server-configures-tool-cap
+  "start-sse-server sets the tools/call concurrency cap; stop-sse-server resets it"
   (let ((original-fn (symbol-function 'woo:run)))
     (unwind-protect
          (progn
@@ -365,18 +365,17 @@
                       (ignore-errors
                         (mcp-lisp/src/transport/mcp-woo:start-sse-server
                          (make-hash-table :test #'equal)
-                         :port 19876 :tool-workers 2))
-                      ;; Pool should exist and be running
-                      (is (not (null mcp-lisp/src/transport/mcp-woo::*tool-pool*)))
-                      (is (mcp-lisp/src/transport/worker-pool:worker-pool-running-p
-                           mcp-lisp/src/transport/mcp-woo::*tool-pool*))
-                      (is (= 2 (mcp-lisp/src/transport/worker-pool:worker-pool-size
-                                mcp-lisp/src/transport/mcp-woo::*tool-pool*)))
+                         :port 19876 :max-tool-calls 7))
+                      ;; Cap configured, no in-flight tool threads
+                      (is (= 7 mcp-lisp/src/transport/mcp-woo::*max-tool-threads*))
+                      (is (= 0 mcp-lisp/src/transport/mcp-woo::*tool-thread-count*))
                       ;; Stop server
                       (setf stop-flag t)
                       (mcp-lisp/src/transport/mcp-woo:stop-sse-server)
-                      ;; Pool should be gone
-                      (is (null mcp-lisp/src/transport/mcp-woo::*tool-pool*)))
+                      ;; No lingering tool threads
+                      (is (= 0 mcp-lisp/src/transport/mcp-woo::*tool-thread-count*))
+                      (is (zerop (hash-table-count
+                                  mcp-lisp/src/transport/mcp-woo::*tool-threads*))))
                  (setf (symbol-function 'usocket:socket-connect) orig-connect)))))
       (setf (symbol-function 'woo:run) original-fn)
       (ignore-errors (mcp-lisp/src/transport/mcp-woo:stop-sse-server)))))
@@ -400,3 +399,30 @@
            session-a "config://server/info"))
       (is (not (mcp-lisp/src/server/state:session-subscribed-p
                 session-b "config://server/info"))))))
+
+(test run-tool-call-elastic-dispatch
+  "run-tool-call runs each call on its own thread and enforces the concurrency cap"
+  (let ((old-max mcp-lisp/src/transport/mcp-woo::*max-tool-threads*)
+        (release nil))
+    (unwind-protect
+         (progn
+           (setf mcp-lisp/src/transport/mcp-woo::*max-tool-threads* 2
+                 mcp-lisp/src/transport/mcp-woo::*tool-thread-count* 0)
+           (let ((r1 (mcp-lisp/src/transport/mcp-woo::run-tool-call
+                      (lambda () (loop until release do (sleep 0.02)))))
+                 (r2 (mcp-lisp/src/transport/mcp-woo::run-tool-call
+                      (lambda () (loop until release do (sleep 0.02))))))
+             (sleep 0.15)
+             (let ((r3 (mcp-lisp/src/transport/mcp-woo::run-tool-call
+                        (lambda () (loop until release do (sleep 0.02))))))
+               (is (eq t r1))
+               (is (eq t r2))
+               (is (null r3))   ; rejected: at capacity
+               (is (= 2 mcp-lisp/src/transport/mcp-woo::*tool-thread-count*))
+               (setf release t)
+               (loop repeat 100
+                     until (zerop mcp-lisp/src/transport/mcp-woo::*tool-thread-count*)
+                     do (sleep 0.02))
+               (is (zerop mcp-lisp/src/transport/mcp-woo::*tool-thread-count*)))))
+      (setf release t
+            mcp-lisp/src/transport/mcp-woo::*max-tool-threads* old-max))))

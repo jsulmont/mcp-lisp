@@ -225,13 +225,13 @@ by the transport layer), so they work correctly with multiple concurrent session
     (gate-handlers handlers)))
 
 (defmethod server-start ((server mcp-server) &key (transport :stdio) (port 8080)
-                                                   (event-loops nil) (tool-workers nil))
+                                                   (event-loops nil) (max-tool-calls 512))
   "Start the server with the specified transport.
 TRANSPORT options:
   :stdio - MCP protocol over stdio (newline-delimited JSON) - default
   :sse   - Streamable HTTP on PORT (MCP 2025-03-26+)
 EVENT-LOOPS: number of Woo event loop threads (nil = auto-detect CPU cores).
-TOOL-WORKERS: number of worker threads for tools/call (nil = same as event loops)."
+MAX-TOOL-CALLS: cap on concurrent tools/call threads (default 512)."
   (let ((handlers (make-hash-table :test #'equal)))
     (setup-handlers server handlers)
     (case transport
@@ -239,7 +239,7 @@ TOOL-WORKERS: number of worker threads for tools/call (nil = same as event loops
        (setf (server-sse server)
              (start-sse-server handlers :port port :session-factory #'make-session
                                         :event-loops event-loops
-                                        :tool-workers tool-workers)))
+                                        :max-tool-calls max-tool-calls)))
       (otherwise
        (setf (server-session server) (make-session))
        (let ((*current-session* (server-session server)))
@@ -252,7 +252,7 @@ TOOL-WORKERS: number of worker threads for tools/call (nil = same as event loops
     (setf (server-sse server) nil)))
 
 (defun run-server (&key (name "mcp-lisp-server") (version "1.0.0") (transport :stdio) (port 8080)
-                        (event-loops nil) (tool-workers nil))
+                        (event-loops nil) (max-tool-calls 512))
   "Create and start an MCP server in one call.
 TRANSPORT options:
   :stdio - MCP protocol over stdio (newline-delimited JSON) - for Claude Code
@@ -260,4 +260,4 @@ TRANSPORT options:
   (let ((server (make-server :name name :version version)))
     (server-start server :transport transport :port port
                          :event-loops event-loops
-                         :tool-workers tool-workers)))
+                         :max-tool-calls max-tool-calls)))

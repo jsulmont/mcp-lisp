@@ -21,10 +21,6 @@
   (:import-from #:mcp-lisp/src/server/state
                 #:*current-session*
                 #:session-protocol-version)
-  (:import-from #:mcp-lisp/src/transport/worker-pool
-                #:make-worker-pool
-                #:submit-to-pool
-                #:stop-worker-pool)
   (:import-from #:mcp-lisp/src/server/tool-context
                 #:*stream-notify-fn*
                 #:*stream-call-fn*)
@@ -74,8 +70,36 @@
 (defvar *keepalive-thread* nil "Keepalive thread for SSE clients.")
 (defvar *keepalive-stop* nil "Flag to signal keepalive thread to exit.")
 
-;;; Worker pool for streaming handlers (tools/call)
-(defvar *tool-pool* nil "Worker pool for tool execution (avoids blocking event loops).")
+;;; Elastic per-call threads for streaming handlers (tools/call).
+;;; Each tools/call runs on its own OS thread instead of a fixed pool, so a tool
+;;; that blocks on a server->client round-trip (sampling/elicitation) holds only
+;;; its own thread and never starves other calls. Capped to bound resource use;
+;;; calls beyond the cap are rejected.
+(defvar *max-tool-threads* 512
+  "Maximum concurrent tools/call threads. Calls beyond this are rejected.")
+(defvar *tool-thread-count* 0 "Current in-flight tools/call thread count.")
+(defvar *tool-threads-lock* (bt:make-lock "tool-threads"))
+(defvar *tool-threads* (make-hash-table :test #'eq)
+  "Active tools/call threads (thread -> T), for shutdown teardown.")
+
+(defun run-tool-call (thunk)
+  "Run THUNK on a fresh OS thread for a streaming tools/call. Returns T if the
+call was started, NIL if at capacity (*max-tool-threads*)."
+  (when (bt:with-lock-held (*tool-threads-lock*)
+          (when (< *tool-thread-count* *max-tool-threads*)
+            (incf *tool-thread-count*)
+            t))
+    (bt:make-thread
+     (lambda ()
+       (let ((self (bt:current-thread)))
+         (bt:with-lock-held (*tool-threads-lock*)
+           (setf (gethash self *tool-threads*) t))
+         (unwind-protect (funcall thunk)
+           (bt:with-lock-held (*tool-threads-lock*)
+             (remhash self *tool-threads*)
+             (decf *tool-thread-count*)))))
+     :name "mcp-tool-call")
+    t))
 
 ;;; Session lifecycle hook
 (defvar *session-cleanup-hook* nil
@@ -688,8 +712,11 @@ writes go through the ev_async bridge."
            (params (gethash "params" parsed))
            (handler (gethash method *handlers*)))
       (if handler
-          ;; Dispatch to worker pool — event loop returns immediately
-          (submit-to-pool *tool-pool*
+          ;; Run each tools/call on its own thread: the event loop returns
+          ;; immediately, and a tool blocked on a server->client round-trip
+          ;; (sampling/elicitation) holds only its own thread, never starving
+          ;; other calls.
+          (unless (run-tool-call
             (lambda ()
               (let* ((*current-session* session)
                      (*mcp-session-id* session-id)
@@ -721,6 +748,12 @@ writes go through the ev_async bridge."
                                    :data (format-sse-event response-json "message")))
                 (enqueue-to-bridge bridge
                   (make-completion :type :sse-close :writer writer)))))
+            ;; At capacity — reject over the already-open SSE stream.
+            (let ((err (encode-json (make-json-rpc-error
+                                      id -32603
+                                      "Server busy: too many concurrent tool calls"))))
+              (write-sse writer (format-sse-event err "message"))
+              (close-sse writer)))
           ;; Unknown method — respond inline (no handler to run)
           (progn
             (emit-access-log method id session-id 0 "not_found"
@@ -852,12 +885,12 @@ Returns a delayed response (lambda (responder) ...) for all routes."
 (defun start-sse-server (handlers &key (port 8080) (path "/mcp")
                                        (session-factory #'mcp-lisp/src/server/state:make-session)
                                        (event-loops nil)
-                                       (tool-workers nil))
+                                       (max-tool-calls 512))
   "Start MCP Streamable HTTP server on PORT.
 EVENT-LOOPS: number of Woo event loop threads (nil = auto-detect CPU cores).
-TOOL-WORKERS: number of worker threads for tools/call (nil = same as event loops).
-Most requests run inline on event loops; tools/call runs on the worker
-pool so it can block for sampling/elicitation without deadlocking.
+MAX-TOOL-CALLS: cap on concurrent tools/call threads (default 512).
+Most requests run inline on event loops; each tools/call runs on its own
+thread so it can block for sampling/elicitation without starving other calls.
 Blocks until the server is listening or signals an error on failure."
   (when *sse-server* (stop-sse-server))
   (let ((num-loops (or event-loops (cpu-count))))
@@ -869,9 +902,10 @@ Blocks until the server is listening or signals an error on failure."
           *sse-clients* (make-hash-table :test #'equal)
           *pending-responses* (make-hash-table :test #'equal))
     (clrhash *bridges*)
-    ;; Start worker pool for streaming handlers (tools/call)
-    (setf *tool-pool* (make-worker-pool (or tool-workers num-loops)
-                                         :name "mcp-tool-worker"))
+    ;; Reset elastic tools/call thread state
+    (setf *max-tool-threads* max-tool-calls
+          *tool-thread-count* 0)
+    (clrhash *tool-threads*)
     ;; Start keepalive thread
     (start-keepalive)
     ;; Start Woo in a separate thread (woo:run blocks).
@@ -917,10 +951,15 @@ Blocks until the server is listening or signals an error on failure."
   "Stop the MCP Streamable HTTP server."
   ;; Stop keepalive
   (stop-keepalive)
-  ;; Stop worker pool
-  (when *tool-pool*
-    (stop-worker-pool *tool-pool* :timeout 5)
-    (setf *tool-pool* nil))
+  ;; Destroy any in-flight tools/call threads
+  (bt:with-lock-held (*tool-threads-lock*)
+    (maphash (lambda (th v)
+               (declare (ignore v))
+               (when (bt:thread-alive-p th)
+                 (ignore-errors (bt:destroy-thread th))))
+             *tool-threads*)
+    (clrhash *tool-threads*)
+    (setf *tool-thread-count* 0))
   ;; Stop Woo
   (when (and *server-thread* (bt:thread-alive-p *server-thread*))
     (bt:destroy-thread *server-thread*)
