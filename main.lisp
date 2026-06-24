@@ -109,8 +109,9 @@
                 #:notify-resource-updated)
   ;; Re-export from logging
   (:import-from #:mcp-lisp/src/server/logging
-                #:*log-level*
-                #:set-log-level)
+                #:*log-levels*
+                #:log-level-value
+                #:send-log)
   ;; Re-export from progress
   (:import-from #:mcp-lisp/src/server/progress
                 #:send-progress
@@ -134,7 +135,8 @@
                 #:tool-report-progress
                 #:tool-sample
                 #:tool-elicit-form
-                #:tool-elicit-url)
+                #:tool-elicit-url
+                #:tool-log)
   ;; Re-export from A2A
   (:import-from #:mcp-lisp/src/a2a/main
                 ;; Agent Card
@@ -394,8 +396,9 @@
    #:notify-resources-list-changed
    #:notify-resource-updated
    ;; Logging
-   #:*log-level*
-   #:set-log-level
+   #:*log-levels*
+   #:log-level-value
+   #:send-log
    ;; Progress
    #:send-progress
    #:with-progress
@@ -413,6 +416,7 @@
    #:tool-sample
    #:tool-elicit-form
    #:tool-elicit-url
+   #:tool-log
    ;; Transport utilities
    #:setup-file-logging
    ;; A2A - Agent Card

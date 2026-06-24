@@ -11,6 +11,7 @@
            #:session-client-info
            #:session-protocol-version
            #:session-client-capabilities
+           #:session-log-level
            #:session-subscriptions
            #:session-subscribe
            #:session-unsubscribe
@@ -31,6 +32,9 @@
    (client-capabilities :initform nil
                         :accessor session-client-capabilities
                         :documentation "Client capabilities from initialize.")
+   (log-level :initform "info"
+              :accessor session-log-level
+              :documentation "Minimum level for notifications/message (RFC 5424 name).")
    (subscriptions :initform (make-hash-table :test #'equal)
                   :accessor session-subscriptions
                   :documentation "Set of subscribed resource URIs."))

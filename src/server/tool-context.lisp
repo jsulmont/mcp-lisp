@@ -17,6 +17,10 @@
   (:import-from #:mcp-lisp/src/server/elicitation
                 #:elicit-form
                 #:elicit-url)
+  (:import-from #:mcp-lisp/src/server/logging
+                #:send-log)
+  (:import-from #:mcp-lisp/src/server/state
+                #:*current-session*)
   (:export #:*tool-context*
            #:*stream-notify-fn*
            #:*stream-call-fn*
@@ -29,7 +33,8 @@
            #:tool-report-progress
            #:tool-sample
            #:tool-elicit-form
-           #:tool-elicit-url))
+           #:tool-elicit-url
+           #:tool-log))
 
 (in-package #:mcp-lisp/src/server/tool-context)
 
@@ -90,3 +95,12 @@ Returns (values action content)."
   "Direct the user to URL for out-of-band interaction (elicitation/create, url mode).
 Returns the action string."
   (elicit-url (require-call-fn "tool-elicit-url") message url elicitation-id))
+
+(defun tool-log (level data &key logger)
+  "Send a log message (notifications/message) to the client, gated by the
+session's configured minimum level. LEVEL is an RFC 5424 name (\"debug\",
+\"info\", ... \"emergency\"); DATA is JSON-encodable. No-op if the message is
+below the session level or the transport can't deliver notifications."
+  (when *tool-context*
+    (send-log (tool-context-notify-fn *tool-context*) *current-session* level data
+              :logger logger)))

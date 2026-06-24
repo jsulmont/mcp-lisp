@@ -32,6 +32,7 @@
                (:file "uri-template-tests")
                (:file "schema-tests")
                (:file "dispatcher-tests")
+               (:file "logging-tests")
                (:file "a2a-tests")
                (:file "sse-tests")
                (:file "define-tool-tests")

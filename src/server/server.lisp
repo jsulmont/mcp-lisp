@@ -214,7 +214,7 @@ by the transport layer), so they work correctly with multiple concurrent session
 
     (setf (gethash "logging/setLevel" handlers)
           (lambda (params)
-            (handle-logging-set-level params)))
+            (handle-logging-set-level *current-session* params)))
 
     (setf (gethash "notifications/initialized" handlers)
           (lambda (params)
