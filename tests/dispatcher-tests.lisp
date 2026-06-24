@@ -189,3 +189,63 @@
            (first-content (aref contents 0)))
       (is (null (gethash "mimeType" first-content)))
       (is (string= "plain content" (gethash "text" first-content))))))
+
+(test tool-context-progress-and-sampling
+  "Tool handlers report progress and sample via the bound tool-context"
+  (let ((registry (make-hash-table :test #'equal))
+        (notifs nil))
+    (mcp-lisp/src/primitives/tools/registry:register-tool
+     "ctx_tool" "probe"
+     (mcp-lisp:make-ht)
+     (lambda (s sess args)
+       (declare (ignore s sess args))
+       (mcp-lisp:tool-report-progress 50 :total 100 :message "halfway")
+       (let ((c (mcp-lisp:tool-sample
+                 (list (mcp-lisp:make-sampling-message "user" "hi")) :max-tokens 10)))
+         (mcp-lisp/src/content:content-vector
+          (format nil "stream=~a sample=~a"
+                  (mcp-lisp:tool-streaming-available-p)
+                  (gethash "x" c)))))
+     :registry registry)
+    (let ((mcp-lisp/src/server/tool-context:*stream-notify-fn*
+            (lambda (m p) (push (cons m p) notifs)))
+          (mcp-lisp/src/server/tool-context:*stream-call-fn*
+            (lambda (m p &key timeout)
+              (declare (ignore m p timeout))
+              (mcp-lisp:make-ht "x" "ok")))
+          (session (mcp-lisp/src/server/state:make-session)))
+      (let* ((params (mcp-lisp:make-ht
+                      "name" "ctx_tool"
+                      "arguments" (make-hash-table :test #'equal)
+                      "_meta" (mcp-lisp:make-ht "progressToken" "tok-1")))
+             (result (mcp-lisp/src/server/dispatcher:handle-tools-call-result
+                      params nil session registry))
+             (text (gethash "text" (aref (gethash "content" result) 0)))
+             (notif (cdr (first notifs))))
+        (is (string= "stream=T sample=ok" text))
+        (is (= 1 (length notifs)))
+        (is (string= "notifications/progress" (car (first notifs))))
+        (is (string= "tok-1" (gethash "progressToken" notif)))
+        (is (= 50 (gethash "progress" notif)))
+        (is (= 100 (gethash "total" notif)))))))
+
+(test tool-context-degrades-without-channel
+  "Progress no-ops and sampling signals when no server->client channel is bound"
+  (let ((registry (make-hash-table :test #'equal))
+        (streaming-seen :unset))
+    (mcp-lisp/src/primitives/tools/registry:register-tool
+     "ctx_degraded" "probe"
+     (mcp-lisp:make-ht)
+     (lambda (s sess args)
+       (declare (ignore s sess args))
+       (mcp-lisp:tool-report-progress 10)          ; must no-op, not error
+       (setf streaming-seen (mcp-lisp:tool-streaming-available-p))
+       (mcp-lisp:tool-sample (list (mcp-lisp:make-sampling-message "user" "hi"))))
+     :registry registry)
+    (let ((session (mcp-lisp/src/server/state:make-session)))
+      (signals error
+        (mcp-lisp/src/server/dispatcher:handle-tools-call-result
+         (mcp-lisp:make-ht "name" "ctx_degraded"
+                           "arguments" (make-hash-table :test #'equal))
+         nil session registry)))
+    (is (null streaming-seen))))
