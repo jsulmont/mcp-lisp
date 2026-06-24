@@ -28,8 +28,9 @@
   (arguments nil :type list)
   (handler nil :type (or null function)))
 
-(defvar *global-prompt-registry* (make-hash-table :test #'equal)
-  "Global registry of prompts, keyed by prompt name.")
+(defvar *global-prompt-registry* (make-hash-table :test #'equal :synchronized t)
+  "Global registry of prompts, keyed by prompt name. Synchronized for safe
+concurrent reads alongside runtime registration.")
 
 (defun register-prompt (name description arguments handler &optional (registry *global-prompt-registry*))
   "Register a prompt in the registry.

@@ -59,12 +59,14 @@
 Contains progressToken and other request metadata.")
 
 (defun normalize-tool-name (name)
-  "Normalize a tool name (handle namespacing, case)."
+  "Normalize a tool name for fallback lookup: strip any namespace prefix, lowercase,
+and canonicalize separators to snake_case to match registry keys (which define-tool
+stores as snake_case)."
   (let* ((s (string-downcase name))
          (dot (position #\. s :from-end t))
          (slash (position #\/ s :from-end t))
          (idx (max (or dot -1) (or slash -1))))
-    (substitute #\- #\_ (subseq s (1+ idx)))))
+    (substitute #\_ #\- (subseq s (1+ idx)))))
 
 (defun handle-tools-list-result (registry)
   "Return tools/list result payload."

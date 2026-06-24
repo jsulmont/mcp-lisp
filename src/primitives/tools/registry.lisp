@@ -34,8 +34,9 @@
   (handler nil :type (or null function))
   (annotations nil :type (or null hash-table)))
 
-(defvar *global-tool-registry* (make-hash-table :test #'equal)
-  "Global registry of tools, keyed by tool name.")
+(defvar *global-tool-registry* (make-hash-table :test #'equal :synchronized t)
+  "Global registry of tools, keyed by tool name. Synchronized: tool calls run on
+many threads and registration may happen at runtime (tools/list_changed).")
 
 (defun register-tool (name description input-schema handler &key title output-schema annotations (registry *global-tool-registry*))
   "Register a tool in the registry."

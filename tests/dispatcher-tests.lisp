@@ -82,25 +82,24 @@
       (is (hash-table-p result))
       (is (vectorp (gethash "content" result))))))
 
-(test handle-tools-call-underscore-normalization
-  "handle-tools-call-result normalizes underscore to hyphen"
+(test handle-tools-call-name-normalization
+  "handle-tools-call-result resolves hyphen/namespaced variants to the snake_case key"
   (let ((registry (make-hash-table :test #'equal))
         (session (mcp-lisp/src/server/state:make-session)))
-    ;; Register with hyphen (Lisp convention)
+    ;; define-tool registers snake_case keys; mirror that here
     (mcp-lisp/src/primitives/tools/registry:register-tool
-     "my-tool" "Tool with hyphen"
+     "my_tool" "Tool"
      (mcp-lisp:make-ht)
      (lambda (server session args)
        (declare (ignore server session args))
        (mcp-lisp:content-vector "ok"))
      :registry registry)
-    ;; Call with underscore (JSON convention) - should normalize and find
-    (let* ((params (mcp-lisp:make-ht "name" "my_tool"
-                                     "arguments" (mcp-lisp:make-ht)))
-           (result (mcp-lisp/src/server/dispatcher:handle-tools-call-result
-                    params nil session registry)))
-      (is (hash-table-p result))
-      (is (vectorp (gethash "content" result))))))
+    ;; Hyphenated and namespaced variants all normalize to the snake_case key
+    (dolist (name '("my-tool" "srv.my_tool" "srv/my-tool"))
+      (let* ((params (mcp-lisp:make-ht "name" name "arguments" (mcp-lisp:make-ht)))
+             (result (mcp-lisp/src/server/dispatcher:handle-tools-call-result
+                      params nil session registry)))
+        (is (vectorp (gethash "content" result)))))))
 
 (test handle-prompts-get-missing-name
   "handle-prompts-get-result signals error for missing name"

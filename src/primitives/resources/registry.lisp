@@ -31,7 +31,6 @@
            #:unregister-resource
            #:unregister-resource-template
            #:get-resource
-           #:get-resource-handler
            #:find-matching-template
            #:get-all-resources
            #:get-all-resource-templates
@@ -68,9 +67,11 @@
 ;;; Registry structure
 
 (defstruct resource-registry
-  "Registry containing both static resources and templates."
-  (resources (make-hash-table :test #'equal) :type hash-table)
-  (templates (make-hash-table :test #'equal) :type hash-table))
+  "Registry containing both static resources and templates.
+Hash-tables are synchronized for safe concurrent reads (resources/read runs on
+many threads) alongside runtime registration."
+  (resources (make-hash-table :test #'equal :synchronized t) :type hash-table)
+  (templates (make-hash-table :test #'equal :synchronized t) :type hash-table))
 
 (defvar *global-resource-registry* (make-resource-registry)
   "Global registry of resources.")
@@ -233,16 +234,6 @@ Returns (values template-entry matched-params) or NIL."
            (setf best entry best-params params))))
      (resource-registry-templates registry))
     (when best (values best best-params))))
-
-(defun get-resource-handler (uri &optional (registry *global-resource-registry*))
-  "Get the handler for a resource URI (static or template match).
-Returns (values handler params) where params is an alist for templates."
-  (let ((static (get-resource uri registry)))
-    (if static
-        (values (resource-entry-handler static) nil)
-        (multiple-value-bind (template params) (find-matching-template uri registry)
-          (when template
-            (values (resource-template-entry-handler template) params))))))
 
 ;;; Listing functions
 

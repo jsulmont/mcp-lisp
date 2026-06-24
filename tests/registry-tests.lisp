@@ -79,32 +79,6 @@
     (let ((templates (mcp-lisp/src/primitives/resources/registry:get-all-resource-templates registry)))
       (is (= 1 (length templates))))))
 
-(test resource-registry-handler-static
-  "get-resource-handler finds static resource handler"
-  (let ((registry (mcp-lisp/src/primitives/resources/registry:make-resource-registry)))
-    (mcp-lisp/src/primitives/resources/registry:register-resource
-     "test://static" "Static" "Static resource"
-     (lambda (s sess) (declare (ignore s sess)) "static-result")
-     :registry registry)
-    (multiple-value-bind (handler params)
-        (mcp-lisp/src/primitives/resources/registry:get-resource-handler
-         "test://static" registry)
-      (is (functionp handler))
-      (is (null params)))))
-
-(test resource-registry-handler-template
-  "get-resource-handler matches template and extracts params"
-  (let ((registry (mcp-lisp/src/primitives/resources/registry:make-resource-registry)))
-    (mcp-lisp/src/primitives/resources/registry:register-resource-template
-     "db://{table}/{id}" "Database" "DB records"
-     (lambda (s sess params) (declare (ignore s sess)) params)
-     :registry registry)
-    (multiple-value-bind (handler params)
-        (mcp-lisp/src/primitives/resources/registry:get-resource-handler
-         "db://users/123" registry)
-      (is (functionp handler))
-      (is (equal '(("table" . "users") ("id" . "123")) params)))))
-
 (test find-matching-template-prefers-more-specific
   "When two templates match, the more specific (more literal) one wins"
   (let ((registry (mcp-lisp/src/primitives/resources/registry:make-resource-registry)))

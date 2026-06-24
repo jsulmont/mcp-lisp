@@ -54,3 +54,12 @@
     (is (= 2 (length cv)))
     (is (string= "one" (gethash "text" (aref cv 0))))
     (is (string= "two" (gethash "text" (aref cv 1))))))
+
+(test make-content-camelcases-keys
+  "make-content camelCases keyword keys to MCP field names"
+  (let ((content (mcp-lisp/src/content:make-content
+                  :image :data "x" :mime-type "image/png")))
+    (is (string= "image" (gethash "type" content)))
+    (is (string= "x" (gethash "data" content)))
+    (is (string= "image/png" (gethash "mimeType" content)))
+    (is (null (gethash "mime-type" content)))))
