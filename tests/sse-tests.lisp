@@ -389,6 +389,8 @@
     (let ((subscribe-handler (gethash "resources/subscribe" handlers))
           (session-a (mcp-lisp/src/server/state:make-session))
           (session-b (mcp-lisp/src/server/state:make-session)))
+      ;; Handlers are gated on initialization, so complete the lifecycle first.
+      (setf (mcp-lisp/src/server/state:session-initialized-p session-a) t)
       ;; Subscribe session A to a resource
       (let ((mcp-lisp/src/server/state:*current-session* session-a))
         (funcall subscribe-handler

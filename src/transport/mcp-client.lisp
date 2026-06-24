@@ -53,6 +53,9 @@
    (output :initform nil
            :accessor transport-output
            :documentation "Output stream (write requests to server).")
+   (output-lock :initform (bt:make-lock "stdio-output")
+                :accessor transport-output-lock
+                :documentation "Serializes writes to OUTPUT across concurrent callers.")
    (next-id :initform 0
             :accessor transport-next-id)
    (pending :initform (make-hash-table :test #'eql)
@@ -88,6 +91,20 @@
               (pending-request-value req) result)
         (bt:condition-notify (pending-request-cv req))))))
 
+(defun resolve-all-pending (transport message)
+  "Fail every in-flight request with MESSAGE — used when the connection drops.
+Without this, waiters block until their per-call timeout instead of failing fast."
+  (let ((reqs nil))
+    (bt:with-lock-held ((transport-pending-lock transport))
+      (maphash (lambda (id req) (declare (ignore id)) (push req reqs))
+               (transport-pending transport))
+      (clrhash (transport-pending transport)))
+    (dolist (req reqs)
+      (bt:with-lock-held ((pending-request-lock req))
+        (setf (pending-request-status req) :error
+              (pending-request-value req) (make-ht "code" -32000 "message" message))
+        (bt:condition-notify (pending-request-cv req))))))
+
 (defun reader-loop (transport)
   "Read responses from server and dispatch to pending requests or notification handler."
   (loop while (transport-running-p transport)
@@ -95,6 +112,7 @@
                (let ((response (read-json-line (transport-input transport))))
                  (unless response
                    (setf (transport-running-p transport) nil)
+                   (resolve-all-pending transport "Connection closed by server (EOF)")
                    (return))
                  (let ((id (gethash "id" response))
                        (method (gethash "method" response))
@@ -113,8 +131,9 @@
                            (error (e)
                              (log:warn "Notification handler error (~a): ~a" method e)))))))
              (error (e)
-               (log:debug "Reader loop error: ~a" e)
+               (log:warn "Reader loop terminated: ~a" e)
                (setf (transport-running-p transport) nil)
+               (resolve-all-pending transport (format nil "Connection lost: ~a" e))
                (return)))))
 
 ;;; --- Protocol implementation ---
@@ -151,8 +170,7 @@
     (handler-case (uiop:wait-process (transport-process transport))
       (error (e) (log:debug "Process wait error: ~a" e)))
     (setf (transport-process transport) nil))
-  (bt:with-lock-held ((transport-pending-lock transport))
-    (clrhash (transport-pending transport)))
+  (resolve-all-pending transport "Transport stopped")
   transport)
 
 (defmethod transport-call ((transport stdio-transport) method params &key (timeout 30))
@@ -164,13 +182,15 @@
          (req (make-pending-request))
          (request (make-ht "jsonrpc" "2.0"
                            "id" id
-                           "method" method
-                           "params" params)))
+                           "method" method)))
+    (when params
+      (setf (gethash "params" request) params))
     ;; Register pending request
     (bt:with-lock-held ((transport-pending-lock transport))
       (setf (gethash id (transport-pending transport)) req))
-    ;; Send request
-    (write-json-line request (transport-output transport))
+    ;; Send request (lock serializes interleaving with other callers)
+    (bt:with-lock-held ((transport-output-lock transport))
+      (write-json-line request (transport-output transport)))
     ;; Wait for response via condition variable
     (bt:with-lock-held ((pending-request-lock req))
       (let ((deadline (+ (get-internal-real-time)
@@ -201,5 +221,6 @@
                                "method" method)))
     (when params
       (setf (gethash "params" notification) params))
-    (write-json-line notification (transport-output transport)))
+    (bt:with-lock-held ((transport-output-lock transport))
+      (write-json-line notification (transport-output transport))))
   nil)

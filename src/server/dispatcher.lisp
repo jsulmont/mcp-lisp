@@ -116,6 +116,10 @@ Contains progressToken and other request metadata.")
                           "isError" t)
                  (error 'internal-error
                         :message (format-tool-error e)))))
+         ;; Protocol errors (bad params, etc.) are JSON-RPC errors, not tool
+         ;; results — re-signal so the transport reports the proper code.
+         (protocol-error (e)
+           (error e))
          (error (e)
            (let ((version (session-protocol-version session)))
              (if (protocol-version>= version "2025-11-25")
@@ -145,6 +149,8 @@ Contains progressToken and other request metadata.")
        (handler-case
            (let ((messages (funcall handler server session (or args (make-hash-table)))))
              (make-ht "messages" (coerce messages 'vector)))
+         (protocol-error (e)
+           (error e))
          (error (e)
            (error 'internal-error
                   :message (format nil "Prompt error: ~a" e))))))))
@@ -185,6 +191,8 @@ Contains progressToken and other request metadata.")
                uri
                (funcall (resource-entry-handler static-entry) server session)
                (resource-entry-mime-type static-entry))
+            (protocol-error (e)
+              (error e))
             (error (e)
               (error 'internal-error
                      :message (format nil "Resource error: ~a" e))))

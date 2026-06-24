@@ -111,6 +111,27 @@
            "completions" (make-ht)
            "logging" (make-ht)))
 
+(defparameter *pre-init-allowed*
+  '("initialize" "ping" "notifications/initialized")
+  "Methods the server accepts before the initialize handshake completes.")
+
+(defun gate-handlers (handlers)
+  "Wrap every non-lifecycle handler to reject requests received before the
+session is initialized, per the MCP lifecycle. Modifying existing keys during
+maphash is permitted by the standard."
+  (maphash
+   (lambda (method handler)
+     (unless (member method *pre-init-allowed* :test #'string=)
+       (setf (gethash method handlers)
+             (lambda (params)
+               (unless (and *current-session*
+                            (session-initialized-p *current-session*))
+                 (error 'protocol-error
+                        :code -32600
+                        :message (format nil "Received ~a before initialization" method)))
+               (funcall handler params)))))
+   handlers))
+
 (defun setup-handlers (server handlers)
   "Set up MCP handlers hash-table for the server.
 Handlers read the active session from *current-session* (bound per-request
@@ -199,7 +220,9 @@ by the transport layer), so they work correctly with multiple concurrent session
           (lambda (params)
             (declare (ignore params))
             (handle-initialized *current-session*)
-            nil))))
+            nil))
+
+    (gate-handlers handlers)))
 
 (defmethod server-start ((server mcp-server) &key (transport :stdio) (port 8080)
                                                    (event-loops nil) (tool-workers nil))

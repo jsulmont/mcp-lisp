@@ -157,10 +157,8 @@ HANDLER is a function (method params) -> result."
     result))
 
 (defmethod client-shutdown ((client mcp-client))
-  "Gracefully shutdown."
-  (when (client-initialized-p client)
-    (handler-case (client-notify client "notifications/cancelled")
-      (error (e) (log:debug "Shutdown notify error: ~a" e))))
+  "Gracefully shutdown by closing the transport.
+MCP has no shutdown notification — clean shutdown is closing the connection."
   (client-disconnect client))
 
 (defmacro with-client ((var command &rest args) &body body)

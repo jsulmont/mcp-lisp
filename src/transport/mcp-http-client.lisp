@@ -4,6 +4,7 @@
 
 (defpackage #:mcp-lisp/src/transport/mcp-http-client
   (:use #:cl)
+  (:import-from #:bordeaux-threads)
   (:import-from #:mcp-lisp/src/json
                 #:encode-json
                 #:decode-json
@@ -45,6 +46,9 @@
                      :documentation "Negotiated protocol version for MCP-Protocol-Version header.")
    (next-id :initform 0
             :accessor http-transport-next-id)
+   (next-id-lock :initform (bt:make-lock "http-next-id")
+                 :accessor http-transport-next-id-lock
+                 :documentation "Serializes request-id allocation across concurrent callers.")
    (running :initform nil
             :accessor transport-running-p)
    (notification-handler :initform nil
@@ -176,7 +180,8 @@ Used for sampling/createMessage, elicitation/create, etc."))
   "Make a JSON-RPC call over HTTP."
   (unless (transport-running-p transport)
     (error 'mcp-error :message "Transport not running"))
-  (let* ((id (incf (http-transport-next-id transport)))
+  (let* ((id (bt:with-lock-held ((http-transport-next-id-lock transport))
+               (incf (http-transport-next-id transport))))
          (request (make-ht "jsonrpc" "2.0" "id" id "method" method))
          (is-init (string= method "initialize")))
     (when params
