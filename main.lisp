@@ -127,6 +127,14 @@
   (:import-from #:mcp-lisp/src/server/elicitation
                 #:elicit-form
                 #:elicit-url)
+  ;; Re-export from tool-context (handler-facing progress/sampling/elicitation)
+  (:import-from #:mcp-lisp/src/server/tool-context
+                #:*tool-context*
+                #:tool-streaming-available-p
+                #:tool-report-progress
+                #:tool-sample
+                #:tool-elicit-form
+                #:tool-elicit-url)
   ;; Re-export from A2A
   (:import-from #:mcp-lisp/src/a2a/main
                 ;; Agent Card
@@ -398,6 +406,13 @@
    ;; Elicitation
    #:elicit-form
    #:elicit-url
+   ;; Tool execution context (handler-facing helpers)
+   #:*tool-context*
+   #:tool-streaming-available-p
+   #:tool-report-progress
+   #:tool-sample
+   #:tool-elicit-form
+   #:tool-elicit-url
    ;; Transport utilities
    #:setup-file-logging
    ;; A2A - Agent Card

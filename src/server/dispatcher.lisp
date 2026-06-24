@@ -21,6 +21,11 @@
                 #:tool-error-retryable-p)
   (:import-from #:mcp-lisp/src/server/state
                 #:session-protocol-version)
+  (:import-from #:mcp-lisp/src/server/tool-context
+                #:*tool-context*
+                #:make-tool-context
+                #:*stream-notify-fn*
+                #:*stream-call-fn*)
   (:import-from #:mcp-lisp/src/primitives/tools/registry
                 #:get-tool
                 #:get-tool-handler
@@ -94,6 +99,12 @@ Contains progressToken and other request metadata.")
       (t
        (handler-case
            (let* ((*request-meta* (and params (gethash "_meta" params)))
+                  (*tool-context*
+                    (make-tool-context
+                     :notify-fn *stream-notify-fn*
+                     :call-fn *stream-call-fn*
+                     :progress-token (and *request-meta*
+                                          (gethash "progressToken" *request-meta*))))
                   (content (funcall handler server session (or args (make-hash-table))))
                   (result (make-ht "content" content)))
              ;; If tool has outputSchema, check for structured content.

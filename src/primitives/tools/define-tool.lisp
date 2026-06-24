@@ -120,7 +120,10 @@ The handler body has access to:
   - Each argument name as a lexical variable
   - SERVER - the current server instance
   - SESSION - the current session
-  - ARGS-HT - the raw arguments hash-table
+  - The tool-context helpers (mcp-lisp package): TOOL-REPORT-PROGRESS,
+    TOOL-SAMPLE, TOOL-ELICIT-FORM, TOOL-ELICIT-URL, TOOL-STREAMING-AVAILABLE-P.
+    Progress no-ops and sampling/elicitation signal unless the request arrived
+    over a transport that supports server->client messaging (streaming HTTP).
 
 The body should return either:
   - A string (wrapped in text content automatically)

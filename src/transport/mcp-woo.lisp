@@ -25,11 +25,12 @@
                 #:make-worker-pool
                 #:submit-to-pool
                 #:stop-worker-pool)
+  (:import-from #:mcp-lisp/src/server/tool-context
+                #:*stream-notify-fn*
+                #:*stream-call-fn*)
   (:export #:start-sse-server
            #:stop-sse-server
            #:*sse-server*
-           #:*stream-notify-fn*
-           #:*stream-call-fn*
            #:*access-log-stream*
            #:generate-session-id
            #:send-to-session
@@ -56,9 +57,9 @@
 (defvar *next-session-id* 0)
 (defvar *mcp-path* "/mcp")
 
-;;; Mid-execution messaging
-(defvar *stream-notify-fn* nil)
-(defvar *stream-call-fn* nil)
+;;; Mid-execution messaging: *stream-notify-fn* / *stream-call-fn* now live in
+;;; mcp-lisp/src/server/tool-context (imported above); the transport binds them
+;;; per-request below.
 
 ;;; Pending responses for server→client requests
 (defvar *pending-responses* (make-hash-table :test #'equal))
