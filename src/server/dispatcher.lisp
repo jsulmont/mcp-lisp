@@ -209,6 +209,8 @@ Contains progressToken and other request metadata.")
                  (funcall (resource-template-entry-handler template-entry)
                           server session template-params)
                  (resource-template-entry-mime-type template-entry))
+              (protocol-error (e)
+                (error e))
               (error (e)
                 (error 'internal-error
                        :message (format nil "Resource error: ~a" e)))))))))

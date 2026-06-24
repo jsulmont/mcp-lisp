@@ -15,6 +15,8 @@
                 #:type-to-json-type
                 #:make-property-schema
                 #:make-input-schema)
+  (:import-from #:mcp-lisp/src/conditions
+                #:invalid-params-error)
   (:export #:define-tool
            #:server
            #:session))
@@ -74,7 +76,8 @@ Properly distinguishes between missing keys and explicit null values."
               (if presentp
                   val  ; Return value even if null
                   ,(if required
-                       `(error "Missing required argument: ~a" ,json-name)
+                       `(error 'invalid-params-error
+                               :message (format nil "Missing required argument: ~a" ,json-name))
                        default))))))
 
 (defun collect-required-args (parsed-specs)
@@ -169,8 +172,10 @@ Example:
                            parsed-specs))
              (let ((result (progn ,@actual-body)))
                (etypecase result
+                 (null #())
                  (string (content-vector result))
                  (hash-table (content-vector result))
+                 (list (apply #'content-vector result))
                  (vector result)))))
 
          (let ((properties (make-hash-table :test #'equal)))
