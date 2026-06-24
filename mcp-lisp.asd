@@ -15,6 +15,7 @@
                "com.inuoe.jzon"
                "cl-ppcre"
                "quri"
+               "sb-concurrency"
                "mcp-lisp/main")
   :in-order-to ((test-op (test-op "mcp-lisp/tests"))))
 

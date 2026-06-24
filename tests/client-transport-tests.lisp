@@ -109,3 +109,83 @@
         ;; The actual response is still returned
         (is (hash-table-p result))
         (is (= 1 (gethash "id" result)))))))
+
+;;; --- Bidirectional stdio server loop ---
+
+(def-suite stdio-server-tests
+  :description "Tests for the bidirectional stdio server loop"
+  :in mcp-lisp-tests)
+
+(in-suite stdio-server-tests)
+
+(defun %stdio-pending-count (chan)
+  (hash-table-count (mcp-lisp/src/transport/mcp-stdio::stdio-channel-pending chan)))
+
+(test stdio-channel-call-roundtrip
+  "channel-call writes a request, blocks, and returns when its response is routed"
+  (let* ((chan (mcp-lisp/src/transport/mcp-stdio::make-stdio-channel
+                :output (make-string-output-stream)))
+         (result nil) (err nil)
+         (th (bt:make-thread
+              (lambda ()
+                (handler-case
+                    (setf result (mcp-lisp/src/transport/mcp-stdio::channel-call
+                                  chan "sampling/createMessage"
+                                  (mcp-lisp:make-ht "maxTokens" 10) 5))
+                  (error (e) (setf err e)))))))
+    ;; wait until the call has registered its pending waiter
+    (loop repeat 200 until (plusp (%stdio-pending-count chan)) do (sleep 0.01))
+    (mcp-lisp/src/transport/mcp-stdio::channel-resolve
+     chan (mcp-lisp:make-ht "jsonrpc" "2.0" "id" 1
+                            "result" (mcp-lisp:make-ht "model" "claude")))
+    (bt:join-thread th)
+    (is (null err))
+    (is (string= "claude" (gethash "model" result)))))
+
+(test stdio-channel-resolve-all-unblocks
+  "channel-resolve-all fails in-flight server->client calls when stdin closes"
+  (let* ((chan (mcp-lisp/src/transport/mcp-stdio::make-stdio-channel
+                :output (make-string-output-stream)))
+         (err nil)
+         (th (bt:make-thread
+              (lambda ()
+                (handler-case
+                    (mcp-lisp/src/transport/mcp-stdio::channel-call
+                     chan "elicitation/create" (mcp-lisp:make-ht) 5)
+                  (error (e) (setf err e)))))))
+    (loop repeat 200 until (plusp (%stdio-pending-count chan)) do (sleep 0.01))
+    (mcp-lisp/src/transport/mcp-stdio::channel-resolve-all chan "stdin closed")
+    (bt:join-thread th)
+    (is (not (null err)))))
+
+(test stdio-server-loop-basic-request
+  "mcp-server-loop processes a request and writes a JSON-RPC response"
+  (let ((handlers (make-hash-table :test #'equal))
+        (in (make-string-input-stream
+             (format nil "~a~%"
+                     (mcp-lisp:encode-json
+                      (mcp-lisp:make-ht "jsonrpc" "2.0" "id" 7 "method" "ping")))))
+        (out (make-string-output-stream)))
+    (setf (gethash "ping" handlers)
+          (lambda (p) (declare (ignore p)) (mcp-lisp:make-ht "ok" t)))
+    (mcp-lisp/src/transport/mcp-stdio:mcp-server-loop handlers :input in :output out)
+    (let ((resp (mcp-lisp:decode-json
+                 (string-trim '(#\Newline #\Return) (get-output-stream-string out)))))
+      (is (= 7 (gethash "id" resp)))
+      (is (eq t (gethash "ok" (gethash "result" resp)))))))
+
+(test stdio-server-loop-notification-no-response
+  "mcp-server-loop runs a notification handler and writes no response"
+  (let ((handlers (make-hash-table :test #'equal))
+        (seen nil)
+        (in (make-string-input-stream
+             (format nil "~a~%"
+                     (mcp-lisp:encode-json
+                      (mcp-lisp:make-ht "jsonrpc" "2.0"
+                                        "method" "notifications/initialized")))))
+        (out (make-string-output-stream)))
+    (setf (gethash "notifications/initialized" handlers)
+          (lambda (p) (declare (ignore p)) (setf seen t)))
+    (mcp-lisp/src/transport/mcp-stdio:mcp-server-loop handlers :input in :output out)
+    (is (eq t seen))
+    (is (string= "" (get-output-stream-string out)))))
