@@ -13,6 +13,8 @@
                "woo"
                "dexador"
                "com.inuoe.jzon"
+               "cl-ppcre"
+               "quri"
                "mcp-lisp/main")
   :in-order-to ((test-op (test-op "mcp-lisp/tests"))))
 

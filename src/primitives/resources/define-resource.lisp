@@ -58,10 +58,13 @@ MIME-TYPE is the optional MIME type string.
 BODY should return the resource content.
 
 The handler receives (server session params) where params is an alist
-of (param-name . value) extracted from the URI.
+of (param-name . value) extracted from the URI. Values are percent-decoded.
+
+URI templates follow an RFC 6570 subset: {var} matches one path segment
+(no '/'); {+var} matches across segments. Use {+var} for path-like captures.
 
 Example:
-  (define-resource-template \"file:///{path}\"
+  (define-resource-template \"file:///{+path}\"
     (:name \"Local Files\" :mime-type \"text/plain\")
     (let ((path (cdr (assoc \"path\" params :test #'string=))))
       (uiop:read-file-string (concatenate 'string \"/\" path))))"

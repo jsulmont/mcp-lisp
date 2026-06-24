@@ -105,6 +105,23 @@
       (is (functionp handler))
       (is (equal '(("table" . "users") ("id" . "123")) params)))))
 
+(test find-matching-template-prefers-more-specific
+  "When two templates match, the more specific (more literal) one wins"
+  (let ((registry (mcp-lisp/src/primitives/resources/registry:make-resource-registry)))
+    (mcp-lisp/src/primitives/resources/registry:register-resource-template
+     "db://{a}/{b}" "General" "" (lambda (s sess p) (declare (ignore s sess p)) :general)
+     :registry registry)
+    (mcp-lisp/src/primitives/resources/registry:register-resource-template
+     "db://users/{b}" "Specific" "" (lambda (s sess p) (declare (ignore s sess p)) :specific)
+     :registry registry)
+    (multiple-value-bind (entry params)
+        (mcp-lisp/src/primitives/resources/registry:find-matching-template
+         "db://users/42" registry)
+      (is (string= "db://users/{b}"
+                   (mcp-lisp/src/primitives/resources/registry:resource-template-entry-uri-template
+                    entry)))
+      (is (equal '(("b" . "42")) params)))))
+
 ;;; Prompt Registry Tests
 
 (test prompt-registry-register

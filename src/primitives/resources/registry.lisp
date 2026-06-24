@@ -4,6 +4,12 @@
 
 (defpackage #:mcp-lisp/src/primitives/resources/registry
   (:use #:cl)
+  (:import-from #:cl-ppcre
+                #:create-scanner
+                #:scan-to-strings
+                #:quote-meta-chars)
+  (:import-from #:quri
+                #:url-decode)
   (:export #:make-resource-registry
            #:resource-entry
            #:resource-entry-uri
@@ -53,7 +59,11 @@
   (name "" :type string)
   (description "" :type string)
   (mime-type nil :type (or null string))
-  (handler nil :type (or null function)))
+  (handler nil :type (or null function))
+  ;; Compiled form, filled in by register-resource-template:
+  (scanner nil)                       ; cl-ppcre scanner
+  (var-names nil :type list)          ; ordered variable names
+  (specificity nil :type list))       ; (literal-chars var-count reserved-count)
 
 ;;; Registry structure
 
@@ -78,13 +88,18 @@
   uri)
 
 (defun register-resource-template (uri-template name description handler &key mime-type (registry *global-resource-registry*))
-  "Register a resource template in the registry."
-  (setf (gethash uri-template (resource-registry-templates registry))
-        (make-resource-template-entry :uri-template uri-template
-                                      :name name
-                                      :description description
-                                      :mime-type mime-type
-                                      :handler handler))
+  "Register a resource template. Compiles the template (signalling on malformed
+input) and stores the compiled scanner for matching."
+  (multiple-value-bind (scanner vars specificity) (compile-uri-template uri-template)
+    (setf (gethash uri-template (resource-registry-templates registry))
+          (make-resource-template-entry :uri-template uri-template
+                                        :name name
+                                        :description description
+                                        :mime-type mime-type
+                                        :handler handler
+                                        :scanner scanner
+                                        :var-names vars
+                                        :specificity specificity)))
   uri-template)
 
 (defun unregister-resource (uri &optional (registry *global-resource-registry*))
@@ -101,62 +116,123 @@
   "Get a static resource entry by URI."
   (gethash uri (resource-registry-resources registry)))
 
-(defun parse-uri-template (template)
-  "Parse a URI template into literal segments and parameter names.
-Returns (values literals params) where literals has one more element than params."
-  (let ((literals nil)
-        (params nil)
-        (current-start 0)
-        (i 0)
-        (len (length template)))
-    (loop while (< i len) do
-      (if (char= (char template i) #\{)
-          (let ((end (position #\} template :start i)))
-            (if end
-                (progn
-                  (push (subseq template current-start i) literals)
-                  (push (subseq template (1+ i) end) params)
-                  (setf current-start (1+ end))
-                  (setf i (1+ end)))
-                ;; No matching } - treat { as literal and advance
-                (incf i)))
-          (incf i)))
-    (push (subseq template current-start) literals)
-    (values (nreverse literals) (nreverse params))))
+(defun parse-var-spec (inner template)
+  "Parse a placeholder body INNER into (values name reserved-p).
+Supports simple {name} and reserved {+name}; rejects other RFC 6570 operators."
+  (let ((op (char inner 0)))
+    (multiple-value-bind (name reserved)
+        (cond
+          ((char= op #\+) (values (subseq inner 1) t))
+          ((find op "#./;?&=,!@|")
+           (error "Invalid URI template ~s: unsupported operator ~c" template op))
+          (t (values inner nil)))
+      (when (zerop (length name))
+        (error "Invalid URI template ~s: empty variable name" template))
+      (unless (every (lambda (c) (or (alphanumericp c) (member c '(#\_ #\- #\.)))) name)
+        (error "Invalid URI template ~s: invalid variable name ~s" template name))
+      (values name reserved))))
+
+(defun parse-template-tokens (template)
+  "Tokenize TEMPLATE into a list of (:literal . string) and (:var name reserved-p).
+Signals an error on unbalanced braces, empty/invalid placeholders, unsupported
+operators, or adjacent placeholders (two variables with no literal between)."
+  (let ((tokens nil) (i 0) (len (length template)) (start 0))
+    (flet ((flush (end)
+             (when (> end start)
+               (push (cons :literal (subseq template start end)) tokens))))
+      (loop while (< i len) do
+        (cond
+          ((char= (char template i) #\{)
+           (let ((end (position #\} template :start i)))
+             (unless end
+               (error "Invalid URI template ~s: unbalanced '{'" template))
+             (flush i)
+             (let ((inner (subseq template (1+ i) end)))
+               (when (zerop (length inner))
+                 (error "Invalid URI template ~s: empty placeholder" template))
+               (multiple-value-bind (name reserved) (parse-var-spec inner template)
+                 (push (list :var name reserved) tokens)))
+             (setf i (1+ end) start (1+ end))))
+          ((char= (char template i) #\})
+           (error "Invalid URI template ~s: unbalanced '}'" template))
+          (t (incf i))))
+      (flush len))
+    (let ((toks (nreverse tokens)))
+      (loop for (a b) on toks
+            when (and b (eq (car a) :var) (eq (car b) :var))
+              do (error "Invalid URI template ~s: adjacent placeholders" template))
+      toks)))
+
+(defun compile-uri-template (template)
+  "Compile TEMPLATE into (values scanner var-names specificity).
+Signals an error on a malformed template. Each simple {var} matches one path
+segment ([^/]+); each reserved {+var} matches across segments (.+).
+SPECIFICITY is (literal-char-count var-count reserved-count) for ranking."
+  (let ((tokens (parse-template-tokens template))
+        (out (make-string-output-stream))
+        (vars nil) (lit-chars 0) (nvars 0) (nreserved 0))
+    (write-char #\^ out)
+    (dolist (tok tokens)
+      (if (eq (car tok) :literal)
+          (progn
+            (incf lit-chars (length (cdr tok)))
+            (write-string (quote-meta-chars (cdr tok)) out))
+          (destructuring-bind (name reserved) (cdr tok)
+            (push name vars)
+            (incf nvars)
+            (when reserved (incf nreserved))
+            (write-string (if reserved "(.+)" "([^/]+)") out))))
+    (write-char #\$ out)
+    (values (create-scanner (get-output-stream-string out))
+            (nreverse vars)
+            (list lit-chars nvars nreserved))))
+
+(defun match-template-scanner (scanner var-names uri)
+  "Match URI with a precompiled SCANNER. Returns (values alist matched-p);
+ALIST maps each var name to its percent-decoded captured value. Matching runs
+on the raw URI (so %2F can't act as a separator); values are decoded after."
+  (multiple-value-bind (whole groups) (scan-to-strings scanner uri)
+    (if whole
+        (values (loop for name in var-names
+                      for val across groups
+                      collect (cons name (url-decode val :lenient t)))
+                t)
+        (values nil nil))))
 
 (defun match-uri-template (template uri)
-  "Match URI against a template. Returns alist of (param . value) or NIL."
-  (multiple-value-bind (literals params) (parse-uri-template template)
-    (let ((pos 0)
-          (values nil))
-      (loop for i from 0 below (length params)
-            for literal = (nth i literals)
-            for next-literal = (nth (1+ i) literals)
-            do (unless (and (>= (length uri) (+ pos (length literal)))
-                            (string= literal (subseq uri pos (+ pos (length literal)))))
-                 (return-from match-uri-template nil))
-               (incf pos (length literal))
-               (let ((end-pos (if (string= next-literal "")
-                                  (length uri)
-                                  (search next-literal uri :start2 pos))))
-                 (unless end-pos
-                   (return-from match-uri-template nil))
-                 (push (cons (nth i params) (subseq uri pos end-pos)) values)
-                 (setf pos end-pos)))
-      (let ((final-literal (car (last literals))))
-        (unless (and (= pos (- (length uri) (length final-literal)))
-                     (string= final-literal (subseq uri pos)))
-          (return-from match-uri-template nil)))
-      (nreverse values))))
+  "Compile TEMPLATE and match URI; returns an alist of (name . decoded-value),
+or NIL. Convenience for ad-hoc matching — the registry uses precompiled scanners."
+  (multiple-value-bind (scanner vars) (compile-uri-template template)
+    (values (match-template-scanner scanner vars uri))))
+
+(defun template-better-p (entry best)
+  "T if template ENTRY is more specific than BEST: more literal chars, then fewer
+variables, then fewer reserved variables, then lexicographically smaller template."
+  (destructuring-bind (la na ra) (resource-template-entry-specificity entry)
+    (destructuring-bind (lb nb rb) (resource-template-entry-specificity best)
+      (cond ((/= la lb) (> la lb))
+            ((/= na nb) (< na nb))
+            ((/= ra rb) (< ra rb))
+            (t (and (string< (resource-template-entry-uri-template entry)
+                             (resource-template-entry-uri-template best))
+                    t))))))
 
 (defun find-matching-template (uri &optional (registry *global-resource-registry*))
-  "Find a template that matches the given URI.
+  "Find the most specific template matching URI, resolving ambiguity
+deterministically (see TEMPLATE-BETTER-P).
 Returns (values template-entry matched-params) or NIL."
-  (loop for template-entry being the hash-values of (resource-registry-templates registry)
-        for template = (resource-template-entry-uri-template template-entry)
-        for params = (match-uri-template template uri)
-        when params
-          return (values template-entry params)))
+  (let ((best nil) (best-params nil))
+    (maphash
+     (lambda (key entry)
+       (declare (ignore key))
+       (multiple-value-bind (params matched)
+           (match-template-scanner (resource-template-entry-scanner entry)
+                                   (resource-template-entry-var-names entry)
+                                   uri)
+         (when (and matched (or (null best) (template-better-p entry best)))
+           (setf best entry best-params params))))
+     (resource-registry-templates registry))
+    (when best (values best best-params))))
 
 (defun get-resource-handler (uri &optional (registry *global-resource-registry*))
   "Get the handler for a resource URI (static or template match).

@@ -3,98 +3,96 @@
 (in-package #:mcp-lisp/tests)
 
 (def-suite uri-template-tests
-  :description "Tests for URI template parsing and matching"
+  :description "Tests for URI template compilation and matching"
   :in mcp-lisp-tests)
 
 (in-suite uri-template-tests)
 
-(test parse-uri-template-simple
-  "parse-uri-template handles single parameter"
-  (multiple-value-bind (literals params)
-      (mcp-lisp/src/primitives/resources/registry::parse-uri-template "file:///{path}")
-    (is (equal '("file:///" "") literals))
-    (is (equal '("path") params))))
+(defun %match (template uri)
+  (mcp-lisp/src/primitives/resources/registry::match-uri-template template uri))
 
-(test parse-uri-template-multiple
-  "parse-uri-template handles multiple parameters"
-  (multiple-value-bind (literals params)
-      (mcp-lisp/src/primitives/resources/registry::parse-uri-template "db://{table}/{id}")
-    (is (equal '("db://" "/" "") literals))
-    (is (equal '("table" "id") params))))
+;;; --- Simple {var}: matches exactly one path segment, never crosses '/' ---
 
-(test parse-uri-template-no-params
-  "parse-uri-template handles templates with no parameters"
-  (multiple-value-bind (literals params)
-      (mcp-lisp/src/primitives/resources/registry::parse-uri-template "config://static")
-    (is (equal '("config://static") literals))
-    (is (null params))))
+(test match-single-segment
+  "{var} matches a single path segment"
+  (is (equal '(("name" . "users")) (%match "api://{name}" "api://users"))))
 
-(test parse-uri-template-adjacent
-  "parse-uri-template handles adjacent parameters"
-  (multiple-value-bind (literals params)
-      (mcp-lisp/src/primitives/resources/registry::parse-uri-template "{scheme}://{host}")
-    (is (equal '("" "://" "") literals))
-    (is (equal '("scheme" "host") params))))
+(test match-single-segment-rejects-slash
+  "{var} does not cross '/' (the old greedy behavior was a bug)"
+  (is (null (%match "api://{name}" "api://users/123"))))
 
-(test match-uri-template-simple
-  "match-uri-template extracts single parameter"
-  (let ((result (mcp-lisp/src/primitives/resources/registry::match-uri-template
-                 "file:///{path}" "file:///foo/bar.txt")))
-    (is (equal '(("path" . "foo/bar.txt")) result))))
+(test match-multiple-segments
+  "multiple {var} split on '/'"
+  (is (equal '(("table" . "users") ("id" . "123"))
+             (%match "db://{table}/{id}" "db://users/123"))))
 
-(test match-uri-template-multiple
-  "match-uri-template extracts multiple parameters"
-  (let ((result (mcp-lisp/src/primitives/resources/registry::match-uri-template
-                 "db://{table}/{id}" "db://users/123")))
-    (is (equal '(("table" . "users") ("id" . "123")) result))))
+(test match-suffix
+  "{var} with a literal suffix"
+  (is (equal '(("name" . "users")) (%match "api://{name}.json" "api://users.json"))))
 
-(test match-uri-template-no-match-prefix
-  "match-uri-template returns nil for wrong prefix"
-  (let ((result (mcp-lisp/src/primitives/resources/registry::match-uri-template
-                 "file:///{path}" "http://example.com")))
-    (is (null result))))
+(test match-suffix-no-match
+  "wrong suffix does not match"
+  (is (null (%match "api://{name}.json" "api://users.xml"))))
 
-(test match-uri-template-no-match-suffix
-  "match-uri-template returns nil for wrong suffix"
-  (let ((result (mcp-lisp/src/primitives/resources/registry::match-uri-template
-                 "api://{endpoint}.json" "api://users.xml")))
-    (is (null result))))
+(test match-middle-param
+  "{var} in the middle of literals"
+  (is (equal '(("path" . "users"))
+             (%match "http://example.com/{path}/info" "http://example.com/users/info"))))
 
-(test match-uri-template-exact
-  "match-uri-template handles exact match with no params"
-  (let ((result (mcp-lisp/src/primitives/resources/registry::match-uri-template
-                 "config://server/info" "config://server/info")))
-    (is (null result))))
+(test match-no-match-prefix
+  "wrong scheme/prefix does not match"
+  (is (null (%match "file:///{+path}" "http://example.com"))))
 
-(test match-uri-template-exact-no-match
-  "match-uri-template returns nil for non-matching exact template"
-  (let ((result (mcp-lisp/src/primitives/resources/registry::match-uri-template
-                 "config://server/info" "config://server/other")))
-    (is (null result))))
+;;; --- Reserved {+var}: may span '/' ---
 
-(test match-uri-template-with-suffix
-  "match-uri-template handles templates with suffix after param"
-  (let ((result (mcp-lisp/src/primitives/resources/registry::match-uri-template
-                 "api://{name}.json" "api://users.json")))
-    (is (equal '(("name" . "users")) result))))
+(test match-reserved-crosses-slash
+  "{+var} captures across '/'"
+  (is (equal '(("path" . "foo/bar.txt"))
+             (%match "file:///{+path}" "file:///foo/bar.txt"))))
 
-(test match-uri-template-middle-param
-  "match-uri-template handles parameter in middle"
-  (let ((result (mcp-lisp/src/primitives/resources/registry::match-uri-template
-                 "http://example.com/{path}/info" "http://example.com/users/info")))
-    (is (equal '(("path" . "users")) result))))
+(test match-reserved-backtracks-to-suffix
+  "{+var} backtracks so a trailing literal still matches"
+  (is (equal '(("path" . "a/b/c"))
+             (%match "files://{+path}/meta" "files://a/b/c/meta"))))
 
-(test parse-uri-template-unmatched-brace
-  "parse-uri-template handles unmatched { without infinite loop"
-  (multiple-value-bind (literals params)
-      (mcp-lisp/src/primitives/resources/registry::parse-uri-template "file://{path")
-    ;; Unmatched { is treated as literal
-    (is (equal '("file://{path") literals))
-    (is (null params))))
+;;; --- Exact templates (no params) ---
 
-(test parse-uri-template-multiple-unmatched
-  "parse-uri-template handles multiple unmatched braces"
-  (multiple-value-bind (literals params)
-      (mcp-lisp/src/primitives/resources/registry::parse-uri-template "a{b{c")
-    (is (equal '("a{b{c") literals))
-    (is (null params))))
+(test match-exact-no-params
+  "exact template with no params matches (empty alist -> NIL)"
+  (is (null (%match "config://server/info" "config://server/info"))))
+
+(test match-exact-no-params-no-match
+  "exact template returns NIL when the URI differs"
+  (is (null (%match "config://server/info" "config://server/other"))))
+
+;;; --- Percent-decoding of captured values ---
+
+(test match-percent-decodes-value
+  "captured values are percent-decoded"
+  (is (equal '(("name" . "foo bar")) (%match "api://{name}" "api://foo%20bar"))))
+
+(test match-percent-encoded-slash-stays-in-segment
+  "%2F is matched literally by {var} and decoded afterward, not treated as '/'"
+  (is (equal '(("name" . "a/b")) (%match "api://{name}" "api://a%2Fb"))))
+
+;;; --- Registration-time validation (fail fast on malformed templates) ---
+
+(test compile-rejects-adjacent-placeholders
+  "adjacent placeholders are ambiguous and rejected"
+  (signals error
+    (mcp-lisp/src/primitives/resources/registry::compile-uri-template "x://{a}{b}")))
+
+(test compile-rejects-unbalanced-brace
+  "an unbalanced '{' is rejected"
+  (signals error
+    (mcp-lisp/src/primitives/resources/registry::compile-uri-template "file://{path")))
+
+(test compile-rejects-unsupported-operator
+  "unsupported RFC 6570 operators are rejected"
+  (signals error
+    (mcp-lisp/src/primitives/resources/registry::compile-uri-template "x://{?query}")))
+
+(test compile-rejects-empty-placeholder
+  "an empty placeholder is rejected"
+  (signals error
+    (mcp-lisp/src/primitives/resources/registry::compile-uri-template "x://{}")))
