@@ -1,7 +1,9 @@
 # Sampling / Logging / Progress demo
 
-A self-contained client + server demonstrating three MCP server→client features
-in one tool call:
+A client + server demonstrating three MCP server→client features in one tool
+call. It calls two external services — the Tavily Search API and the Anthropic
+API — so it needs network access and the two keys below (it's not self-contained
+or free to run).
 
 | Feature      | API used                | What you see                                  |
 |--------------|-------------------------|-----------------------------------------------|
