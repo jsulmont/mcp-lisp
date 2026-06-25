@@ -60,6 +60,9 @@
 ;;; Pending responses for server→client requests
 (defvar *pending-responses* (make-hash-table :test #'equal))
 (defvar *pending-responses-lock* (bt:make-lock "pending-responses"))
+(defvar *shutting-down* nil
+  "Set during stop-sse-server so new stream-calls fail fast instead of
+re-blocking after the pending-response drain sweep.")
 (defvar *next-request-id* 0)
 (defvar *request-id-lock* (bt:make-lock "request-id"))
 
@@ -129,7 +132,8 @@ Writes happen once per event loop at startup (locked); reads are lock-free after
   type       ; :sse-write | :full-response | :sse-close
   responder  ; Clack responder fn (for :full-response)
   writer     ; Clack streaming writer fn (for :sse-write / :sse-close)
-  data)      ; string — SSE frame or response body list
+  data       ; string — SSE frame or response body list
+  session-id) ; session-id of the target SSE client (for O(1) dead-client cleanup)
 
 ;;; =====================================================================
 ;;; Reused helpers: timestamps, access logging, sessions
@@ -306,6 +310,24 @@ JSON-RPC hash-tables on first access.  :synchronized t for safe init.")
           (bt:condition-notify cv)))
       t)))
 
+(defun resolve-all-pending (error-message)
+  "Resolve every pending server→client request with an error response so that
+blocked stream-call workers unwind on their own.  Mirrors the stdio
+channel-resolve-all-on-EOF pattern; used during graceful shutdown."
+  (let ((entries nil))
+    (bt:with-lock-held (*pending-responses-lock*)
+      (maphash (lambda (id entry) (declare (ignore id)) (push entry entries))
+               *pending-responses*))
+    (let ((err-response (make-ht "jsonrpc" "2.0"
+                                 "error" (make-ht "code" -32000
+                                                  "message" error-message))))
+      (dolist (entry entries)
+        (destructuring-bind (lock cv . result-cell) entry
+          (bt:with-lock-held (lock)
+            (unless (car result-cell)
+              (setf (car result-cell) err-response))
+            (bt:condition-notify cv)))))))
+
 ;;; =====================================================================
 ;;; DNS rebinding protection (adapted for Clack env)
 ;;; =====================================================================
@@ -374,6 +396,7 @@ JSON-RPC hash-tables on first access.  :synchronized t for safe init.")
         (enqueue-to-bridge bridge
          (make-completion :type :sse-write
                           :writer writer
+                          :session-id session-id
                           :data (format-sse-event data event-type)))
         t))))
 
@@ -397,17 +420,17 @@ JSON-RPC hash-tables on first access.  :synchronized t for safe init.")
            (funcall responder (completion-data c)))))
     (error (e)
       (log:debug "Completion write error: ~a" e)
-      ;; Dead client — try to remove from sse-clients
-      (when (and (completion-writer c)
-                 (member (completion-type c) '(:sse-write :sse-close)))
-        (bt:with-lock-held (*sse-clients-lock*)
-          (let ((dead-sids nil))
-            (maphash (lambda (sid entry)
-                       (when (eq (car entry) (completion-writer c))
-                         (push sid dead-sids)))
-                     *sse-clients*)
-            (dolist (sid dead-sids)
-              (remhash sid *sse-clients*))))))))
+      ;; Dead client — remove from sse-clients by key (O(1)). The session-id is
+      ;; carried on the completion; the eq guard ensures we only evict the entry
+      ;; whose writer actually died (a POST stream writer shares the session-id
+      ;; but is not the registered GET writer, so it is left untouched).
+      (let ((sid (completion-session-id c)))
+        (when (and sid (completion-writer c)
+                   (member (completion-type c) '(:sse-write :sse-close)))
+          (bt:with-lock-held (*sse-clients-lock*)
+            (let ((entry (and *sse-clients* (gethash sid *sse-clients*))))
+              (when (and entry (eq (car entry) (completion-writer c)))
+                (remhash sid *sse-clients*)))))))))
 
 (cffi:defcallback drain-results-cb :void ((evloop :pointer) (w :pointer) (revents :int))
   (declare (ignore w revents))
@@ -461,6 +484,8 @@ Returns the bridge for this event loop."
   "Send a JSON-RPC request via SSE and wait for the response.
 Writes go through the bridge (safe from any thread); the calling thread
 blocks on a CV until the response POST arrives on an event loop."
+  (when *shutting-down*
+    (error "Server shutting down"))
   (let* ((id (next-request-id))
          (lock (bt:make-lock "stream-call"))
          (cv (bt:make-condition-variable :name "stream-call-cv"))
@@ -514,14 +539,14 @@ blocks on a CV until the response POST arrives on an event loop."
                    (bt:with-lock-held (*sse-clients-lock*)
                      (when *sse-clients*
                        (maphash (lambda (sid entry)
-                                  (declare (ignore sid))
-                                  (push entry clients))
+                                  (push (cons sid entry) clients))
                                 *sse-clients*)))
-                   (dolist (entry clients)
-                     (destructuring-bind (writer . bridge) entry
+                   (dolist (sid+entry clients)
+                     (destructuring-bind (sid writer . bridge) sid+entry
                        (enqueue-to-bridge bridge
                         (make-completion :type :sse-write
                                          :writer writer
+                                         :session-id sid
                                          :data (format nil ": keepalive~%~%"))))))
                (error (e)
                  (log:debug "Keepalive error: ~a" e))))))
@@ -783,7 +808,8 @@ Registers the writer with its event loop's bridge."
         (let ((old (and *sse-clients* (gethash session-id *sse-clients*))))
           (when old
             (enqueue-to-bridge (cdr old)
-              (make-completion :type :sse-close :writer (car old)))))
+              (make-completion :type :sse-close :writer (car old)
+                               :session-id session-id))))
         (setf (gethash session-id *sse-clients*) (cons writer bridge))))))
 
 (defun handle-delete (env responder)
@@ -799,7 +825,8 @@ Registers the writer with its event loop's bridge."
         (when entry
           (destructuring-bind (writer . bridge) entry
             (enqueue-to-bridge bridge
-             (make-completion :type :sse-close :writer writer)))))
+             (make-completion :type :sse-close :writer writer
+                              :session-id session-id)))))
       (remove-session session-id)
       (log:debug "Session terminated: ~a" session-id)))
   (funcall responder (make-immediate-response 202 (list :access-control-allow-origin "*") "")))
@@ -904,7 +931,8 @@ Blocks until the server is listening or signals an error on failure."
     (clrhash *bridges*)
     ;; Reset elastic tools/call thread state
     (setf *max-tool-threads* max-tool-calls
-          *tool-thread-count* 0)
+          *tool-thread-count* 0
+          *shutting-down* nil)
     (clrhash *tool-threads*)
     ;; Start keepalive thread
     (start-keepalive)
@@ -951,7 +979,29 @@ Blocks until the server is listening or signals an error on failure."
   "Stop the MCP Streamable HTTP server."
   ;; Stop keepalive
   (stop-keepalive)
-  ;; Destroy any in-flight tools/call threads
+  ;; Graceful drain: stop accepting new server→client blocks, then unblock all
+  ;; pending ones so in-flight stream-call workers unwind and enqueue their
+  ;; :sse-close + final response.  The event loops are still running here, so
+  ;; those close frames actually flush before we tear Woo down.
+  (setf *shutting-down* t)
+  (resolve-all-pending "Server shutting down")
+  ;; Give workers a short grace period to drain (up to ~1s).
+  (loop repeat 20
+        while (plusp *tool-thread-count*)
+        do (sleep 0.05))
+  ;; Close any GET SSE streams that are still registered, cleanly.
+  (bt:with-lock-held (*sse-clients-lock*)
+    (when *sse-clients*
+      (maphash (lambda (sid entry)
+                 (destructuring-bind (writer . bridge) entry
+                   (ignore-errors
+                     (enqueue-to-bridge bridge
+                       (make-completion :type :sse-close :writer writer
+                                        :session-id sid)))))
+               *sse-clients*)))
+  ;; Brief moment for the close frames to flush on the event loops.
+  (sleep 0.05)
+  ;; Destroy any stragglers that did not drain in time.
   (bt:with-lock-held (*tool-threads-lock*)
     (maphash (lambda (th v)
                (declare (ignore v))
