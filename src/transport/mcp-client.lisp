@@ -22,6 +22,7 @@
                 #:transport-notification-handler)
   (:export #:stdio-transport
            #:make-stdio-transport
+           #:stdio-transport-request-handler
            ;; Re-export protocol GFs so downstream can import from here
            #:transport-start
            #:transport-stop
@@ -69,7 +70,12 @@
             :accessor transport-running-p)
    (notification-handler :initform nil
                          :accessor transport-notification-handler
-                         :documentation "Function (method params) called for server notifications."))
+                         :documentation "Function (method params) called for server notifications.")
+   (request-handler :initform nil
+                    :accessor stdio-transport-request-handler
+                    :documentation "Function (method params) -> result for server-initiated
+requests (sampling/createMessage, elicitation/create, ...). Each request is handled on
+its own thread so a slow handler never stalls the reader loop."))
   (:documentation "MCP client transport over stdio with a subprocess."))
 
 (defun make-stdio-transport (command)
@@ -105,8 +111,36 @@ Without this, waiters block until their per-call timeout instead of failing fast
               (pending-request-value req) (make-ht "code" -32000 "message" message))
         (bt:condition-notify (pending-request-cv req))))))
 
+(defun write-server-response (transport id result &key error-msg)
+  "Write a JSON-RPC response to a server-initiated request back to the server."
+  (let ((resp (if error-msg
+                  (make-ht "jsonrpc" "2.0" "id" id
+                           "error" (make-ht "code" -32603 "message" error-msg))
+                  (make-ht "jsonrpc" "2.0" "id" id "result" result))))
+    (handler-case
+        (bt:with-lock-held ((transport-output-lock transport))
+          (write-json-line resp (transport-output transport)))
+      (error (e) (log:warn "Failed to write response for ~a: ~a" id e)))))
+
+(defun handle-server-request (transport id method params)
+  "Run the request handler for a server-initiated request on its own thread and
+write the response back. Threading keeps a slow handler (e.g. an LLM call for
+sampling) from blocking the reader loop."
+  (let ((handler (stdio-transport-request-handler transport)))
+    (if handler
+        (bt:make-thread
+         (lambda ()
+           (handler-case
+               (write-server-response transport id (funcall handler method params))
+             (error (e)
+               (write-server-response transport id nil :error-msg (princ-to-string e)))))
+         :name "mcp-client-server-request")
+        (write-server-response transport id nil
+                               :error-msg (format nil "No handler for server request: ~a" method)))))
+
 (defun reader-loop (transport)
-  "Read responses from server and dispatch to pending requests or notification handler."
+  "Read messages from the server and dispatch: responses to pending requests,
+server-initiated requests to the request handler, notifications to the handler."
   (loop while (transport-running-p transport)
         do (handler-case
                (let ((response (read-json-line (transport-input transport))))
@@ -118,18 +152,22 @@ Without this, waiters block until their per-call timeout instead of failing fast
                        (method (gethash "method" response))
                        (params (gethash "params" response))
                        (error-obj (gethash "error" response)))
-                   (if id
-                       ;; Response to a request
-                       (if error-obj
-                           (resolve-pending transport id error-obj t)
-                           (resolve-pending transport id (gethash "result" response) nil))
-                       ;; Server-initiated notification (no id)
-                       (when (and method (transport-notification-handler transport))
-                         (handler-case
-                             (funcall (transport-notification-handler transport)
-                                      method params)
-                           (error (e)
-                             (log:warn "Notification handler error (~a): ~a" method e)))))))
+                   (cond
+                     ;; Server-initiated request — has both method and id.
+                     ((and method id)
+                      (handle-server-request transport id method params))
+                     ;; Response to one of our requests — has id, no method.
+                     (id
+                      (if error-obj
+                          (resolve-pending transport id error-obj t)
+                          (resolve-pending transport id (gethash "result" response) nil)))
+                     ;; Server-initiated notification — has method, no id.
+                     ((and method (transport-notification-handler transport))
+                      (handler-case
+                          (funcall (transport-notification-handler transport)
+                                   method params)
+                        (error (e)
+                          (log:warn "Notification handler error (~a): ~a" method e)))))))
              (error (e)
                (log:warn "Reader loop terminated: ~a" e)
                (setf (transport-running-p transport) nil)

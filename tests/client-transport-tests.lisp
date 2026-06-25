@@ -189,3 +189,80 @@
     (mcp-lisp/src/transport/mcp-stdio:mcp-server-loop handlers :input in :output out)
     (is (eq t seen))
     (is (string= "" (get-output-stream-string out)))))
+
+;;; --- Server->client requests reach the client request handler ---
+;;; A server-initiated request carries BOTH method and id. The reader must route
+;;; it to the request handler and reply — not mistake it for a response (the bug
+;;; that made the stdio client silently drop sampling/elicitation requests).
+
+(test stdio-client-routes-server-request-to-handler
+  "reader-loop dispatches a server-initiated request to the handler, which replies"
+  (let* ((req (mcp-lisp:encode-json
+               (mcp-lisp:make-ht "jsonrpc" "2.0" "id" 7
+                                 "method" "sampling/createMessage"
+                                 "params" (mcp-lisp:make-ht "maxTokens" 8))))
+         (in (make-string-input-stream (format nil "~a~%" req)))
+         (out (make-string-output-stream))
+         (transport (mcp-lisp/src/transport/mcp-client:make-stdio-transport '("true")))
+         (captured-method nil)
+         (sem (bt:make-semaphore)))
+    (setf (mcp-lisp/src/transport/mcp-client::transport-input transport) in
+          (mcp-lisp/src/transport/mcp-client::transport-output transport) out
+          (mcp-lisp/src/transport/protocol:transport-running-p transport) t
+          (mcp-lisp/src/transport/mcp-client:stdio-transport-request-handler transport)
+          (lambda (method params)
+            (declare (ignore params))
+            (setf captured-method method)
+            (bt:signal-semaphore sem)
+            (mcp-lisp:make-ht "model" "test")))
+    ;; reads the request (spawns a handler thread), then hits EOF and returns
+    (mcp-lisp/src/transport/mcp-client::reader-loop transport)
+    (is (bt:wait-on-semaphore sem :timeout 5))
+    (is (string= "sampling/createMessage" captured-method))
+    ;; the handler thread writes a JSON-RPC response back to OUT
+    (let ((written ""))
+      (loop repeat 60
+            do (setf written (concatenate 'string written (get-output-stream-string out)))
+               (when (search "result" written) (return))
+               (sleep 0.05))
+      (is (search "\"id\":7" written))
+      (is (search "result" written)))))
+
+;;; --- Live HTTP end-to-end: server-initiated sampling round-trip ---
+;;; This is the regression guard the original unit test lacked. A buffered SSE
+;;; read deadlocks here (server holds the stream open awaiting our response while
+;;; dex:post buffers the whole body); the incremental reader returns promptly.
+
+(test http-sampling-roundtrip-end-to-end
+  "Server-initiated sampling completes over a live HTTP/SSE transport"
+  (mcp-lisp:define-tool sampling-probe-tool ()
+    "Asks the client to sample and returns the sampled text."
+    (let* ((res (mcp-lisp:tool-sample
+                 (list (mcp-lisp:make-sampling-message "user" "hi")) :max-tokens 8))
+           (content (and (hash-table-p res) (gethash "content" res))))
+      (and (hash-table-p content) (gethash "text" content))))
+  (let ((port 18837))
+    (mcp-lisp:run-server :name "sampling-test" :version "1.0" :transport :sse :port port)
+    (unwind-protect
+         (let ((client (mcp-lisp:make-http-client
+                        (format nil "http://localhost:~a/mcp" port))))
+           (mcp-lisp:client-connect client)
+           (mcp-lisp:client-initialize client)
+           (setf (mcp-lisp:client-request-handler client)
+                 (lambda (method params)
+                   (declare (ignore method params))
+                   (mcp-lisp:make-ht "role" "assistant"
+                                     "content" (mcp-lisp:make-ht "type" "text"
+                                                                 "text" "SAMPLED-OK")
+                                     "model" "test" "stopReason" "endTurn")))
+           ;; A short timeout: a regression to buffered reads fails fast here
+           ;; instead of hanging for the server's 30s stream-call timeout.
+           (let ((r (mcp-lisp:client-call
+                     client "tools/call"
+                     (mcp-lisp:make-ht "name" "sampling_probe_tool"
+                                       "arguments" (mcp-lisp:make-ht))
+                     :timeout 8)))
+             (is (string= "SAMPLED-OK"
+                          (gethash "text" (aref (gethash "content" r) 0)))))
+           (mcp-lisp:client-disconnect client))
+      (mcp-lisp/src/transport/mcp-woo:stop-sse-server))))

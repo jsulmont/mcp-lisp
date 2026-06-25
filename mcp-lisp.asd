@@ -12,6 +12,7 @@
                "log4cl"
                "woo"
                "dexador"
+               "trivial-utf-8"
                "com.inuoe.jzon"
                "cl-ppcre"
                "quri"

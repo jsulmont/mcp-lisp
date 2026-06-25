@@ -19,7 +19,8 @@
                 #:transport-notification-handler)
   (:import-from #:mcp-lisp/src/transport/mcp-client
                 #:stdio-transport
-                #:make-stdio-transport)
+                #:make-stdio-transport
+                #:stdio-transport-request-handler)
   (:import-from #:mcp-lisp/src/transport/mcp-http-client
                 #:http-transport
                 #:make-http-transport
@@ -124,21 +125,24 @@
   (setf (transport-notification-handler (client-transport client)) handler))
 
 (defun client-request-handler (client)
-  "Get the server-request handler for CLIENT (HTTP transport only).
+  "Get the server-request handler for CLIENT (stdio and HTTP transports).
 Used for sampling/createMessage, elicitation/create, etc."
   (let ((transport (client-transport client)))
-    (when (typep transport 'http-transport)
-      (http-transport-request-handler transport))))
+    (typecase transport
+      (http-transport (http-transport-request-handler transport))
+      (stdio-transport (stdio-transport-request-handler transport)))))
 
 (defun (setf client-request-handler) (handler client)
-  "Set the server-request handler for CLIENT (HTTP transport only).
-HANDLER is a function (method params) -> result."
+  "Set the server-request handler for CLIENT.
+HANDLER is a function (method params) -> result, invoked when the server makes a
+request of the client (sampling/createMessage, elicitation/create, ...)."
   (unless (client-connected-p client)
     (error 'mcp-error :message "Client not connected"))
   (let ((transport (client-transport client)))
-    (unless (typep transport 'http-transport)
-      (error 'mcp-error :message "Server-request handler only supported on HTTP transport"))
-    (setf (http-transport-request-handler transport) handler)))
+    (typecase transport
+      (http-transport (setf (http-transport-request-handler transport) handler))
+      (stdio-transport (setf (stdio-transport-request-handler transport) handler))
+      (t (error 'mcp-error :message "Transport does not support server requests")))))
 
 ;;; Lifecycle
 
