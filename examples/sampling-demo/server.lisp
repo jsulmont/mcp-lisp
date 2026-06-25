@@ -145,6 +145,15 @@ If the results don't answer it, say so.~%~%Question: ~a~%~%Results:~%~a"
 
 ;;; --- Start the server ---
 
+;; Only run when the key the research tool needs is available.
+(unless (env "TAVILY_API_KEY")
+  (format t "~&[sampling-demo] TAVILY_API_KEY is not set.~%~
+This demo's `research` tool searches the web with Tavily. Add~%~
+  TAVILY_API_KEY=...~%~
+to the project-root .env (or export it), then start the server again.~%~
+Not starting.~%")
+  (sb-ext:exit :code 0))
+
 (defparameter *port* 8080)
 (format t "~&Sampling demo server on http://localhost:~a/mcp~%" *port*)
 (format t "Run the client:  sbcl --script examples/sampling-demo/client.lisp \"your question\"~%~%")

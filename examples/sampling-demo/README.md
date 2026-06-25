@@ -36,9 +36,20 @@ TAVILY_API_KEY=tvly-...          # used by the SERVER for web search
 
 Keys are read at runtime; they are never written into the code.
 
+**The demo only runs when the keys are present.** If a key is missing (not
+exported and not in `.env`), each piece exits cleanly with a message instead of
+failing mid-run: the server won't start without `TAVILY_API_KEY`, the client
+skips without `ANTHROPIC_API_KEY`, and `run.sh` checks both up front.
+
 ## Run
 
-Two terminals (real client/server separation over Streamable HTTP):
+One command (starts the server, runs the client, tears the server down):
+
+```sh
+examples/sampling-demo/run.sh "What is the Model Context Protocol?"
+```
+
+Or as two processes, for real client/server separation over Streamable HTTP:
 
 ```sh
 # terminal 1 — start the server (listens on http://localhost:8080/mcp)

@@ -131,6 +131,14 @@
                  args)
         "What is the Model Context Protocol and who created it?")))
 
+;; Only run when the SDK key the sampling handler needs is available.
+(unless (env "ANTHROPIC_API_KEY")
+  (format t "~&[sampling-demo] ANTHROPIC_API_KEY is not set.~%~
+This client answers the server's sampling/createMessage by calling Claude. Add~%~
+  ANTHROPIC_API_KEY=...~%~
+to the project-root .env (or export it), then run again. Skipping.~%")
+  (sb-ext:exit :code 0))
+
 (let ((client (make-http-client "http://localhost:8080/mcp")))
   (client-connect client)
   (client-initialize client)
