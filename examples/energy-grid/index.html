@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Energy Grid Dispatch — Spec</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; background: #0d1117; color: #c9d1d9; line-height: 1.6; }
+    .container { max-width: 1100px; margin: 0 auto; padding: 2rem; }
+    h1 { font-size: 1.8rem; margin-bottom: 0.5rem; color: #e6edf3; }
+    h1 span { color: #7ee787; }
+    .subtitle { color: #8b949e; margin-bottom: 2rem; font-size: 0.95rem; }
+    h2 { font-size: 1.3rem; color: #e6edf3; margin: 2.5rem 0 1rem; padding-bottom: 0.5rem; border-bottom: 1px solid #21262d; }
+    .diagram { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1.5rem; margin-bottom: 1.5rem; overflow-x: auto; }
+    .diagram .mermaid { display: flex; justify-content: center; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+    @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
+    .stats { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 2rem; }
+    .stat { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1rem 1.5rem; flex: 1; min-width: 120px; }
+    .stat .num { font-size: 2rem; font-weight: 700; color: #7ee787; }
+    .stat .label { font-size: 0.8rem; color: #8b949e; text-transform: uppercase; letter-spacing: 0.05em; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1><span>Energy Grid</span> Dispatch Spec</h1>
+    <p class="subtitle">5 entities, 21 rules, 25 invariants, 2 scenarios &mdash; generated from behavioral spec</p>
+
+    <div class="stats">
+      <div class="stat"><div class="num">5</div><div class="label">Entities</div></div>
+      <div class="stat"><div class="num">21</div><div class="label">Rules</div></div>
+      <div class="stat"><div class="num">25</div><div class="label">Invariants</div></div>
+      <div class="stat"><div class="num">2</div><div class="label">Scenarios</div></div>
+      <div class="stat"><div class="num">3000</div><div class="label">PBT Trials Passed</div></div>
+    </div>
+
+    <h2>Entity Relationships</h2>
+    <div class="diagram">
+      <pre class="mermaid">
+erDiagram
+    GRID_ZONE ||--o{ GENERATOR : "has many"
+    GRID_ZONE ||--o{ STORAGE_UNIT : "has many"
+    GRID_ZONE ||--o{ DEMAND_RESPONSE_CONTRACT : "has many"
+
+    GRID_ZONE {
+        text id PK
+        text name
+        numeric demand_mw
+        numeric demand_forecast_mw
+        numeric frequency_hz
+        numeric import_limit_mw
+        numeric export_limit_mw
+        numeric transfer_mw
+    }
+
+    GENERATOR {
+        text id PK
+        text name
+        fuel_type fuel_type
+        generator_state state
+        numeric output_mw
+        numeric min_output
+        numeric max_output
+        numeric ramp_rate
+        int min_up_time
+        int min_down_time
+        numeric start_cost
+        numeric marginal_cost
+        numeric emissions_rate
+        int intervals_in_state
+        text grid_zone_id FK
+    }
+
+    STORAGE_UNIT {
+        text id PK
+        text name
+        storage_state state
+        numeric capacity_mwh
+        numeric soc
+        numeric max_charge_rate
+        numeric max_discharge_rate
+        numeric current_rate
+        numeric round_trip_efficiency
+        numeric min_soc
+        numeric max_soc
+        int cycle_count
+        text grid_zone_id FK
+    }
+
+    DEMAND_RESPONSE_CONTRACT {
+        text id PK
+        text customer
+        priority_tier priority_tier
+        numeric curtailable_mw
+        activation_state activation_state
+        int min_notification_intervals
+        int max_curtailment_intervals
+        int intervals_in_state
+        numeric compensation_rate
+        text grid_zone_id FK
+    }
+
+    DISPATCH_INTERVAL {
+        text id PK
+        timestamptz timestamp
+        dispatch_state state
+        numeric total_demand_mw
+        numeric total_generation_mw
+        numeric total_storage_mw
+        numeric total_curtailment_mw
+        numeric system_imbalance_mw
+        numeric system_frequency_hz
+        numeric emissions_tons
+        numeric total_cost
+        numeric reserve_margin_pct
+    }
+      </pre>
+    </div>
+
+    <h2>State Machines</h2>
+    <div class="grid">
+      <div>
+        <h3 style="color:#8b949e; font-size:0.9rem; margin-bottom:0.5rem;">Generator Lifecycle</h3>
+        <div class="diagram">
+          <pre class="mermaid">
+stateDiagram-v2
+    direction LR
+    [*] --> offline
+    offline --> starting : start\n[intervals >= min_down_time]
+    starting --> online : sync\n[intervals >= 2]
+    online --> stopping : stop\n[intervals >= min_up_time]
+    stopping --> offline : complete\n[intervals >= 1]
+    online --> tripped : trip
+    tripped --> offline : clear\n[intervals >= 6]
+          </pre>
+        </div>
+      </div>
+      <div>
+        <h3 style="color:#8b949e; font-size:0.9rem; margin-bottom:0.5rem;">Storage Unit</h3>
+        <div class="diagram">
+          <pre class="mermaid">
+stateDiagram-v2
+    direction LR
+    [*] --> idle
+    idle --> charging : start_charge\n[soc &lt; max_soc]
+    idle --> discharging : start_discharge\n[soc &gt; min_soc]
+    charging --> idle : stop
+    discharging --> idle : stop
+          </pre>
+        </div>
+      </div>
+      <div>
+        <h3 style="color:#8b949e; font-size:0.9rem; margin-bottom:0.5rem;">Demand Response Contract</h3>
+        <div class="diagram">
+          <pre class="mermaid">
+stateDiagram-v2
+    direction LR
+    [*] --> standby
+    standby --> notified : notify
+    notified --> curtailed : activate\n[intervals >= min_notification]
+    curtailed --> restored : release
+    restored --> standby : restore\n[intervals >= 2]
+          </pre>
+        </div>
+      </div>
+      <div>
+        <h3 style="color:#8b949e; font-size:0.9rem; margin-bottom:0.5rem;">Dispatch Interval</h3>
+        <div class="diagram">
+          <pre class="mermaid">
+stateDiagram-v2
+    direction LR
+    [*] --> pending
+    pending --> cleared : clear\n[balanced]
+    pending --> emergency : emergency\n[stress]
+    emergency --> cleared : resolve
+    emergency --> emergency : escalate\n[imbalance &lt; -50]
+    emergency --> blackout : blackout\n[severe deficit]
+    blackout --> pending : restore
+    cleared --> [*]
+          </pre>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: true, theme: 'dark' });
+  </script>
+</body>
+</html>

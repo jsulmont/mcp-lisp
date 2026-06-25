@@ -1,0 +1,10 @@
+stateDiagram-v2
+    direction LR
+    [*] --> pending
+    pending --> cleared : clear\n[|imbalance| ≤ 50\nfreq ∈ [59.95, 60.05]\nreserve ≥ 15%]
+    pending --> emergency : emergency\n[reserve < 7%\nor |imbalance| > 100]
+    emergency --> cleared : resolve
+    emergency --> emergency : escalate\n[imbalance < −50]
+    emergency --> blackout : blackout\n[imbalance < −200\nall DR exhausted]
+    blackout --> pending : restore
+    cleared --> [*]

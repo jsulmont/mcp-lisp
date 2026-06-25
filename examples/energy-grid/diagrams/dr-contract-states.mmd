@@ -1,0 +1,7 @@
+stateDiagram-v2
+    direction LR
+    [*] --> standby
+    standby --> notified : notify
+    notified --> curtailed : activate\n[intervals ≥ min_notification]
+    curtailed --> restored : release
+    restored --> standby : restore\n[intervals ≥ 2]

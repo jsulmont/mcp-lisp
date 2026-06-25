@@ -1,0 +1,9 @@
+stateDiagram-v2
+    direction LR
+    [*] --> offline
+    offline --> starting : start\n[intervals ≥ min_down_time]
+    starting --> online : sync\n[intervals ≥ 2]
+    online --> stopping : stop\n[intervals ≥ min_up_time]
+    stopping --> offline : complete\n[intervals ≥ 1]
+    online --> tripped : trip
+    tripped --> offline : clear\n[intervals ≥ 6]

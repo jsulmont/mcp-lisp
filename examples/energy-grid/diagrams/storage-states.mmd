@@ -1,0 +1,7 @@
+stateDiagram-v2
+    direction LR
+    [*] --> idle
+    idle --> charging : start_charge\n[soc < max_soc]
+    idle --> discharging : start_discharge\n[soc > min_soc]
+    charging --> idle : stop
+    discharging --> idle : stop
