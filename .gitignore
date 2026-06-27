@@ -11,6 +11,8 @@
 *~
 \#*\#
 .DS_Store
-.claude/
+# Keep shared Claude Code config (rules/, skills/, settings.json) tracked;
+# ignore only personal/local overrides.
+.claude/settings.local.json
 experimental/
 .env

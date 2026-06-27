@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "lisp-tools": {
+      "type": "stdio",
+      "command": "sbcl",
+      "args": [
+        "--noinform",
+        "--load",
+        "${MCP_LISP_HOME:-/Users/jan/dev/mcp-lisp}/etc/spec-server.lisp"
+      ],
+      "env": {
+        "ANTHROPIC_API_KEY": "${ANTHROPIC_API_KEY:-}"
+      }
+    }
+  }
+}
