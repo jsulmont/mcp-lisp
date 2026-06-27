@@ -28,7 +28,10 @@
   (let* ((here (make-pathname :directory (pathname-directory this-file)))
          (project-dir (truename (merge-pathnames "../../" here))))
     (eval `(pushnew ,project-dir ,(find-symbol "*CENTRAL-REGISTRY*" "ASDF") :test #'equal))
-    (funcall (find-symbol "LOAD-SYSTEM" "ASDF") :mcp-lisp :verbose nil :print nil)))
+    ;; Muffle the library's compile-time warnings/notes. Real errors still throw.
+    (handler-bind ((warning #'muffle-warning)
+                   #+sbcl (sb-ext:compiler-note #'muffle-warning))
+      (funcall (find-symbol "LOAD-SYSTEM" "ASDF") :mcp-lisp :verbose nil :print nil))))
 
 (defpackage #:escalation-agent-client
   (:use #:cl #:mcp-lisp/main))
@@ -255,28 +258,32 @@ Returns a vector of tool_result blocks."
                (cdr sb-ext:*posix-argv*))
       *default-prompt*))
 
-(unless (env "ANTHROPIC_API_KEY")
-  (format t "~&[escalation-agent] ANTHROPIC_API_KEY is not set.~%~
+(defun run-client (prompt)
+  "Connect to the MCP server, drive the agent loop on PROMPT, print the result."
+  (let ((client (make-http-client "http://localhost:8765/mcp")))
+    (client-connect client)
+    (client-initialize client)
+    (setf (client-notification-handler client) #'on-notification)
+    (client-call client "logging/setLevel" (make-ht "level" "debug"))
+    (unwind-protect
+         (let* ((listing (client-call client "tools/list" (make-ht)))
+                (tools (mcp-tools->anthropic (gethash "tools" listing))))
+           (format t "~&========== Escalation Agent (Exercise 1) ==========~%")
+           (format t "MCP tools exposed: ~{~a~^, ~}~%"
+                   (map 'list (lambda (tl) (gethash "name" tl)) tools))
+           (format t "User: ~a~%~%" prompt)
+           (let ((final (run-loop client tools prompt)))
+             (format t "~%========== Final synthesized response ==========~%~a~%" final)))
+      (client-disconnect client))))
+
+;; Auto-run only as a script. Under SLY/Slynk, loading the file just defines
+;; everything (no connect, no exit) so you can call (run-client …) by hand.
+(unless (find-package '#:slynk)
+  (unless (env "ANTHROPIC_API_KEY")
+    (format t "~&[escalation-agent] ANTHROPIC_API_KEY is not set.~%~
 The client drives the agent loop by calling Claude. Add~%~
   ANTHROPIC_API_KEY=...~%~
 to the project-root .env (or export it), then run again. Skipping.~%")
-  (sb-ext:exit :code 0))
-
-(let ((client (make-http-client "http://localhost:8765/mcp")))
-  (client-connect client)
-  (client-initialize client)
-  (setf (client-notification-handler client) #'on-notification)
-  (client-call client "logging/setLevel" (make-ht "level" "debug"))
-
-  (let* ((listing (client-call client "tools/list" (make-ht)))
-         (tools (mcp-tools->anthropic (gethash "tools" listing))))
-    (format t "~&========== Escalation Agent (Exercise 1) ==========~%")
-    (format t "MCP tools exposed: ~{~a~^, ~}~%"
-            (map 'list (lambda (tl) (gethash "name" tl)) tools))
-    (format t "User: ~a~%~%" *prompt*)
-    (let ((final (run-loop client tools *prompt*)))
-      (format t "~%========== Final synthesized response ==========~%~a~%" final)))
-
-  (client-disconnect client))
-
-(sb-ext:exit)
+    (sb-ext:exit :code 0))
+  (run-client *prompt*)
+  (sb-ext:exit))

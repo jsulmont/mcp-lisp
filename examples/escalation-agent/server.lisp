@@ -28,7 +28,11 @@
   (let* ((here (make-pathname :directory (pathname-directory this-file)))
          (project-dir (truename (merge-pathnames "../../" here))))
     (eval `(pushnew ,project-dir ,(find-symbol "*CENTRAL-REGISTRY*" "ASDF") :test #'equal))
-    (funcall (find-symbol "LOAD-SYSTEM" "ASDF") :mcp-lisp :verbose nil :print nil)))
+    ;; Muffle the library's compile-time warnings/notes (log4cl redefs, woo CFFI
+    ;; note, define-tool's unused-args style-warnings). Real errors still throw.
+    (handler-bind ((warning #'muffle-warning)
+                   #+sbcl (sb-ext:compiler-note #'muffle-warning))
+      (funcall (find-symbol "LOAD-SYSTEM" "ASDF") :mcp-lisp :verbose nil :print nil))))
 
 (defpackage #:escalation-agent-server
   (:use #:cl #:mcp-lisp/main))
@@ -161,7 +165,11 @@ so the agent must notice isRetryable and retry.")
 ;;; --- Start the server ---
 
 (defparameter *port* 8765)
-(format t "~&Escalation-agent MCP server on http://localhost:~a/mcp~%" *port*)
-(format t "Run the client:  sbcl --script examples/escalation-agent/client.lisp \"your message\"~%~%")
-(run-server :name "escalation-agent" :version "1.0.0" :transport :sse :port *port*)
-(loop (sleep 3600))
+
+;; Auto-start only as a script. Under SLY/Slynk, loading the file just defines
+;; the tools (no blocking server) so you can develop interactively.
+(unless (find-package '#:slynk)
+  (format t "~&Escalation-agent MCP server on http://localhost:~a/mcp~%" *port*)
+  (format t "Run the client:  sbcl --script examples/escalation-agent/client.lisp \"your message\"~%~%")
+  (run-server :name "escalation-agent" :version "1.0.0" :transport :sse :port *port*)
+  (loop (sleep 3600)))
