@@ -62,6 +62,7 @@
 (defparameter *max-tokens* 2048)
 (defparameter *max-retries* 2)
 (defvar *api-key* nil)
+(defvar *trace* nil "When set, print the full system/user/assistant exchange per call.")
 
 ;;; --- The extraction spec (step 1: required/optional, enum+other, nullable) ---
 
@@ -215,10 +216,19 @@ Informal mention with missing data:
           when (string= "text" (gethash "type" b))
             do (write-string (gethash "text" b) s))))
 
+(defun trace-request (system messages)
+  (format t "~&================= API EXCHANGE =================~%")
+  (format t "----- system -----~%~a~%" system)
+  (dolist (m messages)
+    (format t "----- ~a -----~%~a~%" (gethash "role" m) (gethash "content" m))))
+
 (defun call-extract (messages &key (schema *schema*) (system *system-prompt*))
   "Call Claude with structured outputs. Returns the JSON extraction text."
-  (response-text (http-post-json "https://api.anthropic.com/v1/messages"
-                                 (message-params messages :schema schema :system system))))
+  (when *trace* (trace-request system messages))
+  (let ((text (response-text (http-post-json "https://api.anthropic.com/v1/messages"
+                                             (message-params messages :schema schema :system system)))))
+    (when *trace* (format t "----- assistant (raw response) -----~%~a~%===============================================~%" text))
+    text))
 
 (defun validate (instance)
   "Returns (:PASS) or (:FAIL \"name\" ...)."
@@ -477,6 +487,7 @@ Returns the batch object."
   (unless *api-key*
     (format *error-output* "No ANTHROPIC_API_KEY in env or project .env~%")
     (uiop:quit 1))
+  (when (uiop:getenv "TRACE") (setf *trace* t))
   (let ((mode (or (first (uiop:command-line-arguments)) "extract")))
     (cond
       ((string= mode "extract") (run-demo))
