@@ -169,7 +169,7 @@ Example:
       `(progn
          (defun ,handler-name (server session ,args-ht-sym)
            ,@(when docstring (list docstring))
-           (declare (ignorable server session))
+           (declare (ignorable server session ,args-ht-sym))
            (let (,@(mapcar (lambda (spec)
                              (generate-extraction-form spec args-ht-sym))
                            parsed-specs))
