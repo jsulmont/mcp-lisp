@@ -26,6 +26,8 @@
            #:*max-tokens*
            #:*verbose*
            #:*confirm-destructive*
+           #:*tool-search*
+           #:*tool-search-keep-loaded*
            #:*last-api-usage*
            #:*session-tokens*
            #:reset-session-tokens
@@ -57,6 +59,18 @@ OPENAI_API_KEY), then key files (~/.groq-key, ~/.anthropic-key, ~/.openai-key)."
 
 (defvar *verbose* t
   "Print agent activity to *standard-output*.")
+
+(defvar *tool-search* nil
+  "Anthropic-only. When non-nil, send the server-side tool search tool and defer
+loading of registry tool definitions, so only the search tool and any
+*tool-search-keep-loaded* tools enter the model's context up front. Value
+selects the variant: :regex (Claude writes regex patterns) or :bm25 (natural
+language queries). nil disables tool search.")
+
+(defvar *tool-search-keep-loaded* nil
+  "List of tool name strings to keep loaded up front (non-deferred) when
+*tool-search* is enabled. All other tools are deferred and discovered on demand
+via search. The search tool itself is always non-deferred.")
 
 ;;; API usage tracking
 
@@ -157,19 +171,49 @@ Not thread-safe — concurrent run-agent calls will clobber each other.")
            "parameters" (or (tool-entry-input-schema tool-entry)
                             (make-ht "type" "object" "properties" (make-ht)))))
 
-(defun tool-to-anthropic-format (tool-entry)
-  "Convert an MCP tool-entry to Anthropic tool format."
-  (make-ht "name" (tool-entry-name tool-entry)
-           "description" (tool-entry-description tool-entry)
-           "input_schema" (or (tool-entry-input-schema tool-entry)
-                              (make-ht "type" "object" "properties" (make-ht)))))
+(defun tool-to-anthropic-format (tool-entry &optional defer)
+  "Convert an MCP tool-entry to Anthropic tool format.
+When DEFER is true, mark the tool defer_loading so it stays out of context until
+the model discovers it via tool search."
+  (let ((ht (make-ht "name" (tool-entry-name tool-entry)
+                     "description" (tool-entry-description tool-entry)
+                     "input_schema" (or (tool-entry-input-schema tool-entry)
+                                        (make-ht "type" "object" "properties" (make-ht))))))
+    (when defer
+      (setf (gethash "defer_loading" ht) t))
+    ht))
+
+(defun tool-search-entry ()
+  "The server-side tool search tool definition for the current *tool-search*."
+  (ecase *tool-search*
+    (:regex (make-ht "type" "tool_search_tool_regex_20251119"
+                     "name" "tool_search_tool_regex"))
+    (:bm25 (make-ht "type" "tool_search_tool_bm25_20251119"
+                    "name" "tool_search_tool_bm25"))))
+
+(defun tools-for-anthropic (registry)
+  "Build the Anthropic tools array, honoring *tool-search*.
+When tool search is enabled, every registry tool not in *tool-search-keep-loaded*
+is deferred, and the search tool is appended last (non-deferred, so it satisfies
+the API's at-least-one-loaded requirement and is safe to mark cacheable)."
+  (let ((entries (get-all-tools registry)))
+    (if *tool-search*
+        (let ((deferred (map 'list
+                             (lambda (e)
+                               (tool-to-anthropic-format
+                                e (not (member (tool-entry-name e)
+                                                *tool-search-keep-loaded*
+                                                :test #'string=))))
+                             entries)))
+          (coerce (append deferred (list (tool-search-entry))) 'vector))
+        (map 'vector #'tool-to-anthropic-format entries))))
 
 (defun get-tools-for-provider (&optional (registry *global-tool-registry*))
   "Get all tools in the format expected by current provider."
-  (let ((converter (ecase *provider*
-                     ((:groq :openai) #'tool-to-openai-format)
-                     (:anthropic #'tool-to-anthropic-format))))
-    (map 'vector converter (get-all-tools registry))))
+  (ecase *provider*
+    ((:groq :openai)
+     (map 'vector #'tool-to-openai-format (get-all-tools registry)))
+    (:anthropic (tools-for-anthropic registry))))
 
 ;;; LLM API calls
 
@@ -421,6 +465,10 @@ Uses stop_reason as the canonical loop control signal:
                 (push (gethash "text" block) text-parts))
                ((string= block-type "tool_use")
                 (push block tool-uses))
+               ((string= block-type "server_tool_use")
+                (when *verbose*
+                  (format t "~%~c[35m[Tool search: ~a]~c[0m~%"
+                          #\Esc (encode-json (gethash "input" block)) #\Esc)))
                ((string= block-type "thinking")
                 (when *verbose*
                   (let ((thinking (gethash "thinking" block)))

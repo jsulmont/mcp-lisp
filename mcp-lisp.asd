@@ -39,6 +39,7 @@
                (:file "define-tool-tests")
                (:file "client-transport-tests")
                (:file "agent-tools-tests")
+               (:file "agent-tests")
                (:file "worker-pool-tests")
                (:file "spec-tests")
                (:file "pbt-tests")
