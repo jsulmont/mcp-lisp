@@ -175,6 +175,9 @@
                 #:*model*
                 #:*max-tokens*
                 #:*verbose*
+                #:*tool-search*
+                #:*tool-search-keep-loaded*
+                #:*transcript*
                 #:*last-api-usage*
                 #:*session-tokens*
                 #:reset-session-tokens
@@ -454,6 +457,9 @@
    #:*model*
    #:*max-tokens*
    #:*verbose*
+   #:*tool-search*
+   #:*tool-search-keep-loaded*
+   #:*transcript*
    #:*last-api-usage*
    #:*session-tokens*
    #:reset-session-tokens

@@ -28,6 +28,7 @@
            #:*confirm-destructive*
            #:*tool-search*
            #:*tool-search-keep-loaded*
+           #:*transcript*
            #:*last-api-usage*
            #:*session-tokens*
            #:reset-session-tokens
@@ -71,6 +72,18 @@ language queries). nil disables tool search.")
   "List of tool name strings to keep loaded up front (non-deferred) when
 *tool-search* is enabled. All other tools are deferred and discovered on demand
 via search. The search tool itself is always non-deferred.")
+
+(defvar *transcript* nil
+  "When set to an output stream, run-agent writes a structured conversation
+transcript to it: the system prompt, each user/assistant turn with its
+stop_reason / finish_reason, tool calls (name + input), tool-search queries, and
+tool results. nil disables. Independent of *verbose*.")
+
+(defun tlog (fmt &rest args)
+  "Write a line to the transcript stream if *transcript* is set."
+  (when *transcript*
+    (apply #'format *transcript* fmt args)
+    (force-output *transcript*)))
 
 ;;; API usage tracking
 
@@ -402,7 +415,7 @@ When *confirm-destructive* is set, non-read-only tools require confirmation."
 
 ;;; Agent loop - Response processing
 
-(defun process-openai-response (response messages)
+(defun process-openai-response (response messages registry)
   "Process OpenAI/Groq response. Returns (values done-p result updated-messages).
 Uses finish_reason as the canonical loop control signal:
   - \"tool_calls\": execute requested tools and continue
@@ -412,6 +425,14 @@ Uses finish_reason as the canonical loop control signal:
          (finish-reason (gethash "finish_reason" choice))
          (content (gethash "content" message))
          (tool-calls (gethash "tool_calls" message)))
+    ;; Transcript: assistant turn with its finish_reason and content.
+    (when *transcript*
+      (tlog "~%[assistant] (finish_reason: ~a)~%" finish-reason)
+      (when content (tlog "~a~%" content))
+      (loop for tc across (or tool-calls #())
+            for func = (gethash "function" tc)
+            do (tlog "  -> tool_call ~a ~a~%"
+                     (gethash "name" func) (gethash "arguments" func))))
     ;; finish_reason is the canonical signal
     (when (string/= finish-reason "tool_calls")
       (return-from process-openai-response
@@ -430,9 +451,10 @@ Uses finish_reason as the canonical loop control signal:
             do (when *verbose*
                  (format t "~%~c[36m[Tool: ~a]~c[0m~%" #\Esc tool-name #\Esc)
                  (format t "Input: ~a~%" args-json))
-               (let ((result (execute-tool tool-name tool-input)))
+               (let ((result (execute-tool tool-name tool-input registry)))
                  (when *verbose*
                    (format t "Result: ~a~%" result))
+                 (tlog "  <- tool_result ~a: ~a~%" tool-name result)
                  (push (make-ht "role" "tool"
                                 "tool_call_id" tool-id
                                 "content" result)
@@ -448,7 +470,7 @@ Uses finish_reason as the canonical loop control signal:
                                     (nreverse tool-results))))
           (values nil nil new-messages))))))
 
-(defun process-anthropic-response (response messages)
+(defun process-anthropic-response (response messages registry)
   "Process Anthropic response. Returns (values done-p result updated-messages).
 Uses stop_reason as the canonical loop control signal:
   - \"tool_use\": execute requested tools and continue
@@ -457,18 +479,33 @@ Uses stop_reason as the canonical loop control signal:
          (stop-reason (gethash "stop_reason" response))
          (tool-uses nil)
          (text-parts nil))
+    ;; Transcript header before the blocks, then log each block in its real
+    ;; array order (text / tool_search / tool_use interleave as the model emits
+    ;; them) — collecting-then-printing would reorder them.
+    (tlog "~%[assistant] (stop_reason: ~a)~%" stop-reason)
     ;; Collect text, tool uses, and thinking blocks
     (loop for block across content
           for block-type = (gethash "type" block)
           do (cond
                ((string= block-type "text")
-                (push (gethash "text" block) text-parts))
+                (push (gethash "text" block) text-parts)
+                (tlog "~a~%" (gethash "text" block)))
                ((string= block-type "tool_use")
-                (push block tool-uses))
+                (push block tool-uses)
+                (tlog "  -> tool_use ~a ~a~%"
+                      (gethash "name" block) (encode-json (gethash "input" block))))
                ((string= block-type "server_tool_use")
+                (tlog "  ~~ tool_search ~a~%" (encode-json (gethash "input" block)))
                 (when *verbose*
                   (format t "~%~c[35m[Tool search: ~a]~c[0m~%"
                           #\Esc (encode-json (gethash "input" block)) #\Esc)))
+               ((string= block-type "tool_search_tool_result")
+                (let ((c (gethash "content" block)))
+                  (when (hash-table-p c)
+                    (let ((refs (gethash "tool_references" c)))
+                      (when refs
+                        (tlog "  ~~ tool_search found: ~{~a~^, ~}~%"
+                              (map 'list (lambda (r) (gethash "tool_name" r)) refs)))))))
                ((string= block-type "thinking")
                 (when *verbose*
                   (let ((thinking (gethash "thinking" block)))
@@ -493,9 +530,10 @@ Uses stop_reason as the canonical loop control signal:
           (when *verbose*
             (format t "~%~c[36m[Tool: ~a]~c[0m~%" #\Esc tool-name #\Esc)
             (format t "Input: ~a~%" (encode-json tool-input)))
-          (let ((result (execute-tool tool-name tool-input)))
+          (let ((result (execute-tool tool-name tool-input registry)))
             (when *verbose*
               (format t "Result: ~a~%" result))
+            (tlog "  <- tool_result ~a: ~a~%" tool-name result)
             (push (make-ht "type" "tool_result"
                            "tool_use_id" tool-id
                            "content" result)
@@ -506,13 +544,13 @@ Uses stop_reason as the canonical loop control signal:
              (new-messages (append messages (list assistant-msg user-msg))))
         (values nil nil new-messages)))))
 
-(defun process-response (response messages)
-  "Process LLM response based on provider."
+(defun process-response (response messages registry)
+  "Process LLM response based on provider. Tools are executed against REGISTRY."
   (ecase *provider*
     ((:groq :openai)
-     (process-openai-response response messages))
+     (process-openai-response response messages registry))
     (:anthropic
-     (process-anthropic-response response messages))))
+     (process-anthropic-response response messages registry))))
 
 (defun filter-registry (allowed-tools &optional (source *global-tool-registry*))
   "Create a new registry containing only ALLOWED-TOOLS from SOURCE."
@@ -551,6 +589,13 @@ RESET-TOKENS: if nil, preserves the running token count (for nested agents)."
       (format t "~%[Provider: ~a, Model: ~a]~%" *provider* (or *model* (default-model *provider*)))
       (format t "[Tools available: ~{~a~^, ~}]~%"
               (mapcar #'tool-entry-name (get-all-tools effective-registry))))
+    (when *transcript*
+      (tlog "~&========== AGENT TRANSCRIPT ==========~%")
+      (tlog "[meta] provider=~a model=~a tool_search=~a tools=~d~%"
+            *provider* (or *model* (default-model *provider*)) *tool-search*
+            (length (get-all-tools effective-registry)))
+      (when system (tlog "~%[system]~%~a~%" system))
+      (tlog "~%[user]~%~a~%" prompt))
     (loop for i from 1 to max-iterations
           for token-exceeded = (and token-budget
                                     (> (session-tokens-used) (* token-budget 0.85)))
@@ -570,6 +615,10 @@ RESET-TOKENS: if nil, preserves the running token count (for nested agents)."
              ;; On wind-down, strip tools and inject synthesis instruction
              (when (and winding-down (not (eq current-tool-choice :none)))
                (setf current-tool-choice :none)
+               (tlog "~%[user] (wind-down: ~a) Synthesize your final answer now.~%"
+                     (cond (token-exceeded "token budget")
+                           (calls-exceeded "call budget")
+                           (t "final iteration")))
                (setf messages
                      (append messages
                              (list (make-ht "role" "user"
@@ -580,14 +629,16 @@ RESET-TOKENS: if nil, preserves the running token count (for nested agents)."
                (when (and current-tool-choice (not (eq current-tool-choice :none)))
                  (setf current-tool-choice nil))
                (multiple-value-bind (done-p result new-messages)
-                   (process-response response messages)
+                   (process-response response messages effective-registry)
                  (if done-p
                      (progn
                        (when *verbose*
                          (format t "~%Assistant: ~a~%" result))
+                       (tlog "~%========== END (~d iteration~:p) ==========~%" i)
                        (return result))
                      (setf messages new-messages))))
-          finally (return "Max iterations reached"))))
+          finally (tlog "~%========== END (max iterations) ==========~%")
+                  (return "Max iterations reached"))))
 
 ;;; Convenience function
 
