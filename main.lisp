@@ -177,6 +177,7 @@
                 #:*verbose*
                 #:*tool-search*
                 #:*tool-search-keep-loaded*
+                #:*tool-search-defer-only*
                 #:*transcript*
                 #:*last-api-usage*
                 #:*session-tokens*
@@ -459,6 +460,7 @@
    #:*verbose*
    #:*tool-search*
    #:*tool-search-keep-loaded*
+   #:*tool-search-defer-only*
    #:*transcript*
    #:*last-api-usage*
    #:*session-tokens*

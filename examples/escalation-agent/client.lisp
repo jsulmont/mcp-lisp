@@ -258,23 +258,23 @@ Returns a vector of tool_result blocks."
                (cdr sb-ext:*posix-argv*))
       *default-prompt*))
 
-(defun run-client (prompt)
-  "Connect to the MCP server, drive the agent loop on PROMPT, print the result."
-  (let ((client (make-http-client "http://localhost:8765/mcp")))
-    (client-connect client)
-    (client-initialize client)
-    (setf (client-notification-handler client) #'on-notification)
-    (client-call client "logging/setLevel" (make-ht "level" "debug"))
-    (unwind-protect
-         (let* ((listing (client-call client "tools/list" (make-ht)))
-                (tools (mcp-tools->anthropic (gethash "tools" listing))))
-           (format t "~&========== Escalation Agent (Exercise 1) ==========~%")
-           (format t "MCP tools exposed: ~{~a~^, ~}~%"
-                   (map 'list (lambda (tl) (gethash "name" tl)) tools))
-           (format t "User: ~a~%~%" prompt)
-           (let ((final (run-loop client tools prompt)))
-             (format t "~%========== Final synthesized response ==========~%~a~%" final)))
-      (client-disconnect client))))
+(let ((client (make-http-client "http://localhost:8765/mcp")))
+  (client-connect client)
+  (client-initialize client)
+  (setf (client-notification-handler client) #'on-notification)
+  (client-call client "logging/setLevel" (make-ht "level" "debug")) (defun run-client (prompt)
+                                                                      "Connect to the MCP server, drive the agent loop on PROMPT, print the result."
+
+                                                                      (unwind-protect
+                                                                           (let* ((listing (client-call client "tools/list" (make-ht)))
+                                                                                  (tools (mcp-tools->anthropic (gethash "tools" listing))))
+                                                                             (format t "~&========== Escalation Agent (Exercise 1) ==========~%")
+                                                                             (format t "MCP tools exposed: ~{~a~^, ~}~%"
+                                                                                     (map 'list (lambda (tl) (gethash "name" tl)) tools))
+                                                                             (format t "User: ~a~%~%" prompt)
+                                                                             (let ((final (run-loop client tools prompt)))
+                                                                               (format t "~%========== Final synthesized response ==========~%~a~%" final)))
+                                                                        (client-disconnect client))))
 
 ;; Auto-run only as a script. Under SLY/Slynk, loading the file just defines
 ;; everything (no connect, no exit) so you can call (run-client …) by hand.

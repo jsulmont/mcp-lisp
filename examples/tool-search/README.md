@@ -55,6 +55,12 @@ examples/tool-search/run.sh "List my buckets and report the size of backups-prod
 ```
 
 `run.sh` checks the server is up (`/health`) and then runs the client.
+
+**From a REPL (Sly/SLIME):** `(load ".../client.lisp")` just defines things when
+slynk is present — it won't auto-run or exit. Call `(tool-search-client::main)`
+or `(tool-search-client::main "your prompt")` by hand; it returns `T`/`NIL` and
+never kills the image. (The server must already be running.)
+
 `*verbose*` is on, so the client prints `[Tool search: ...]` and `[Tool: ...]`
 lines as the model searches and calls tools, then a final answer and token-usage
 summary. Watch both terminals: the client shows the agent's view, the server

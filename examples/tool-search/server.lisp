@@ -12,23 +12,28 @@
 ;;;; Each tool call is printed to THIS terminal via SLOG, so you can see exactly
 ;;;; what the agent invokes, in order, with arguments and results.
 
-(let ((*standard-output* (make-broadcast-stream))
-      (*trace-output* (make-broadcast-stream))
-      (*error-output* *error-output*)
-      (this-file (or *load-truename* *default-pathname-defaults*)))
-  (let ((ql-setup (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname))))
-    (when (probe-file ql-setup)
-      (load ql-setup)))
-  (require :asdf)
-  (let* ((examples-dir (make-pathname :directory (pathname-directory this-file)))
-         (project-dir (truename (merge-pathnames "../../" examples-dir))))
-    (eval `(pushnew ,project-dir ,(find-symbol "*CENTRAL-REGISTRY*" "ASDF") :test #'equal))
-    ;; Muffle the library's compile-time warnings/notes (log4cl redefs, the
-    ;; woo +SF-MNOWAIT+ CFFI note on macOS, define-tool unused-args). Real
-    ;; errors still throw.
-    (handler-bind ((warning #'muffle-warning)
-                   #+sbcl (sb-ext:compiler-note #'muffle-warning))
-      (funcall (find-symbol "LOAD-SYSTEM" "ASDF") :mcp-lisp :verbose nil :print nil))))
+;; Wrapped in eval-when so mcp-lisp (the MCP-LISP/MAIN package) loads at compile
+;; time too — Sly's C-c C-k (compile-file) reaches the defpackage below before
+;; load-time forms run. *compile-file-truename* covers the compile-file case.
+(eval-when (:compile-toplevel :load-toplevel :execute)
+  (let ((*standard-output* (make-broadcast-stream))
+        (*trace-output* (make-broadcast-stream))
+        (*error-output* *error-output*)
+        (this-file (or *load-truename* *compile-file-truename*
+                       *default-pathname-defaults*)))
+    (let ((ql-setup (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname))))
+      (when (probe-file ql-setup)
+        (load ql-setup)))
+    (require :asdf)
+    (let* ((examples-dir (make-pathname :directory (pathname-directory this-file)))
+           (project-dir (truename (merge-pathnames "../../" examples-dir))))
+      (eval `(pushnew ,project-dir ,(find-symbol "*CENTRAL-REGISTRY*" "ASDF") :test #'equal))
+      ;; Muffle the library's compile-time warnings/notes (log4cl redefs, the
+      ;; woo +SF-MNOWAIT+ CFFI note on macOS, define-tool unused-args). Real
+      ;; errors still throw.
+      (handler-bind ((warning #'muffle-warning)
+                     #+sbcl (sb-ext:compiler-note #'muffle-warning))
+        (funcall (find-symbol "LOAD-SYSTEM" "ASDF") :mcp-lisp :verbose nil :print nil)))))
 
 (defpackage #:tool-search-server
   (:use #:cl #:mcp-lisp/main))

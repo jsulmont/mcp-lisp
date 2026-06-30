@@ -28,6 +28,7 @@
            #:*confirm-destructive*
            #:*tool-search*
            #:*tool-search-keep-loaded*
+           #:*tool-search-defer-only*
            #:*transcript*
            #:*last-api-usage*
            #:*session-tokens*
@@ -72,6 +73,12 @@ language queries). nil disables tool search.")
   "List of tool name strings to keep loaded up front (non-deferred) when
 *tool-search* is enabled. All other tools are deferred and discovered on demand
 via search. The search tool itself is always non-deferred.")
+
+(defvar *tool-search-defer-only* nil
+  "When *tool-search* is enabled and this is a non-empty list of tool name
+strings, defer ONLY those tools and load every other tool up front. Takes
+precedence over *tool-search-keep-loaded*. nil falls back to keep-loaded
+semantics (defer everything except keep-loaded).")
 
 (defvar *transcript* nil
   "When set to an output stream, run-agent writes a structured conversation
@@ -204,21 +211,31 @@ the model discovers it via tool search."
     (:bm25 (make-ht "type" "tool_search_tool_bm25_20251119"
                     "name" "tool_search_tool_bm25"))))
 
+(defun defer-tool-p (name)
+  "Whether tool NAME should be deferred under the current tool-search config.
+*tool-search-defer-only*, when set, names exactly the tools to defer; otherwise
+everything except *tool-search-keep-loaded* is deferred."
+  (if *tool-search-defer-only*
+      (and (member name *tool-search-defer-only* :test #'string=) t)
+      (not (member name *tool-search-keep-loaded* :test #'string=))))
+
 (defun tools-for-anthropic (registry)
   "Build the Anthropic tools array, honoring *tool-search*.
-When tool search is enabled, every registry tool not in *tool-search-keep-loaded*
-is deferred, and the search tool is appended last (non-deferred, so it satisfies
-the API's at-least-one-loaded requirement and is safe to mark cacheable)."
+When tool search is enabled, tools are deferred per DEFER-TOOL-P and the search
+tool is appended last (non-deferred, so it satisfies the API's at-least-one-loaded
+requirement and is safe to mark cacheable)."
   (let ((entries (get-all-tools registry)))
     (if *tool-search*
-        (let ((deferred (map 'list
-                             (lambda (e)
-                               (tool-to-anthropic-format
-                                e (not (member (tool-entry-name e)
-                                                *tool-search-keep-loaded*
-                                                :test #'string=))))
-                             entries)))
-          (coerce (append deferred (list (tool-search-entry))) 'vector))
+        (progn
+          (when (and *tool-search-defer-only* *tool-search-keep-loaded*)
+            (warn "Both *tool-search-defer-only* and *tool-search-keep-loaded* are ~
+set; *tool-search-keep-loaded* is ignored (defer-only takes precedence)."))
+          (let ((deferred (map 'list
+                               (lambda (e)
+                                 (tool-to-anthropic-format
+                                  e (defer-tool-p (tool-entry-name e))))
+                               entries)))
+            (coerce (append deferred (list (tool-search-entry))) 'vector)))
         (map 'vector #'tool-to-anthropic-format entries))))
 
 (defun get-tools-for-provider (&optional (registry *global-tool-registry*))
@@ -435,6 +452,8 @@ Uses finish_reason as the canonical loop control signal:
                      (gethash "name" func) (gethash "arguments" func))))
     ;; finish_reason is the canonical signal
     (when (string/= finish-reason "tool_calls")
+      (when (equal finish-reason "length")
+        (warn "Agent stopped with finish_reason \"length\"; output truncated."))
       (return-from process-openai-response
         (values t (or content "") messages)))
     ;; Print thinking if verbose
@@ -512,11 +531,33 @@ Uses stop_reason as the canonical loop control signal:
                     (when thinking
                       (format t "~%~c[90m[Thinking: ~a chars]~c[0m~%"
                               #\Esc (length thinking) #\Esc)))))))
-    ;; stop_reason is the canonical signal — not presence/absence of tool_use blocks
-    (when (string/= stop-reason "tool_use")
-      (let ((final-text (format nil "~{~a~^~%~}" (nreverse text-parts))))
-        (return-from process-anthropic-response
-          (values t final-text messages))))
+    ;; Dispatch on stop_reason (tool_use falls through to execution below):
+    ;;  - pause_turn: a server-side tool loop (e.g. tool search) hit its
+    ;;    iteration cap. Resume by re-sending the assistant turn unchanged, with
+    ;;    NO new user message — the API detects the trailing server_tool_use and
+    ;;    continues. Terminating here would drop the turn with partial/empty text.
+    ;;  - max_tokens / refusal: terminal but lossy — surface it instead of
+    ;;    silently returning a truncated/empty answer as success.
+    ;;  - end_turn / stop_sequence / anything else: terminal, return final text.
+    (cond
+      ((string= stop-reason "tool_use"))    ; fall through to tool execution
+      ((string= stop-reason "pause_turn")
+       (when *verbose*
+         (format t "~%[pause_turn: resuming server-side tool loop]~%"))
+       (tlog "  ~~ pause_turn — resuming~%")
+       (return-from process-anthropic-response
+         (values nil nil
+                 (append messages
+                         (list (make-ht "role" "assistant" "content" content))))))
+      (t
+       (when (member stop-reason '("max_tokens" "refusal") :test #'string=)
+         (warn "Agent stopped with stop_reason ~s; output may be incomplete or refused."
+               stop-reason)
+         (when *verbose*
+           (format t "~%[stop_reason: ~a — output may be incomplete]~%" stop-reason)))
+       (let ((final-text (format nil "~{~a~^~%~}" (nreverse text-parts))))
+         (return-from process-anthropic-response
+           (values t final-text messages)))))
     ;; Print text content if verbose
     (when (and *verbose* text-parts)
       (format t "~%~a~%" (format nil "~{~a~^~%~}" (nreverse text-parts))))
